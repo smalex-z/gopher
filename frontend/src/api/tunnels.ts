@@ -7,4 +7,5 @@ export const tunnelsApi = {
   create: (data: Partial<Tunnel>) => client.post<ApiResponse<Tunnel>>('/tunnels/', data).then(r => r.data),
   update: (id: string, data: Partial<Tunnel>) => client.put<ApiResponse<Tunnel>>(`/tunnels/${id}`, data).then(r => r.data),
   delete: (id: string) => client.delete(`/tunnels/${id}`).then(r => r.data),
+  test: (id: string) => client.post(`/tunnels/${id}/test`).then(r => r.data),
 }
