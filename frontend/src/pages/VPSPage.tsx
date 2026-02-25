@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Copy, Check } from 'lucide-react'
 import { vpsApi } from '../api/vps'
 import StatusBadge from '../components/StatusBadge'
 import DeployLogModal from '../components/DeployLogModal'
@@ -30,6 +31,14 @@ export default function VPSPage() {
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [testLoading, setTestLoading] = useState(false)
   const [deployModal, setDeployModal] = useState<DeployModal>({ isOpen: false, title: '', action: async () => {} })
+  const [keyCopied, setKeyCopied] = useState(false)
+
+  const copyKey = (key: string) => {
+    navigator.clipboard.writeText(key).then(() => {
+      setKeyCopied(true)
+      setTimeout(() => setKeyCopied(false), 2000)
+    })
+  }
 
   const { data: vpsData, isLoading } = useQuery({
     queryKey: ['vps'],
@@ -212,6 +221,28 @@ export default function VPSPage() {
           <div><span className="text-gray-500">Username:</span> <span className="font-medium">{vps.username}</span></div>
           <div><span className="text-gray-500">Domain:</span> <span className="font-medium">{vps.domain}</span></div>
         </div>
+
+        {vps.ssh_public_key && (
+          <div className="mb-4">
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-sm font-medium text-gray-700">VPS SSH Public Key</label>
+              <button
+                onClick={() => copyKey(vps.ssh_public_key)}
+                className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700"
+              >
+                {keyCopied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+                {keyCopied ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
+            <textarea
+              readOnly
+              value={vps.ssh_public_key}
+              rows={2}
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs font-mono bg-gray-50 text-gray-600 resize-none focus:outline-none"
+            />
+            <p className="text-xs text-gray-400 mt-1">This key is automatically installed on machines during bootstrap.</p>
+          </div>
+        )}
 
         {testResult && (
           <div className={`text-sm px-3 py-2 rounded-lg mb-4 ${testResult.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>

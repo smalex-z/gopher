@@ -120,3 +120,54 @@ return path[:i]
 }
 return "."
 }
+
+// NewClientViaJump creates an SSH client to a machine by jumping through the VPS.
+// It connects to VPS first, then dials the machine's tunnel port on VPS localhost,
+// and authenticates using the VPS-generated SSH keypair installed on the machine.
+func NewClientViaJump(vpsHost string, vpsPort int, vpsUsername, vpsPrivateKey string,
+machineUsername, machineSSHPrivateKey string, tunnelPort int) (*SSHClient, error) {
+
+vpsSigner, err := ssh.ParsePrivateKey([]byte(vpsPrivateKey))
+if err != nil {
+return nil, fmt.Errorf("failed to parse VPS private key: %w", err)
+}
+vpsConfig := &ssh.ClientConfig{
+User:            vpsUsername,
+Auth:            []ssh.AuthMethod{ssh.PublicKeys(vpsSigner)},
+HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+Timeout:         30 * time.Second,
+}
+vpsAddr := net.JoinHostPort(vpsHost, fmt.Sprintf("%d", vpsPort))
+vpsClient, err := ssh.Dial("tcp", vpsAddr, vpsConfig)
+if err != nil {
+return nil, fmt.Errorf("failed to dial VPS: %w", err)
+}
+
+tunnelAddr := fmt.Sprintf("localhost:%d", tunnelPort)
+tunnelConn, err := vpsClient.Dial("tcp", tunnelAddr)
+if err != nil {
+vpsClient.Close()
+return nil, fmt.Errorf("failed to dial machine tunnel on VPS: %w", err)
+}
+
+machineSigner, err := ssh.ParsePrivateKey([]byte(machineSSHPrivateKey))
+if err != nil {
+tunnelConn.Close()
+vpsClient.Close()
+return nil, fmt.Errorf("failed to parse machine SSH private key: %w", err)
+}
+machineConfig := &ssh.ClientConfig{
+User:            machineUsername,
+Auth:            []ssh.AuthMethod{ssh.PublicKeys(machineSigner)},
+HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+Timeout:         30 * time.Second,
+}
+ncc, chans, reqs, err := ssh.NewClientConn(tunnelConn, tunnelAddr, machineConfig)
+if err != nil {
+tunnelConn.Close()
+vpsClient.Close()
+return nil, fmt.Errorf("failed to create SSH conn through tunnel: %w", err)
+}
+
+return &SSHClient{client: ssh.NewClient(ncc, chans, reqs)}, nil
+}

@@ -9,3 +9,9 @@ default_token = "changeme"
 token = "{{.ID}}"
 bind_addr = "0.0.0.0:{{.RatholePort}}"
 {{end}}
+{{range .Machines}}{{if .RatholeSSHToken}}
+[server.services.machine-{{.ID}}-ssh]
+type = "tcp"
+token = "{{.RatholeSSHToken}}"
+bind_addr = "0.0.0.0:{{.TunnelPort}}"
+{{end}}{{end}}

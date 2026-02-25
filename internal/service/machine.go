@@ -94,7 +94,15 @@ if err != nil {
 return nil, err
 }
 
-client, err := sshpkg.NewClient(machine.Host, machine.Port, machine.Username, machine.PrivateKey)
+vps, _ := db.GetVPS()
+
+var client *sshpkg.SSHClient
+if vps != nil && machine.TunnelPort > 0 && vps.SSHPrivateKey != "" {
+client, err = sshpkg.NewClientViaJump(vps.Host, vps.Port, vps.Username, vps.PrivateKey,
+machine.Username, vps.SSHPrivateKey, machine.TunnelPort)
+} else {
+client, err = sshpkg.NewClient(machine.Host, machine.Port, machine.Username, machine.PrivateKey)
+}
 if err != nil {
 return map[string]interface{}{
 "id":        id,

@@ -9,4 +9,5 @@ export const vpsApi = {
   bootstrap: () => client.post('/vps/bootstrap').then(r => r.data),
   deploy: () => client.post('/vps/deploy').then(r => r.data),
   status: () => client.get('/vps/status').then(r => r.data),
+  generateToken: () => client.post<ApiResponse<{ token: string; bootstrap_command: string; expires_at: string }>>('/bootstrap/token').then(r => r.data),
 }

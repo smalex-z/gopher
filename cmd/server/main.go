@@ -24,14 +24,15 @@ if err := db.Initialize(*dbPath); err != nil {
 log.Fatalf("Failed to initialize database: %v", err)
 }
 
-deploySvc := service.NewDeployService()
-vpsSvc := service.NewVPSService(deploySvc)
-machineSvc := service.NewMachineService(deploySvc)
-tunnelSvc := service.NewTunnelService()
-monitorSvc := service.NewMonitorService()
-monitorSvc.Start()
+	deploySvc := service.NewDeployService()
+	vpsSvc := service.NewVPSService(deploySvc)
+	machineSvc := service.NewMachineService(deploySvc)
+	tunnelSvc := service.NewTunnelService()
+	bootstrapSvc := service.NewBootstrapService(deploySvc)
+	monitorSvc := service.NewMonitorService()
+	monitorSvc.Start()
 
-router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc)
+	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc)
 
 mux := http.NewServeMux()
 mux.Handle("/api/", router)

@@ -96,7 +96,13 @@ fmt.Fprintf(w, "ERROR: Failed to generate Caddyfile: %v\n", err)
 return err
 }
 
-ratholeConfig, err := config.GenerateServerConfig(tunnels)
+machines, err := db.GetMachines()
+if err != nil {
+fmt.Fprintf(w, "ERROR: Failed to get machines: %v\n", err)
+return err
+}
+
+ratholeConfig, err := config.GenerateServerConfig(tunnels, machines)
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to generate rathole config: %v\n", err)
 return err
@@ -126,7 +132,15 @@ fmt.Fprintf(w, "ERROR: Failed to generate client config: %v\n", err)
 return err
 }
 
-client, err := sshpkg.NewClient(machine.Host, machine.Port, machine.Username, machine.PrivateKey)
+var client *sshpkg.SSHClient
+if machine.TunnelPort > 0 && vpsConfig.SSHPrivateKey != "" {
+fmt.Fprintln(w, "Connecting via VPS jump tunnel...")
+client, err = sshpkg.NewClientViaJump(vpsConfig.Host, vpsConfig.Port, vpsConfig.Username, vpsConfig.PrivateKey,
+machine.Username, vpsConfig.SSHPrivateKey, machine.TunnelPort)
+} else {
+fmt.Fprintln(w, "Connecting directly to machine...")
+client, err = sshpkg.NewClient(machine.Host, machine.Port, machine.Username, machine.PrivateKey)
+}
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to connect to machine: %v\n", err)
 return err

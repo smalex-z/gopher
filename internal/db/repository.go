@@ -132,3 +132,41 @@ return nil, fmt.Errorf("failed to get tunnels: %w", err)
 }
 return tunnels, nil
 }
+
+// Bootstrap Token Repository
+
+func CreateBootstrapToken(t *BootstrapToken) error {
+return DB.Create(t).Error
+}
+
+func GetBootstrapToken(token string) (*BootstrapToken, error) {
+var bt BootstrapToken
+if err := DB.Where("token = ?", token).First(&bt).Error; err != nil {
+if err == gorm.ErrRecordNotFound {
+return nil, &apperrors.NotFoundError{Resource: "bootstrap_token", ID: token}
+}
+return nil, err
+}
+return &bt, nil
+}
+
+func MarkTokenUsed(tokenID, machineID string) error {
+return DB.Model(&BootstrapToken{}).Where("id = ?", tokenID).Updates(map[string]interface{}{
+"used_at":    DB.NowFunc(),
+"machine_id": machineID,
+}).Error
+}
+
+func NextSSHTunnelPort() (int, error) {
+var m Machine
+if err := DB.Order("tunnel_port DESC").First(&m).Error; err != nil {
+if err == gorm.ErrRecordNotFound {
+return 6000, nil
+}
+return 0, err
+}
+if m.TunnelPort == 0 {
+return 6000, nil
+}
+return m.TunnelPort + 1, nil
+}

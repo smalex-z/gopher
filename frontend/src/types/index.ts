@@ -5,6 +5,7 @@ export interface VPSConfig {
   username: string
   private_key: string
   domain: string
+  ssh_public_key: string
   created_at: string
   updated_at: string
 }
@@ -12,10 +13,12 @@ export interface VPSConfig {
 export interface Machine {
   id: string
   name: string
-  host: string
-  port: number
+  host?: string
+  port?: number
   username: string
-  private_key: string
+  private_key?: string
+  tunnel_port: number
+  rathole_ssh_token?: string
   status: string
   last_seen: string | null
   created_at: string

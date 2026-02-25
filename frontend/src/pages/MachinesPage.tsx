@@ -1,37 +1,25 @@
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Server } from 'lucide-react'
+import { Server, Copy, Check } from 'lucide-react'
 import { machinesApi } from '../api/machines'
+import { vpsApi } from '../api/vps'
 import StatusBadge from '../components/StatusBadge'
 import DeployLogModal from '../components/DeployLogModal'
 import { toast } from '../lib/toast'
 import type { Machine } from '../types'
 
-interface ModalState { isOpen: boolean; mode: 'add' | 'edit'; editId: string }
+interface BootstrapModal { isOpen: boolean; command: string; token: string; expiresAt: string }
 interface DeployModalState { isOpen: boolean; machineId: string; machineName: string }
-interface FormState { name: string; host: string; port: number; username: string; private_key: string }
-
-const defaultForm: FormState = { name: '', host: '', port: 22, username: 'root', private_key: '' }
 
 export default function MachinesPage() {
   const qc = useQueryClient()
-  const [modal, setModal] = useState<ModalState>({ isOpen: false, mode: 'add', editId: '' })
+  const [bootstrapModal, setBootstrapModal] = useState<BootstrapModal>({ isOpen: false, command: '', token: '', expiresAt: '' })
   const [deployModal, setDeployModal] = useState<DeployModalState>({ isOpen: false, machineId: '', machineName: '' })
-  const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({})
-  const [form, setForm] = useState<FormState>(defaultForm)
+  const [copied, setCopied] = useState(false)
+  const [tokenLoading, setTokenLoading] = useState(false)
 
   const { data, isLoading } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list() })
   const machines: Machine[] = data?.data ?? []
-
-  const createMutation = useMutation({
-    mutationFn: (d: Partial<Machine>) => machinesApi.create(d),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['machines'] })
-      setModal(m => ({ ...m, isOpen: false }))
-      toast.success('Machine added!')
-    },
-    onError: (e: Error) => toast.error(e.message),
-  })
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => machinesApi.delete(id),
@@ -42,27 +30,36 @@ export default function MachinesPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
-  const testMachine = async (id: string) => {
+  const generateToken = async () => {
+    setTokenLoading(true)
     try {
-      const result = await machinesApi.status(id)
-      setTestResults(r => ({ ...r, [id]: { ok: true, message: result?.message ?? 'Reachable' } }))
+      const result = await vpsApi.generateToken()
+      if (result?.data) {
+        setBootstrapModal({
+          isOpen: true,
+          command: result.data.bootstrap_command,
+          token: result.data.token,
+          expiresAt: result.data.expires_at,
+        })
+      }
     } catch (err) {
-      setTestResults(r => ({ ...r, [id]: { ok: false, message: err instanceof Error ? err.message : 'Failed' } }))
+      toast.error(err instanceof Error ? err.message : 'Failed to generate token')
+    } finally {
+      setTokenLoading(false)
     }
   }
 
-  const openDeployModal = (id: string, name: string) => {
-    setDeployModal({ isOpen: true, machineId: id, machineName: name })
+  const copyCommand = () => {
+    navigator.clipboard.writeText(bootstrapModal.command).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
   }
 
   const handleDelete = (id: string) => {
     if (window.confirm('Are you sure you want to delete this machine?')) {
       deleteMutation.mutate(id)
     }
-  }
-
-  const handleSave = () => {
-    createMutation.mutate(form)
   }
 
   if (isLoading) return <div className="text-gray-400 text-center py-12">Loading...</div>
@@ -72,22 +69,30 @@ export default function MachinesPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Machines</h1>
-          <p className="text-gray-500 mt-1">Linux servers running the rathole tunnel client</p>
+          <p className="text-gray-500 mt-1">Linux servers registered via bootstrap tunnel</p>
         </div>
-        <button onClick={() => { setForm(defaultForm); setModal({ isOpen: true, mode: 'add', editId: '' }) }}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium">
-          + Add Machine
+        <button
+          onClick={generateToken}
+          disabled={tokenLoading}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50"
+        >
+          {tokenLoading ? 'Generating...' : '+ Bootstrap New Machine'}
         </button>
       </div>
 
       {machines.length === 0 ? (
         <div className="bg-white rounded-xl shadow-sm border p-12 text-center">
           <Server className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-          <h2 className="text-lg font-semibold text-gray-700 mb-2">No machines added yet</h2>
-          <p className="text-gray-400 text-sm mb-6 max-w-sm mx-auto">Machines are Linux servers on your local network that run the rathole tunnel client</p>
-          <button onClick={() => { setForm(defaultForm); setModal({ isOpen: true, mode: 'add', editId: '' }) }}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium">
-            Add Your First Machine
+          <h2 className="text-lg font-semibold text-gray-700 mb-2">No machines registered yet</h2>
+          <p className="text-gray-400 text-sm mb-6 max-w-sm mx-auto">
+            Generate a bootstrap token and run the script on any machine to register it automatically via reverse SSH tunnel.
+          </p>
+          <button
+            onClick={generateToken}
+            disabled={tokenLoading}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50"
+          >
+            {tokenLoading ? 'Generating...' : 'Generate Bootstrap Token'}
           </button>
         </div>
       ) : (
@@ -95,7 +100,7 @@ export default function MachinesPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
               <tr>
-                {['Name', 'Host', 'Username', 'Status', 'Last Seen', 'Actions'].map(h => (
+                {['Name', 'Tunnel Port', 'Username', 'Status', 'Last Seen', 'Actions'].map(h => (
                   <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
@@ -105,27 +110,33 @@ export default function MachinesPage() {
                 <React.Fragment key={m.id}>
                   <tr className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-gray-900">{m.name}</td>
-                    <td className="px-4 py-3 text-gray-600">{m.host}:{m.port}</td>
+                    <td className="px-4 py-3 text-gray-600">
+                      {m.tunnel_port > 0 ? (
+                        <span className="font-mono bg-gray-100 px-2 py-0.5 rounded text-xs">{m.tunnel_port}</span>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-gray-600">{m.username}</td>
                     <td className="px-4 py-3"><StatusBadge status={m.status} /></td>
                     <td className="px-4 py-3 text-gray-500">{m.last_seen ? new Date(m.last_seen).toLocaleString() : 'Never'}</td>
                     <td className="px-4 py-3">
                       <div className="flex gap-2">
-                        <button onClick={() => testMachine(m.id)} className="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50">Test</button>
-                        <button onClick={() => openDeployModal(m.id, m.name)} className="px-2 py-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded hover:bg-blue-100">Deploy Client</button>
-                        <button onClick={() => handleDelete(m.id)} className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100">Delete</button>
+                        <button
+                          onClick={() => setDeployModal({ isOpen: true, machineId: m.id, machineName: m.name })}
+                          className="px-2 py-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded hover:bg-blue-100"
+                        >
+                          Deploy Client
+                        </button>
+                        <button
+                          onClick={() => handleDelete(m.id)}
+                          className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100"
+                        >
+                          Delete
+                        </button>
                       </div>
                     </td>
                   </tr>
-                  {testResults[m.id] && (
-                    <tr>
-                      <td colSpan={6} className="px-4 py-2">
-                        <span className={`text-xs px-2 py-1 rounded ${testResults[m.id].ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                          {testResults[m.id].ok ? '✅' : '❌'} {testResults[m.id].message}
-                        </span>
-                      </td>
-                    </tr>
-                  )}
                 </React.Fragment>
               ))}
             </tbody>
@@ -133,47 +144,54 @@ export default function MachinesPage() {
         </div>
       )}
 
-      {/* Add/Edit Modal */}
-      {modal.isOpen && (
+      {/* Bootstrap Token Modal */}
+      {bootstrapModal.isOpen && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl">
             <div className="flex items-center justify-between p-4 border-b">
-              <h2 className="text-lg font-semibold">Add Machine</h2>
-              <button onClick={() => setModal(m => ({ ...m, isOpen: false }))} className="text-gray-400 hover:text-gray-600 text-xl">×</button>
+              <h2 className="text-lg font-semibold">Bootstrap New Machine</h2>
+              <button
+                onClick={() => setBootstrapModal(m => ({ ...m, isOpen: false }))}
+                className="text-gray-400 hover:text-gray-600 text-xl"
+              >
+                ×
+              </button>
             </div>
-            <div className="p-4 space-y-3">
-              {([
-                { label: 'Name', key: 'name', placeholder: 'My Home Server' },
-                { label: 'Host', key: 'host', placeholder: '192.168.1.100' },
-                { label: 'Port', key: 'port', type: 'number', placeholder: '22' },
-                { label: 'Username', key: 'username', placeholder: 'root' },
-              ] as Array<{ label: string; key: keyof FormState; type?: string; placeholder: string }>).map(({ label, key, type = 'text', placeholder }) => (
-                <div key={key}>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
-                  <input
-                    type={type}
-                    value={String(form[key])}
-                    onChange={e => setForm(f => ({ ...f, [key]: type === 'number' ? Number(e.target.value) : e.target.value }))}
-                    placeholder={placeholder}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-              ))}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">SSH Private Key (PEM)</label>
-                <textarea
-                  value={form.private_key}
-                  onChange={e => setForm(f => ({ ...f, private_key: e.target.value }))}
-                  rows={5}
-                  placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;..."
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
+            <div className="p-4 space-y-4">
+              <p className="text-sm text-gray-600">
+                Run this command on the machine you want to register. The machine will self-configure and establish a reverse SSH tunnel to the VPS.
+              </p>
+              <div className="relative">
+                <pre className="bg-gray-900 text-green-400 text-xs rounded-lg p-4 pr-12 overflow-x-auto whitespace-pre-wrap break-all">
+                  {bootstrapModal.command}
+                </pre>
+                <button
+                  onClick={copyCommand}
+                  className="absolute top-2 right-2 p-1.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
+                  title="Copy command"
+                >
+                  {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+                </button>
+              </div>
+              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                ⏱ Token expires at: {new Date(bootstrapModal.expiresAt).toLocaleString()} (1 hour)
+              </div>
+              <div className="text-xs text-gray-400 space-y-1">
+                <p>The script will:</p>
+                <ol className="list-decimal ml-4 space-y-0.5">
+                  <li>Register the machine with this Gopher instance</li>
+                  <li>Install the VPS SSH public key in <code className="bg-gray-100 px-1 rounded">~/.ssh/authorized_keys</code></li>
+                  <li>Install and configure rathole as a reverse tunnel client</li>
+                  <li>Enable a systemd service to keep the tunnel running</li>
+                </ol>
               </div>
             </div>
-            <div className="flex justify-end gap-2 p-4 border-t">
-              <button onClick={() => setModal(m => ({ ...m, isOpen: false }))} className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm">Cancel</button>
-              <button onClick={handleSave} disabled={createMutation.isPending} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-50">
-                {createMutation.isPending ? 'Saving...' : 'Save'}
+            <div className="flex justify-end p-4 border-t">
+              <button
+                onClick={() => setBootstrapModal(m => ({ ...m, isOpen: false }))}
+                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm"
+              >
+                Close
               </button>
             </div>
           </div>

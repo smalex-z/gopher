@@ -1,13 +1,13 @@
 package service
 
 import (
-"fmt"
-"time"
+	"fmt"
+	"time"
 
-"github.com/google/uuid"
-"github.com/smalex-z/gopher/internal/api/dto"
-"github.com/smalex-z/gopher/internal/db"
-sshpkg "github.com/smalex-z/gopher/internal/ssh"
+	"github.com/google/uuid"
+	"github.com/smalex-z/gopher/internal/api/dto"
+	"github.com/smalex-z/gopher/internal/db"
+	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
 type VPSService struct {
@@ -29,15 +29,22 @@ return nil, fmt.Errorf("SSH connection test failed: %w", err)
 }
 client.Close()
 
+privKey, pubKey, err := sshpkg.GenerateRSAKeypair()
+if err != nil {
+return nil, fmt.Errorf("failed to generate SSH keypair: %w", err)
+}
+
 vps := &db.VPSConfig{
-ID:         uuid.New().String(),
-Host:       req.Host,
-Port:       req.Port,
-Username:   req.Username,
-PrivateKey: req.PrivateKey,
-Domain:     req.Domain,
-CreatedAt:  time.Now(),
-UpdatedAt:  time.Now(),
+ID:            uuid.New().String(),
+Host:          req.Host,
+Port:          req.Port,
+Username:      req.Username,
+PrivateKey:    req.PrivateKey,
+Domain:        req.Domain,
+SSHPublicKey:  pubKey,
+SSHPrivateKey: privKey,
+CreatedAt:     time.Now(),
+UpdatedAt:     time.Now(),
 }
 if vps.Port == 0 {
 vps.Port = 22
