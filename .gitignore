@@ -7,8 +7,11 @@ gopher.exe
 *.db-shm
 *.db-wal
 
-# Frontend dependencies (not build output - dist is committed for go:embed)
+# Frontend dependencies
 frontend/node_modules/
+
+# Frontend stale local dist (build output goes to cmd/server/frontend/dist/ for go:embed)
+frontend/dist/
 
 # IDE
 .vscode/
@@ -23,3 +26,6 @@ Thumbs.db
 # Build artifacts
 *.test
 coverage.out
+
+# Temporary files
+/tmp/
