@@ -1,93 +1,48 @@
 package ssh
 
 import (
-	"fmt"
-	"strings"
-
-	"github.com/smalex-z/gopher/internal/db"
+_ "embed"
+"fmt"
+"io"
 )
 
-const ratholeVersion = "v0.5.0"
+//go:embed templates/client-install.sh
+var clientInstallScript string
 
-const systemdServiceTemplate = `[Unit]
-Description=Rathole Client
-After=network.target
+//go:embed templates/rathole-client.service
+var ratholeClientService string
 
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/rathole --client /etc/rathole/client.toml
-Restart=on-failure
-RestartSec=5
+func DeployClient(client *SSHClient, machineID string, config string, logWriter io.Writer) error {
+fmt.Fprintln(logWriter, "=== Deploying Rathole Client ===")
 
-[Install]
-WantedBy=multi-user.target
-`
+fmt.Fprintln(logWriter, "Step 1: Installing rathole...")
+if err := client.UploadFile([]byte(clientInstallScript), "/tmp/client-install.sh"); err != nil {
+return fmt.Errorf("failed to upload install script: %w", err)
+}
+if err := ExecuteWithOutput(client, "chmod +x /tmp/client-install.sh && /tmp/client-install.sh", logWriter); err != nil {
+return fmt.Errorf("failed to install rathole client: %w", err)
+}
 
-// DeployClient installs rathole on a machine and configures it with the given tunnels.
-func DeployClient(machine *db.Machine, vpsHost string, tunnels []db.Tunnel, ratholeClientConfig string) (string, error) {
-	c, err := NewClient(machine.Host, machine.Port, machine.User, machine.SSHKey)
-	if err != nil {
-		return "", fmt.Errorf("connect to machine %s: %w", machine.Name, err)
-	}
-	defer c.Close()
+fmt.Fprintln(logWriter, "Step 2: Writing rathole client config...")
+if err := client.UploadFile([]byte(config), "/etc/rathole/client.toml"); err != nil {
+return fmt.Errorf("failed to upload client config: %w", err)
+}
 
-	var logs strings.Builder
+fmt.Fprintln(logWriter, "Step 3: Installing systemd service...")
+if err := client.UploadFile([]byte(ratholeClientService), "/etc/systemd/system/rathole-client.service"); err != nil {
+return fmt.Errorf("failed to upload service file: %w", err)
+}
 
-	// Detect architecture
-	logs.WriteString("=== Detecting architecture ===\n")
-	archOut, err := c.Run("uname -m")
-	if err != nil {
-		return logs.String(), fmt.Errorf("detect arch: %w", err)
-	}
-	arch := strings.TrimSpace(archOut)
-	logs.WriteString(arch + "\n")
+fmt.Fprintln(logWriter, "Step 4: Enabling and starting service...")
+cmds := []string{
+"systemctl daemon-reload",
+"systemctl enable rathole-client",
+"systemctl restart rathole-client",
+}
+if err := ExecuteCommands(client, cmds, logWriter); err != nil {
+return fmt.Errorf("failed to enable service: %w", err)
+}
 
-	goArch := "x86_64"
-	if strings.Contains(arch, "aarch64") || strings.Contains(arch, "arm64") {
-		goArch = "aarch64"
-	}
-
-	steps := []struct {
-		desc string
-		cmd  string
-	}{
-		{"Install curl", "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl 2>/dev/null || yum install -y curl 2>/dev/null || true"},
-		{"Download rathole", fmt.Sprintf(
-			`curl -fsSL -o /tmp/rathole.tar.gz "https://github.com/rapiz1/rathole/releases/download/%s/rathole-%s-unknown-linux-gnu.tar.gz" && tar -xzf /tmp/rathole.tar.gz -C /tmp && mv /tmp/rathole /usr/local/bin/rathole && chmod +x /usr/local/bin/rathole`,
-			ratholeVersion, goArch,
-		)},
-		{"Create config dir", "mkdir -p /etc/rathole"},
-	}
-
-	for _, step := range steps {
-		logs.WriteString(fmt.Sprintf("=== %s ===\n", step.desc))
-		out, err := c.Run(step.cmd)
-		logs.WriteString(out)
-		if err != nil {
-			logs.WriteString(fmt.Sprintf("WARN: %v\n", err))
-		}
-	}
-
-	// Write client config
-	logs.WriteString("=== Writing rathole client config ===\n")
-	if err := c.WriteFile("/etc/rathole/client.toml", ratholeClientConfig); err != nil {
-		return logs.String(), fmt.Errorf("write client config: %w", err)
-	}
-
-	// Write systemd service
-	logs.WriteString("=== Writing systemd service ===\n")
-	if err := c.WriteFile("/etc/systemd/system/rathole-client.service", systemdServiceTemplate); err != nil {
-		return logs.String(), fmt.Errorf("write systemd service: %w", err)
-	}
-
-	// Enable and start service
-	logs.WriteString("=== Enabling rathole-client service ===\n")
-	out, err := c.Run("systemctl daemon-reload && systemctl enable rathole-client && systemctl restart rathole-client")
-	logs.WriteString(out)
-	if err != nil {
-		logs.WriteString(fmt.Sprintf("WARN: %v\n", err))
-	}
-
-	_ = vpsHost
-	return logs.String(), nil
+fmt.Fprintln(logWriter, "=== Client Deployment Complete ===")
+return nil
 }

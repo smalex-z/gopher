@@ -1,38 +1,35 @@
 package config
 
 import (
-	"bytes"
-	"fmt"
-	"text/template"
+"bytes"
+_ "embed"
+"text/template"
 
-	"github.com/smalex-z/gopher/internal/db"
+"github.com/smalex-z/gopher/internal/db"
 )
 
-const caddyTemplate = `{
-    email admin@{{.Domain}}
-}
-
-{{range .Tunnels}}
-{{.Subdomain}}.{{$.Domain}} {
-    reverse_proxy localhost:{{.RemotePort}}
-}
-{{end}}
-`
+//go:embed templates/Caddyfile.tmpl
+var caddyTemplate string
 
 type caddyData struct {
-	Domain  string
-	Tunnels []db.Tunnel
+Domain  string
+Tunnels []db.Tunnel
 }
 
-func GenerateCaddyfile(domain string, tunnels []db.Tunnel) (string, error) {
-	tmpl, err := template.New("caddy").Parse(caddyTemplate)
-	if err != nil {
-		return "", fmt.Errorf("parse caddy template: %w", err)
-	}
-	data := caddyData{Domain: domain, Tunnels: tunnels}
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("execute caddy template: %w", err)
-	}
-	return buf.String(), nil
+func GenerateCaddyfile(vps db.VPSConfig, tunnels []db.Tunnel) (string, error) {
+tmpl, err := template.New("caddyfile").Parse(caddyTemplate)
+if err != nil {
+return "", err
+}
+
+data := caddyData{
+Domain:  vps.Domain,
+Tunnels: tunnels,
+}
+
+var buf bytes.Buffer
+if err := tmpl.Execute(&buf, data); err != nil {
+return "", err
+}
+return buf.String(), nil
 }

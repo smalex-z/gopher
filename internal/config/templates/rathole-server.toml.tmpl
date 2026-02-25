@@ -1,0 +1,11 @@
+[server]
+bind_addr = "0.0.0.0:2333"
+
+[server.default_token]
+default_token = "changeme"
+
+{{range .Tunnels}}
+[server.services.{{.Name}}]
+token = "{{.ID}}"
+bind_addr = "0.0.0.0:{{.RatholePort}}"
+{{end}}

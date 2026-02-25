@@ -1,83 +1,122 @@
 package ssh
 
 import (
-	"fmt"
-	"net"
-	"time"
+"bytes"
+"fmt"
+"io"
+"net"
+"time"
 
-	"golang.org/x/crypto/ssh"
+"github.com/pkg/sftp"
+"golang.org/x/crypto/ssh"
 )
 
-type Client struct {
-	client *ssh.Client
+type SSHClient struct {
+client *ssh.Client
 }
 
-func NewClient(host string, port int, user, privateKey string) (*Client, error) {
-	signer, err := ssh.ParsePrivateKey([]byte(privateKey))
-	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w", err)
-	}
-
-	config := &ssh.ClientConfig{
-		User: user,
-		Auth: []ssh.AuthMethod{
-			ssh.PublicKeys(signer),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         30 * time.Second,
-	}
-
-	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	client, err := ssh.Dial("tcp", addr, config)
-	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", addr, err)
-	}
-	return &Client{client: client}, nil
+func NewClient(host string, port int, username, privateKey string) (*SSHClient, error) {
+signer, err := ssh.ParsePrivateKey([]byte(privateKey))
+if err != nil {
+return nil, fmt.Errorf("failed to parse private key: %w", err)
 }
 
-func (c *Client) Close() error {
-	return c.client.Close()
+config := &ssh.ClientConfig{
+User: username,
+Auth: []ssh.AuthMethod{
+ssh.PublicKeys(signer),
+},
+HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+Timeout:         30 * time.Second,
 }
 
-func (c *Client) Run(cmd string) (string, error) {
-	session, err := c.client.NewSession()
-	if err != nil {
-		return "", fmt.Errorf("new session: %w", err)
-	}
-	defer session.Close()
-
-	out, err := session.CombinedOutput(cmd)
-	return string(out), err
+addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+client, err := ssh.Dial("tcp", addr, config)
+if err != nil {
+return nil, fmt.Errorf("failed to dial SSH: %w", err)
 }
 
-// WriteFile writes content to a remote file using printf to avoid heredoc issues.
-func (c *Client) WriteFile(remotePath, content string) error {
-	// Use base64 encoding to safely transfer arbitrary content
-	encoded := encodeBase64(content)
-	cmd := fmt.Sprintf("echo '%s' | base64 -d > %s", encoded, remotePath)
-	_, err := c.Run(cmd)
-	return err
+return &SSHClient{client: client}, nil
 }
 
-func encodeBase64(s string) string {
-	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	b := []byte(s)
-	result := make([]byte, 0, ((len(b)+2)/3)*4)
-	for i := 0; i < len(b); i += 3 {
-		var chunk [3]byte
-		n := copy(chunk[:], b[i:])
-		v := uint(chunk[0])<<16 | uint(chunk[1])<<8 | uint(chunk[2])
-		result = append(result, chars[(v>>18)&0x3F], chars[(v>>12)&0x3F])
-		if n > 1 {
-			result = append(result, chars[(v>>6)&0x3F])
-		} else {
-			result = append(result, '=')
-		}
-		if n > 2 {
-			result = append(result, chars[v&0x3F])
-		} else {
-			result = append(result, '=')
-		}
-	}
-	return string(result)
+func (c *SSHClient) Close() error {
+return c.client.Close()
+}
+
+func (c *SSHClient) Execute(cmd string) (string, error) {
+session, err := c.client.NewSession()
+if err != nil {
+return "", fmt.Errorf("failed to create session: %w", err)
+}
+defer session.Close()
+
+var stdout, stderr bytes.Buffer
+session.Stdout = &stdout
+session.Stderr = &stderr
+
+if err := session.Run(cmd); err != nil {
+return "", fmt.Errorf("command failed: %w (stderr: %s)", err, stderr.String())
+}
+
+return stdout.String(), nil
+}
+
+func (c *SSHClient) ExecuteWithOutput(cmd string, w io.Writer) error {
+session, err := c.client.NewSession()
+if err != nil {
+return fmt.Errorf("failed to create session: %w", err)
+}
+defer session.Close()
+
+session.Stdout = w
+session.Stderr = w
+
+return session.Run(cmd)
+}
+
+func (c *SSHClient) UploadFile(content []byte, remotePath string) error {
+sftpClient, err := sftp.NewClient(c.client)
+if err != nil {
+return fmt.Errorf("failed to create SFTP client: %w", err)
+}
+defer sftpClient.Close()
+
+_ = sftpClient.MkdirAll(dirName(remotePath))
+
+f, err := sftpClient.Create(remotePath)
+if err != nil {
+return fmt.Errorf("failed to create remote file: %w", err)
+}
+defer f.Close()
+
+_, err = f.Write(content)
+return err
+}
+
+func (c *SSHClient) UploadReader(r io.Reader, remotePath string) error {
+sftpClient, err := sftp.NewClient(c.client)
+if err != nil {
+return fmt.Errorf("failed to create SFTP client: %w", err)
+}
+defer sftpClient.Close()
+
+_ = sftpClient.MkdirAll(dirName(remotePath))
+
+f, err := sftpClient.Create(remotePath)
+if err != nil {
+return fmt.Errorf("failed to create remote file: %w", err)
+}
+defer f.Close()
+
+_, err = io.Copy(f, r)
+return err
+}
+
+func dirName(path string) string {
+for i := len(path) - 1; i >= 0; i-- {
+if path[i] == '/' {
+return path[:i]
+}
+}
+return "."
 }

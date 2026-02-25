@@ -1,59 +1,57 @@
 package db
 
 import (
-	"database/sql"
-	_ "github.com/mattn/go-sqlite3"
+"embed"
+"fmt"
+"log"
+
+"github.com/glebarez/sqlite"
+"gorm.io/gorm"
+"gorm.io/gorm/logger"
 )
 
-func Open(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", path+"?_foreign_keys=on")
-	if err != nil {
-		return nil, err
-	}
-	if err := db.Ping(); err != nil {
-		return nil, err
-	}
-	return db, nil
+//go:embed migrations/*.sql
+var migrations embed.FS
+
+var DB *gorm.DB
+
+func Initialize(dsn string) error {
+var err error
+DB, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{
+Logger: logger.Default.LogMode(logger.Warn),
+})
+if err != nil {
+return fmt.Errorf("failed to open database: %w", err)
 }
 
-func Migrate(db *sql.DB) error {
-	schema := `
-CREATE TABLE IF NOT EXISTS vps_config (
-    id          INTEGER PRIMARY KEY CHECK (id = 1),
-    host        TEXT NOT NULL,
-    port        INTEGER NOT NULL DEFAULT 22,
-    user        TEXT NOT NULL,
-    ssh_key     TEXT NOT NULL,
-    domain      TEXT NOT NULL,
-    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-);
+if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}); err != nil {
+return fmt.Errorf("failed to auto-migrate: %w", err)
+}
 
-CREATE TABLE IF NOT EXISTS machines (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL UNIQUE,
-    host        TEXT NOT NULL,
-    port        INTEGER NOT NULL DEFAULT 22,
-    user        TEXT NOT NULL,
-    ssh_key     TEXT NOT NULL,
-    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-);
+if err := runMigrations(); err != nil {
+return fmt.Errorf("failed to run migrations: %w", err)
+}
 
-CREATE TABLE IF NOT EXISTS tunnels (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    name            TEXT NOT NULL UNIQUE,
-    subdomain       TEXT NOT NULL UNIQUE,
-    machine_id      INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
-    local_host      TEXT NOT NULL DEFAULT "127.0.0.1",
-    local_port      INTEGER NOT NULL,
-    remote_port     INTEGER NOT NULL UNIQUE,
-    token           TEXT NOT NULL,
-    enabled         INTEGER NOT NULL DEFAULT 1,
-    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-`
-	_, err := db.Exec(schema)
-	return err
+return nil
+}
+
+func runMigrations() error {
+entries, err := migrations.ReadDir("migrations")
+if err != nil {
+return err
+}
+for _, entry := range entries {
+if entry.IsDir() {
+continue
+}
+content, err := migrations.ReadFile("migrations/" + entry.Name())
+if err != nil {
+return err
+}
+log.Printf("Running migration: %s", entry.Name())
+if err := DB.Exec(string(content)).Error; err != nil {
+log.Printf("Migration %s note: %v", entry.Name(), err)
+}
+}
+return nil
 }

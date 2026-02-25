@@ -1,5 +1,4 @@
-version: "3.8"
-
+version: '3.8'
 services:
   caddy:
     image: caddy:2-alpine
@@ -7,7 +6,6 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      - "443:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
@@ -18,11 +16,11 @@ services:
   rathole:
     image: rapiz1/rathole:latest
     restart: unless-stopped
-    command: --server /config/server.toml
     ports:
       - "2333:2333"
     volumes:
-      - ./rathole-server.toml:/config/server.toml
+      - ./rathole-server.toml:/app/config.toml
+    command: ["--server", "/app/config.toml"]
     networks:
       - tunnel_net
 
