@@ -1,0 +1,25 @@
+# Go binary
+gopher
+gopher.exe
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend dependencies (not build output - dist is committed for go:embed)
+frontend/node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.test
+coverage.out
