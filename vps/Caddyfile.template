@@ -1,0 +1,7 @@
+{
+    email admin@{DOMAIN}
+}
+
+{SUBDOMAIN}.{DOMAIN} {
+    reverse_proxy localhost:{PORT}
+}

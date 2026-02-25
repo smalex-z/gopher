@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gopher — Self-hosted Tunnel Gateway</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #f0f2f5; color: #1a1a2e; }
+    header { background: #16213e; color: #e0e0e0; padding: 14px 24px; display: flex; align-items: center; gap: 12px; }
+    header h1 { font-size: 1.3rem; font-weight: 700; color: #4fc3f7; }
+    header span { font-size: 0.85rem; opacity: 0.6; }
+    nav { background: #0f3460; display: flex; gap: 4px; padding: 0 16px; }
+    nav button { background: none; border: none; color: #b0c4de; padding: 12px 20px; cursor: pointer; font-size: 0.9rem; border-bottom: 3px solid transparent; transition: all 0.15s; }
+    nav button:hover { color: #fff; background: rgba(255,255,255,0.05); }
+    nav button.active { color: #4fc3f7; border-bottom-color: #4fc3f7; }
+    main { max-width: 1100px; margin: 28px auto; padding: 0 16px; }
+    .card { background: #fff; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 20px; }
+    .card h2 { font-size: 1.1rem; font-weight: 600; margin-bottom: 16px; color: #16213e; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+    .form-group { display: flex; flex-direction: column; gap: 4px; }
+    .form-group.full { grid-column: 1 / -1; }
+    label { font-size: 0.78rem; font-weight: 600; color: #555; text-transform: uppercase; letter-spacing: 0.04em; }
+    input, select, textarea { padding: 8px 10px; border: 1px solid #d0d7de; border-radius: 6px; font-size: 0.9rem; outline: none; transition: border-color 0.15s; width: 100%; }
+    input:focus, select:focus, textarea:focus { border-color: #4fc3f7; box-shadow: 0 0 0 3px rgba(79,195,247,0.15); }
+    textarea { font-family: 'Courier New', monospace; font-size: 0.8rem; resize: vertical; min-height: 100px; }
+    .btn { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 500; transition: all 0.15s; }
+    .btn-primary { background: #0f3460; color: #fff; }
+    .btn-primary:hover { background: #16213e; }
+    .btn-success { background: #2e7d32; color: #fff; }
+    .btn-success:hover { background: #1b5e20; }
+    .btn-danger { background: #c62828; color: #fff; }
+    .btn-danger:hover { background: #b71c1c; }
+    .btn-info { background: #0277bd; color: #fff; }
+    .btn-info:hover { background: #01579b; }
+    .btn-sm { padding: 5px 12px; font-size: 0.8rem; }
+    .btn-row { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    th { text-align: left; padding: 10px 12px; background: #f6f8fa; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: #555; border-bottom: 2px solid #e1e4e8; }
+    td { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #fafbfc; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+    .badge-green { background: #e8f5e9; color: #2e7d32; }
+    .badge-gray { background: #f0f0f0; color: #666; }
+    .logs { background: #1a1a2e; color: #a8ff78; font-family: 'Courier New', monospace; font-size: 0.78rem; padding: 16px; border-radius: 8px; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin-top: 16px; }
+    .alert { padding: 10px 14px; border-radius: 6px; font-size: 0.875rem; margin-bottom: 14px; }
+    .alert-error { background: #fce4ec; color: #b71c1c; border: 1px solid #f48fb1; }
+    .alert-success { background: #e8f5e9; color: #1b5e20; border: 1px solid #a5d6a7; }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px; }
+    .stat-card { background: #f6f8fa; border-radius: 8px; padding: 18px; text-align: center; border: 1px solid #e1e4e8; }
+    .stat-card .stat-value { font-size: 2.2rem; font-weight: 700; color: #0f3460; }
+    .stat-card .stat-label { font-size: 0.8rem; color: #666; margin-top: 4px; }
+    .empty { text-align: center; color: #aaa; padding: 32px; font-size: 0.9rem; }
+    .loading { opacity: 0.5; pointer-events: none; }
+    .mono { font-family: 'Courier New', monospace; font-size: 0.8rem; color: #555; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+const api = {
+  get: (url) => fetch(url).then(r => r.json()),
+  post: (url, body) => fetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(r => r.json()),
+  put: (url, body) => fetch(url, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(r => r.json()),
+  del: (url) => fetch(url, { method: 'DELETE' }).then(r => r.json()),
+};
+
+function Alert({ msg, type }) {
+  if (!msg) return null;
+  return <div className={`alert alert-${type}`}>{msg}</div>;
+}
+
+function Logs({ logs }) {
+  if (!logs) return null;
+  return <pre className="logs">{logs}</pre>;
+}
+
+// ── VPS Setup Tab ────────────────────────────────────────────────────────────
+function VPSTab() {
+  const [form, setForm] = useState({ host: '', port: 22, user: 'root', ssh_key: '', domain: '' });
+  const [msg, setMsg] = useState(null);
+  const [msgType, setMsgType] = useState('success');
+  const [logs, setLogs] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.get('/api/vps').then(data => {
+      if (!data.error) setForm(f => ({ ...f, ...data }));
+    });
+  }, []);
+
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+
+  const save = async () => {
+    setBusy(true); setMsg(null); setLogs('');
+    const res = await api.put('/api/vps', { ...form, port: Number(form.port) });
+    setBusy(false);
+    if (res.error) { setMsg(res.error); setMsgType('error'); }
+    else { setMsg('VPS configuration saved.'); setMsgType('success'); }
+  };
+
+  const setup = async () => {
+    setBusy(true); setMsg(null); setLogs('');
+    const res = await api.post('/api/vps/setup', {});
+    setBusy(false);
+    setLogs(res.logs || '');
+    if (res.error) { setMsg('Setup failed: ' + res.error); setMsgType('error'); }
+    else { setMsg('VPS setup completed!'); setMsgType('success'); }
+  };
+
+  const deploy = async () => {
+    setBusy(true); setMsg(null); setLogs('');
+    const res = await api.post('/api/vps/deploy', {});
+    setBusy(false);
+    setLogs(res.logs || '');
+    if (res.error) { setMsg('Deploy failed: ' + res.error); setMsgType('error'); }
+    else { setMsg('Config deployed and services reloaded!'); setMsgType('success'); }
+  };
+
+  return (
+    <div className={busy ? 'loading' : ''}>
+      <div className="card">
+        <h2>VPS Configuration</h2>
+        <Alert msg={msg} type={msgType} />
+        <div className="form-grid">
+          <div className="form-group">
+            <label>Host / IP</label>
+            <input value={form.host} onChange={set('host')} placeholder="203.0.113.10" />
+          </div>
+          <div className="form-group">
+            <label>SSH Port</label>
+            <input type="number" value={form.port} onChange={set('port')} />
+          </div>
+          <div className="form-group">
+            <label>SSH User</label>
+            <input value={form.user} onChange={set('user')} placeholder="root" />
+          </div>
+          <div className="form-group">
+            <label>Domain</label>
+            <input value={form.domain} onChange={set('domain')} placeholder="example.com" />
+          </div>
+          <div className="form-group full">
+            <label>Private SSH Key (PEM)</label>
+            <textarea value={form.ssh_key} onChange={set('ssh_key')} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----" rows={6} />
+          </div>
+        </div>
+        <div className="btn-row">
+          <button className="btn btn-primary" onClick={save}>💾 Save Config</button>
+          <button className="btn btn-success" onClick={setup}>🚀 Full VPS Setup (installs Docker + Caddy + rathole)</button>
+          <button className="btn btn-info" onClick={deploy}>🔄 Deploy Config Update</button>
+        </div>
+        <Logs logs={logs} />
+      </div>
+      <div className="card">
+        <h2>What happens during setup?</h2>
+        <ol style={{paddingLeft:'20px',lineHeight:'1.8',color:'#444',fontSize:'0.9rem'}}>
+          <li>SSH into your VPS using the provided credentials</li>
+          <li>Install Docker and Docker Compose</li>
+          <li>Deploy a Caddy (reverse proxy with auto-HTTPS) + rathole server stack</li>
+          <li>Generate Caddyfile and rathole config from your tunnel definitions</li>
+          <li>Services start automatically and persist across reboots</li>
+        </ol>
+      </div>
+    </div>
+  );
+}
+
+// ── Machines Tab ─────────────────────────────────────────────────────────────
+function MachinesTab() {
+  const [machines, setMachines] = useState([]);
+  const [form, setForm] = useState({ name: '', host: '', port: 22, user: 'root', ssh_key: '' });
+  const [msg, setMsg] = useState(null);
+  const [msgType, setMsgType] = useState('success');
+  const [logs, setLogs] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+
+  const load = useCallback(() => api.get('/api/machines').then(setMachines), []);
+  useEffect(() => { load(); }, [load]);
+
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+
+  const add = async () => {
+    setBusy(true); setMsg(null);
+    const res = await api.post('/api/machines', { ...form, port: Number(form.port) });
+    setBusy(false);
+    if (res.error) { setMsg(res.error); setMsgType('error'); }
+    else { setMsg('Machine added.'); setMsgType('success'); setForm({ name:'', host:'', port:22, user:'root', ssh_key:'' }); setShowForm(false); load(); }
+  };
+
+  const del = async (id) => {
+    if (!confirm('Delete this machine and all its tunnels?')) return;
+    await api.del(`/api/machines/${id}`);
+    load();
+  };
+
+  const deploy = async (id, name) => {
+    setBusy(true); setMsg(null); setLogs('');
+    setMsg(`Deploying rathole client to ${name}...`); setMsgType('success');
+    const res = await api.post(`/api/machines/${id}/deploy`, {});
+    setBusy(false);
+    setLogs(res.logs || '');
+    if (res.error) { setMsg('Deploy failed: ' + res.error); setMsgType('error'); }
+    else { setMsg(`Client deployed to ${name}!`); setMsgType('success'); }
+  };
+
+  return (
+    <div className={busy ? 'loading' : ''}>
+      <div className="card">
+        <h2>Private Machines</h2>
+        <Alert msg={msg} type={msgType} />
+        {machines.length === 0
+          ? <div className="empty">No machines yet. Add one below.</div>
+          : <table>
+              <thead><tr><th>Name</th><th>Host</th><th>Port</th><th>User</th><th>Actions</th></tr></thead>
+              <tbody>
+                {machines.map(m => (
+                  <tr key={m.id}>
+                    <td><strong>{m.name}</strong></td>
+                    <td className="mono">{m.host}</td>
+                    <td>{m.port}</td>
+                    <td>{m.user}</td>
+                    <td>
+                      <div style={{display:'flex',gap:'6px'}}>
+                        <button className="btn btn-info btn-sm" onClick={() => deploy(m.id, m.name)}>🚀 Deploy Client</button>
+                        <button className="btn btn-danger btn-sm" onClick={() => del(m.id)}>🗑 Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+        }
+        <div className="btn-row">
+          <button className="btn btn-primary" onClick={() => setShowForm(s => !s)}>{showForm ? '✕ Cancel' : '+ Add Machine'}</button>
+        </div>
+        <Logs logs={logs} />
+      </div>
+      {showForm && (
+        <div className="card">
+          <h2>Add Machine</h2>
+          <div className="form-grid">
+            <div className="form-group">
+              <label>Name</label>
+              <input value={form.name} onChange={set('name')} placeholder="immich-vm" />
+            </div>
+            <div className="form-group">
+              <label>Host / IP</label>
+              <input value={form.host} onChange={set('host')} placeholder="192.168.1.50" />
+            </div>
+            <div className="form-group">
+              <label>SSH Port</label>
+              <input type="number" value={form.port} onChange={set('port')} />
+            </div>
+            <div className="form-group">
+              <label>SSH User</label>
+              <input value={form.user} onChange={set('user')} />
+            </div>
+            <div className="form-group full">
+              <label>Private SSH Key (PEM)</label>
+              <textarea value={form.ssh_key} onChange={set('ssh_key')} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..." rows={5} />
+            </div>
+          </div>
+          <div className="btn-row">
+            <button className="btn btn-success" onClick={add}>✅ Add Machine</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Tunnels Tab ───────────────────────────────────────────────────────────────
+function TunnelsTab() {
+  const [tunnels, setTunnels] = useState([]);
+  const [machines, setMachines] = useState([]);
+  const [form, setForm] = useState({ name:'', subdomain:'', machine_id:'', local_host:'127.0.0.1', local_port:'', remote_port:'' });
+  const [msg, setMsg] = useState(null);
+  const [msgType, setMsgType] = useState('success');
+  const [busy, setBusy] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+
+  const load = useCallback(() => {
+    api.get('/api/tunnels').then(setTunnels);
+    api.get('/api/machines').then(setMachines);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+
+  const add = async () => {
+    if (!form.machine_id) { setMsg('Please select a machine.'); setMsgType('error'); return; }
+    setBusy(true); setMsg(null);
+    const res = await api.post('/api/tunnels', {
+      ...form,
+      machine_id: Number(form.machine_id),
+      local_port: Number(form.local_port),
+      remote_port: Number(form.remote_port),
+    });
+    setBusy(false);
+    if (res.error) { setMsg(res.error); setMsgType('error'); }
+    else { setMsg('Tunnel created.'); setMsgType('success'); setForm({ name:'', subdomain:'', machine_id:'', local_host:'127.0.0.1', local_port:'', remote_port:'' }); setShowForm(false); load(); }
+  };
+
+  const del = async (id) => {
+    if (!confirm('Delete this tunnel?')) return;
+    await api.del(`/api/tunnels/${id}`);
+    load();
+  };
+
+  const machineName = (id) => (machines.find(m => m.id === id) || {}).name || id;
+
+  return (
+    <div className={busy ? 'loading' : ''}>
+      <div className="card">
+        <h2>Tunnels</h2>
+        <Alert msg={msg} type={msgType} />
+        {tunnels.length === 0
+          ? <div className="empty">No tunnels yet. Add one below.</div>
+          : <table>
+              <thead><tr><th>Name</th><th>Subdomain</th><th>Machine</th><th>Local</th><th>Remote Port</th><th>Status</th><th>Actions</th></tr></thead>
+              <tbody>
+                {tunnels.map(t => (
+                  <tr key={t.id}>
+                    <td><strong>{t.name}</strong></td>
+                    <td className="mono">{t.subdomain}</td>
+                    <td>{machineName(t.machine_id)}</td>
+                    <td className="mono">{t.local_host}:{t.local_port}</td>
+                    <td className="mono">{t.remote_port}</td>
+                    <td><span className={`badge ${t.enabled ? 'badge-green' : 'badge-gray'}`}>{t.enabled ? 'Enabled' : 'Disabled'}</span></td>
+                    <td><button className="btn btn-danger btn-sm" onClick={() => del(t.id)}>🗑 Delete</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+        }
+        <div className="btn-row">
+          <button className="btn btn-primary" onClick={() => setShowForm(s => !s)}>{showForm ? '✕ Cancel' : '+ Add Tunnel'}</button>
+        </div>
+      </div>
+      {showForm && (
+        <div className="card">
+          <h2>Add Tunnel</h2>
+          <div className="form-grid">
+            <div className="form-group">
+              <label>Name</label>
+              <input value={form.name} onChange={set('name')} placeholder="immich" />
+            </div>
+            <div className="form-group">
+              <label>Subdomain</label>
+              <input value={form.subdomain} onChange={set('subdomain')} placeholder="photos" />
+            </div>
+            <div className="form-group">
+              <label>Machine</label>
+              <select value={form.machine_id} onChange={set('machine_id')}>
+                <option value="">— select machine —</option>
+                {machines.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+            </div>
+            <div className="form-group">
+              <label>Local Host</label>
+              <input value={form.local_host} onChange={set('local_host')} placeholder="127.0.0.1" />
+            </div>
+            <div className="form-group">
+              <label>Local Port</label>
+              <input type="number" value={form.local_port} onChange={set('local_port')} placeholder="2283" />
+            </div>
+            <div className="form-group">
+              <label>Remote Port (on VPS)</label>
+              <input type="number" value={form.remote_port} onChange={set('remote_port')} placeholder="3001" />
+            </div>
+          </div>
+          <div className="btn-row">
+            <button className="btn btn-success" onClick={add}>✅ Create Tunnel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Status Tab ────────────────────────────────────────────────────────────────
+function StatusTab() {
+  const [vps, setVps] = useState(null);
+  const [machines, setMachines] = useState([]);
+  const [tunnels, setTunnels] = useState([]);
+
+  const load = useCallback(() => {
+    api.get('/api/vps').then(d => setVps(d.error ? null : d));
+    api.get('/api/machines').then(setMachines);
+    api.get('/api/tunnels').then(setTunnels);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  return (
+    <div>
+      <div className="card">
+        <h2>Overview</h2>
+        <div className="stat-grid">
+          <div className="stat-card"><div className="stat-value">{vps ? '✅' : '❌'}</div><div className="stat-label">VPS Configured</div></div>
+          <div className="stat-card"><div className="stat-value">{machines.length}</div><div className="stat-label">Machines</div></div>
+          <div className="stat-card"><div className="stat-value">{tunnels.length}</div><div className="stat-label">Tunnels</div></div>
+          <div className="stat-card"><div className="stat-value">{tunnels.filter(t => t.enabled).length}</div><div className="stat-label">Active Tunnels</div></div>
+        </div>
+      </div>
+      {vps && (
+        <div className="card">
+          <h2>VPS Details</h2>
+          <table>
+            <tbody>
+              <tr><td style={{width:140,fontWeight:600}}>Host</td><td className="mono">{vps.host}</td></tr>
+              <tr><td style={{fontWeight:600}}>Domain</td><td className="mono">{vps.domain}</td></tr>
+              <tr><td style={{fontWeight:600}}>SSH User</td><td>{vps.user}</td></tr>
+              <tr><td style={{fontWeight:600}}>SSH Port</td><td>{vps.port}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+      {tunnels.length > 0 && (
+        <div className="card">
+          <h2>Active Routes</h2>
+          <table>
+            <thead><tr><th>URL</th><th>Machine</th><th>Local Endpoint</th><th>Status</th></tr></thead>
+            <tbody>
+              {tunnels.map(t => (
+                <tr key={t.id}>
+                  <td><a href={vps ? `https://${t.subdomain}.${vps.domain}` : '#'} target="_blank" rel="noreferrer" className="mono">{vps ? `https://${t.subdomain}.${vps.domain}` : t.subdomain}</a></td>
+                  <td>{(machines.find(m => m.id === t.machine_id) || {}).name || t.machine_id}</td>
+                  <td className="mono">{t.local_host}:{t.local_port}</td>
+                  <td><span className={`badge ${t.enabled ? 'badge-green' : 'badge-gray'}`}>{t.enabled ? 'Enabled' : 'Disabled'}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── App Shell ─────────────────────────────────────────────────────────────────
+const TABS = [
+  { id: 'vps', label: '🖥️ VPS Setup', Component: VPSTab },
+  { id: 'machines', label: '💻 Machines', Component: MachinesTab },
+  { id: 'tunnels', label: '🔗 Tunnels', Component: TunnelsTab },
+  { id: 'status', label: '📊 Status', Component: StatusTab },
+];
+
+function App() {
+  const [tab, setTab] = useState('vps');
+  const active = TABS.find(t => t.id === tab);
+  return (
+    <>
+      <header>
+        <h1>🐹 Gopher</h1>
+        <span>Self-hosted tunnel gateway — ngrok alternative</span>
+      </header>
+      <nav>
+        {TABS.map(t => (
+          <button key={t.id} className={tab === t.id ? 'active' : ''} onClick={() => setTab(t.id)}>{t.label}</button>
+        ))}
+      </nav>
+      <main>
+        {active && <active.Component />}
+      </main>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
