@@ -75,11 +75,14 @@ w := s.logWriter()
 client, err := sshpkg.NewClient(vpsConfig.Host, vpsConfig.Port, vpsConfig.Username, vpsConfig.PrivateKey)
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to connect: %v\n", err)
+s.Hub.Broadcast("\x00DONE")
 return err
 }
 defer client.Close()
 
-return sshpkg.BootstrapVPS(client, w)
+err = sshpkg.BootstrapVPS(client, w)
+s.Hub.Broadcast("\x00DONE")
+return err
 }
 
 func (s *DeployService) DeployVPS(vpsConfig *db.VPSConfig) error {
@@ -87,35 +90,42 @@ w := s.logWriter()
 tunnels, err := db.GetAllTunnelsForVPS()
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to get tunnels: %v\n", err)
+s.Hub.Broadcast("\x00DONE")
 return err
 }
 
 caddyfile, err := config.GenerateCaddyfile(*vpsConfig, tunnels)
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to generate Caddyfile: %v\n", err)
+s.Hub.Broadcast("\x00DONE")
 return err
 }
 
 machines, err := db.GetMachines()
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to get machines: %v\n", err)
+s.Hub.Broadcast("\x00DONE")
 return err
 }
 
 ratholeConfig, err := config.GenerateServerConfig(tunnels, machines)
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to generate rathole config: %v\n", err)
+s.Hub.Broadcast("\x00DONE")
 return err
 }
 
 client, err := sshpkg.NewClient(vpsConfig.Host, vpsConfig.Port, vpsConfig.Username, vpsConfig.PrivateKey)
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to connect: %v\n", err)
+s.Hub.Broadcast("\x00DONE")
 return err
 }
 defer client.Close()
 
-return sshpkg.DeployVPS(client, caddyfile, ratholeConfig, w)
+err = sshpkg.DeployVPS(client, caddyfile, ratholeConfig, w)
+s.Hub.Broadcast("\x00DONE")
+return err
 }
 
 func (s *DeployService) DeployClient(machine *db.Machine, vpsConfig *db.VPSConfig) error {
@@ -123,12 +133,14 @@ w := s.logWriter()
 tunnels, err := db.GetTunnelsByMachine(machine.ID)
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to get tunnels: %v\n", err)
+s.Hub.Broadcast("\x00DONE")
 return err
 }
 
 clientConfig, err := config.GenerateClientConfig(vpsConfig.Host, tunnels)
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to generate client config: %v\n", err)
+s.Hub.Broadcast("\x00DONE")
 return err
 }
 
@@ -143,9 +155,12 @@ client, err = sshpkg.NewClient(machine.Host, machine.Port, machine.Username, mac
 }
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to connect to machine: %v\n", err)
+s.Hub.Broadcast("\x00DONE")
 return err
 }
 defer client.Close()
 
-return sshpkg.DeployClient(client, machine.ID, clientConfig, w)
+err = sshpkg.DeployClient(client, machine.ID, clientConfig, w)
+s.Hub.Broadcast("\x00DONE")
+return err
 }

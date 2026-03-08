@@ -1,14 +1,16 @@
 package api
 
 import (
-"log"
-"net/http"
-"runtime/debug"
-"time"
+	"bufio"
+	"log"
+	"net"
+	"net/http"
+	"runtime/debug"
+	"time"
 
-"github.com/go-chi/cors"
-"github.com/smalex-z/gopher/internal/api/response"
-"github.com/smalex-z/gopher/internal/service"
+	"github.com/go-chi/cors"
+	"github.com/smalex-z/gopher/internal/api/response"
+	"github.com/smalex-z/gopher/internal/service"
 )
 
 func CORSMiddleware() func(http.Handler) http.Handler {
@@ -57,11 +59,28 @@ next.ServeHTTP(w, r)
 }
 
 type responseWriter struct {
-http.ResponseWriter
-status int
+	http.ResponseWriter
+	status int
 }
 
 func (rw *responseWriter) WriteHeader(status int) {
-rw.status = status
-rw.ResponseWriter.WriteHeader(status)
+	rw.status = status
+	rw.ResponseWriter.WriteHeader(status)
+}
+
+// Hijack forwards the hijack call to the underlying ResponseWriter so that
+// WebSocket upgrades (which require net.Conn access) work through this wrapper.
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := rw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return h.Hijack()
+}
+
+// Flush forwards flush to the underlying ResponseWriter for SSE / streaming.
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }

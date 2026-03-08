@@ -30,10 +30,11 @@ log.Fatalf("Failed to initialize database: %v", err)
 	tunnelSvc := service.NewTunnelService()
 	bootstrapSvc := service.NewBootstrapService(deploySvc)
 	authSvc := service.NewAuthService()
+	localSvc := service.NewLocalSetupService(deploySvc.Hub)
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
 
-	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc)
+	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc)
 
 mux := http.NewServeMux()
 mux.Handle("/api/", router)

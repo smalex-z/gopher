@@ -12,6 +12,7 @@ frontend/node_modules/
 
 # Frontend build output (embedded into Go binary via go:embed; produced by build.sh)
 cmd/server/frontend/dist/
+cmd/server/frontend
 
 # IDE
 .vscode/

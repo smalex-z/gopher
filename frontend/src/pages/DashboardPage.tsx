@@ -5,6 +5,7 @@ import client from '../api/client'
 import { vpsApi } from '../api/vps'
 import { machinesApi } from '../api/machines'
 import { tunnelsApi } from '../api/tunnels'
+import { localApi } from '../api/local'
 import StatusBadge from '../components/StatusBadge'
 import { toast } from '../lib/toast'
 import type { StatusData, Machine, Tunnel } from '../types'
@@ -32,6 +33,12 @@ export default function DashboardPage() {
   const { data: tunnelsData } = useQuery({
     queryKey: ['tunnels'],
     queryFn: () => tunnelsApi.list(),
+  })
+
+  const { data: localStatus } = useQuery({
+    queryKey: ['local-status'],
+    queryFn: () => localApi.status(),
+    refetchInterval: 10000,
   })
 
   const vps = vpsData?.data
@@ -67,18 +74,21 @@ export default function DashboardPage() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div onClick={() => navigate('/vps')} className="bg-white rounded-xl p-5 shadow-sm border cursor-pointer hover:shadow-md transition-shadow">
-          <div className="text-sm text-gray-500 mb-1">VPS Status</div>
-          {vps ? (
+        <div className="bg-white rounded-xl p-5 shadow-sm border">
+          <div className="text-sm text-gray-500 mb-1">This Server</div>
+          {localStatus?.domain ? (
             <>
-              <StatusBadge status="connected" className="font-semibold" />
-              <div className="text-xs text-gray-400 mt-2 truncate">{vps.host}</div>
-              <div className="text-xs text-gray-400 truncate">{vps.domain}</div>
+              <StatusBadge
+                status={localStatus.caddy_active === 'active' && localStatus.rathole_active === 'active' ? 'active' : 'inactive'}
+                className="font-semibold"
+              />
+              <div className="text-xs text-gray-400 mt-2 truncate">{localStatus.domain}</div>
+              <div className="text-xs text-gray-400 truncate">dashboard.{localStatus.domain}</div>
             </>
           ) : (
             <>
               <StatusBadge status="inactive" className="font-semibold" />
-              <div className="text-xs text-blue-500 mt-2">Click to configure →</div>
+              <div className="text-xs text-gray-400 mt-2">No domain configured</div>
             </>
           )}
         </div>
@@ -106,7 +116,51 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Get Started stepper */}
+      {/* Local Services status */}
+      {localStatus && (
+        <div className="bg-white rounded-xl shadow-sm border p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4">Local Services</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {[
+              {
+                name: 'Caddy (reverse proxy)',
+                installed: localStatus.caddy_installed,
+                active: localStatus.caddy_active,
+              },
+              {
+                name: 'Rathole Server (tunnels)',
+                installed: localStatus.rathole_installed,
+                active: localStatus.rathole_active,
+              },
+            ].map(svc => {
+              const status = svc.installed ? svc.active : 'not-installed'
+              const color =
+                status === 'active' ? 'bg-green-50 border-green-200' :
+                status === 'activating' ? 'bg-yellow-50 border-yellow-200' :
+                'bg-red-50 border-red-200'
+              const badge =
+                status === 'active' ? 'bg-green-100 text-green-700' :
+                status === 'activating' ? 'bg-yellow-100 text-yellow-700' :
+                'bg-red-100 text-red-700'
+              return (
+                <div key={svc.name} className={`rounded-lg border p-4 ${color}`}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-800">{svc.name}</span>
+                    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${badge}`}>
+                      {status}
+                    </span>
+                  </div>
+                  {localStatus.domain && status === 'active' && svc.name.startsWith('Caddy') && (
+                    <div className="text-xs text-gray-500 mt-1 truncate">
+                      dashboard.{localStatus.domain}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
       {showStepper && (
         <div className="bg-white rounded-xl shadow-sm border p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Get Started</h2>

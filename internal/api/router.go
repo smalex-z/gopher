@@ -16,6 +16,7 @@ func NewRouter(
 	deploySvc *service.DeployService,
 	bootstrapSvc *service.BootstrapService,
 	authSvc *service.AuthService,
+	localSvc *service.LocalSetupService,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -30,6 +31,7 @@ func NewRouter(
 	logsH := handlers.NewLogsHandler(deploySvc.Hub)
 	bootstrapH := handlers.NewBootstrapHandler(bootstrapSvc)
 	authH := handlers.NewAuthHandler(authSvc)
+	localH := handlers.NewLocalHandler(localSvc)
 
 	// Public: bootstrap script download and machine self-registration
 	r.Get("/static/bootstrap.sh", bootstrapH.ServeScript)
@@ -49,6 +51,12 @@ func NewRouter(
 			r.Post("/auth/logout", authH.Logout)
 
 			r.Post("/bootstrap/token", bootstrapH.GenerateToken)
+
+			r.Route("/local", func(r chi.Router) {
+				r.Get("/status", localH.Status)
+				r.Post("/install", localH.Install)
+				r.Post("/skip", localH.Skip)
+			})
 
 			r.Route("/vps", func(r chi.Router) {
 				r.Get("/", vpsH.Get)

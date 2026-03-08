@@ -54,9 +54,11 @@ type BootstrapToken struct {
 }
 
 type AppSettings struct {
-	ID           string    `json:"id" gorm:"primaryKey"`
-	PasswordHash string    `json:"-"`
-	IsSetup      bool      `json:"is_setup"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID             string    `json:"id" gorm:"primaryKey"`
+	PasswordHash   string    `json:"-"`
+	IsSetup        bool      `json:"is_setup"`
+	Domain         string    `json:"domain"`
+	LocalSetupDone bool      `json:"local_setup_done"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
