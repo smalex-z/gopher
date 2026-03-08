@@ -59,6 +59,8 @@ type AppSettings struct {
 	IsSetup        bool      `json:"is_setup"`
 	Domain         string    `json:"domain"`
 	LocalSetupDone bool      `json:"local_setup_done"`
+	SSHPublicKey   string    `json:"ssh_public_key"`
+	SSHPrivateKey  string    `json:"-" gorm:"column:ssh_private_key"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

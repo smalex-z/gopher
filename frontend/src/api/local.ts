@@ -8,6 +8,7 @@ export interface LocalServiceStatus {
   domain: string
   local_setup_done: boolean
   has_install_permission: boolean
+  ssh_public_key: string
 }
 
 export const localApi = {

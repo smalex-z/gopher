@@ -1,7 +1,6 @@
 package service
 
 import (
-"fmt"
 "time"
 
 "github.com/google/uuid"
@@ -79,12 +78,7 @@ if err != nil {
 return err
 }
 
-vps, err := db.GetVPS()
-if err != nil {
-return fmt.Errorf("VPS not configured: %w", err)
-}
-
-go s.deploy.DeployClient(machine, vps)
+go s.deploy.DeployClient(machine)
 return nil
 }
 
@@ -94,14 +88,15 @@ if err != nil {
 return nil, err
 }
 
-vps, _ := db.GetVPS()
+settings, _ := db.GetSettings()
 
 var client *sshpkg.SSHClient
-if vps != nil && machine.TunnelPort > 0 && vps.SSHPrivateKey != "" {
-client, err = sshpkg.NewClientViaJump(vps.Host, vps.Port, vps.Username, vps.PrivateKey,
-machine.Username, vps.SSHPrivateKey, machine.TunnelPort)
-} else {
+if settings != nil && machine.TunnelPort > 0 && settings.SSHPrivateKey != "" {
+client, err = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
+} else if machine.Host != "" {
 client, err = sshpkg.NewClient(machine.Host, machine.Port, machine.Username, machine.PrivateKey)
+} else {
+return map[string]interface{}{"id": id, "connected": false, "error": "no ssh access method"}, nil
 }
 if err != nil {
 return map[string]interface{}{

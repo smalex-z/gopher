@@ -31,8 +31,9 @@ WantedBy=multi-user.target
 const localInitialRatholeServerConfig = `[server]
 bind_addr = "0.0.0.0:2333"
 
-[server.default_token]
-default_token = "changeme"
+[server.services.placeholder]
+token = "changeme"
+bind_addr = "0.0.0.0:52000"
 
 # ===== BEGIN CUSTOM CONFIGURATION =====
 # Everything below this line will NOT be overwritten on deploy.
@@ -49,6 +50,7 @@ type LocalServiceStatus struct {
 	Domain               string `json:"domain"`
 	LocalSetupDone       bool   `json:"local_setup_done"`
 	HasInstallPermission bool   `json:"has_install_permission"`
+	SSHPublicKey         string `json:"ssh_public_key"`
 }
 
 type LocalSetupService struct {
@@ -72,7 +74,41 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 		Domain:               settings.Domain,
 		LocalSetupDone:       settings.LocalSetupDone,
 		HasInstallPermission: hasInstallPermission(),
+		SSHPublicKey:         settings.SSHPublicKey,
 	}, nil
+}
+
+// AddMachineSSHTunnel appends a new [server.services.*-ssh] entry to
+// /etc/rathole/server.toml inside the custom section, then reloads the service.
+func (s *LocalSetupService) AddMachineSSHTunnel(machine *db.Machine) error {
+	const configPath = "/etc/rathole/server.toml"
+	const endMarker = "# ===== END CUSTOM CONFIGURATION ====="
+	const beginMarker = "# ===== BEGIN CUSTOM CONFIGURATION ====="
+
+	existing, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read %s: %w", configPath, err)
+	}
+
+	newEntry := fmt.Sprintf("\n[server.services.machine-%s-ssh]\ntoken = \"%s\"\nbind_addr = \"0.0.0.0:%d\"\n",
+		machine.ID, machine.RatholeSSHToken, machine.TunnelPort)
+
+	content := string(existing)
+	if idx := strings.Index(content, endMarker); idx != -1 {
+		content = content[:idx] + newEntry + "\n" + content[idx:]
+	} else if idx := strings.Index(content, beginMarker); idx != -1 {
+		content += newEntry
+	} else {
+		content += newEntry
+	}
+
+	if err := writeLocalFile(configPath, content); err != nil {
+		return fmt.Errorf("failed to write %s: %w", configPath, err)
+	}
+
+	// Reload rathole-server so the new bind port takes effect.
+	_ = exec.Command("sudo", "systemctl", "reload-or-restart", "rathole-server").Run() // #nosec G204
+	return nil
 }
 
 // hasInstallPermission returns true if the process can write to system

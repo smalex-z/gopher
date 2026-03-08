@@ -28,9 +28,9 @@ log.Fatalf("Failed to initialize database: %v", err)
 	vpsSvc := service.NewVPSService(deploySvc)
 	machineSvc := service.NewMachineService(deploySvc)
 	tunnelSvc := service.NewTunnelService()
-	bootstrapSvc := service.NewBootstrapService(deploySvc)
 	authSvc := service.NewAuthService()
 	localSvc := service.NewLocalSetupService(deploySvc.Hub)
+	bootstrapSvc := service.NewBootstrapService(localSvc)
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
 
@@ -38,16 +38,35 @@ log.Fatalf("Failed to initialize database: %v", err)
 
 mux := http.NewServeMux()
 mux.Handle("/api/", router)
+mux.Handle("/static/", router)
 
 distFS, err := fs.Sub(frontendDist, "frontend/dist")
 if err != nil {
 log.Printf("Warning: could not set up frontend serving: %v", err)
 } else {
-mux.Handle("/", http.FileServer(http.FS(distFS)))
+mux.Handle("/", spaHandler(http.FS(distFS)))
 }
 
 log.Printf("Server starting on :%s", *port)
 if err := http.ListenAndServe(":"+*port, mux); err != nil {
 log.Fatalf("Server failed: %v", err)
 }
+}
+
+// spaHandler serves static files and falls back to index.html for unknown paths,
+// enabling client-side routing in the React SPA.
+func spaHandler(fsys http.FileSystem) http.Handler {
+	fileServer := http.FileServer(fsys)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f, err := fsys.Open(r.URL.Path)
+		if err != nil {
+			// File not found — serve index.html so the SPA router handles it
+			r2 := *r
+			r2.URL.Path = "/"
+			fileServer.ServeHTTP(w, &r2)
+			return
+		}
+		f.Close()
+		fileServer.ServeHTTP(w, r)
+	})
 }

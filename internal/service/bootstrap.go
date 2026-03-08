@@ -2,19 +2,21 @@ package service
 
 import (
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
+	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
 type BootstrapService struct {
-	deploy *DeployService
+	local *LocalSetupService
 }
 
-func NewBootstrapService(deploy *DeployService) *BootstrapService {
-	return &BootstrapService{deploy: deploy}
+func NewBootstrapService(local *LocalSetupService) *BootstrapService {
+	return &BootstrapService{local: local}
 }
 
 // GenerateToken creates a one-time bootstrap token valid for 1 hour.
@@ -45,22 +47,29 @@ type BootstrapResponse struct {
 	VPSHost       string `json:"vps_host"`
 }
 
-// Register validates token, creates machine record, returns rathole config.
-func (s *BootstrapService) Register(req BootstrapRequest) (*BootstrapResponse, error) {
+// Register validates token, provisions a machine, adds the SSH back-tunnel
+// to /etc/rathole/server.toml, and returns the rathole client config.
+func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*BootstrapResponse, error) {
 	bt, err := db.GetBootstrapToken(req.Token)
-	if err != nil {
-		return nil, fmt.Errorf("invalid token")
-	}
-	if bt.UsedAt != nil {
-		return nil, fmt.Errorf("token already used")
-	}
-	if time.Now().After(bt.ExpiresAt) {
-		return nil, fmt.Errorf("token expired")
+	if err != nil || bt.UsedAt != nil || time.Now().After(bt.ExpiresAt) {
+		return nil, fmt.Errorf("invalid or expired token")
 	}
 
-	vps, err := db.GetVPS()
+	// Ensure the server has an SSH keypair for connecting back to machines.
+	settings, err := db.GetSettings()
 	if err != nil {
-		return nil, fmt.Errorf("VPS not configured: %w", err)
+		return nil, fmt.Errorf("settings unavailable: %w", err)
+	}
+	if settings.SSHPublicKey == "" {
+		privKey, pubKey, kerr := sshpkg.GenerateRSAKeypair()
+		if kerr != nil {
+			return nil, fmt.Errorf("failed to generate SSH keypair: %w", kerr)
+		}
+		settings.SSHPublicKey = pubKey
+		settings.SSHPrivateKey = privKey
+		if err := db.SaveSettings(settings); err != nil {
+			return nil, fmt.Errorf("failed to save SSH keypair: %w", err)
+		}
 	}
 
 	tunnelPort, err := db.NextSSHTunnelPort()
@@ -83,18 +92,52 @@ func (s *BootstrapService) Register(req BootstrapRequest) (*BootstrapResponse, e
 	if err := db.CreateMachine(machine); err != nil {
 		return nil, fmt.Errorf("failed to create machine: %w", err)
 	}
-
 	if err := db.MarkTokenUsed(bt.ID, machine.ID); err != nil {
 		return nil, fmt.Errorf("failed to mark token used: %w", err)
 	}
 
-	ratholeConfig := config.GenerateMachineSSHClientConfig(vps.Host, machine)
+	// Add rathole service entry so the tunnel port opens immediately.
+	if err := s.local.AddMachineSSHTunnel(machine); err != nil {
+		fmt.Printf("WARN: failed to add rathole tunnel for machine %s: %v\n", machine.ID, err)
+	}
+
+	// Derive rathole server address from the request host (strip port if present).
+	ratholeHost := serverHost
+	if h, _, err := net.SplitHostPort(serverHost); err == nil {
+		ratholeHost = h
+	}
+
+	ratholeConfig := config.GenerateMachineSSHClientConfig(ratholeHost, machine)
+
+	// Async: wait for tunnel then verify SSH connectivity.
+	go s.awaitSSHHealth(machine, settings.SSHPrivateKey)
 
 	return &BootstrapResponse{
 		TunnelPort:    tunnelPort,
 		RatholeToken:  ratholeToken,
-		VPSPublicKey:  vps.SSHPublicKey,
+		VPSPublicKey:  settings.SSHPublicKey,
 		RatholeConfig: ratholeConfig,
-		VPSHost:       vps.Host,
+		VPSHost:       ratholeHost,
 	}, nil
+}
+
+// awaitSSHHealth polls localhost:tunnelPort for up to 60 s, then marks the
+// machine status as "connected" or "failed".
+func (s *BootstrapService) awaitSSHHealth(machine *db.Machine, privateKey string) {
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Second)
+		c, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, privateKey)
+		if err != nil {
+			continue
+		}
+		c.Close()
+		machine.Status = "connected"
+		now := time.Now()
+		machine.LastSeen = &now
+		_ = db.UpdateMachine(machine)
+		return
+	}
+	machine.Status = "failed"
+	_ = db.UpdateMachine(machine)
 }

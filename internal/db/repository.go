@@ -161,12 +161,12 @@ func NextSSHTunnelPort() (int, error) {
 var m Machine
 if err := DB.Order("tunnel_port DESC").First(&m).Error; err != nil {
 if err == gorm.ErrRecordNotFound {
-return 6000, nil
+return 10000, nil
 }
 return 0, err
 }
 if m.TunnelPort == 0 {
-return 6000, nil
+return 10000, nil
 }
 return m.TunnelPort + 1, nil
 }

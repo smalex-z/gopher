@@ -1,6 +1,117 @@
 # 🐹 Gopher
 
-Self-hosted alternative to ngrok. One cloud VM, unlimited private services, all accessible via subdomains with **automatic HTTPS**.
+Self-hosted reverse tunnel gateway. Run Gopher on your public VPS — it manages Caddy (HTTPS reverse proxy) and rathole (tunnel server) locally, then bootstraps private machines to punch outbound tunnels back. Any service on any machine becomes reachable at `service.yourdomain.com` with automatic TLS.
+
+## Architecture
+
+```
+Internet
+   │
+   ▼
+┌─────────────────────────────────────────────────┐
+│  Public VPS  — Gopher runs here                  │
+│                                                   │
+│  ┌─────────────────┐   ┌─────────────────────┐   │
+│  │  Caddy (80/443) │   │  rathole server     │   │
+│  │  auto-HTTPS     │──▶│  (port 2333)        │   │
+│  │  subdomain→port │   │  tunnels listening  │   │
+│  └─────────────────┘   └────────┬────────────┘   │
+└────────────────────────────────-│────────────────┘
+                                  │  outbound TCP tunnel
+                   ───────────────┘
+                  │
+         ┌────────┴──────────────────────────────────┐
+         │  Private network                          │
+         │                                           │
+         │  ┌──────────────┐  ┌──────────────────┐  │
+         │  │  Immich VM   │  │  Bitwarden VM    │  │
+         │  │  rathole cli │  │  rathole cli     │  │
+         │  │  :2283       │  │  :80             │  │
+         │  └──────────────┘  └──────────────────┘  │
+         └───────────────────────────────────────────┘
+```
+
+**Flow:** `photos.example.com` → Caddy → rathole server → tunnel → rathole client (Immich VM) → `localhost:2283`
+
+## Quick Start
+
+### Prerequisites
+- A publicly accessible VPS (Ubuntu/Debian recommended) — Gopher runs here
+- Go 1.21+ and Node.js 18+ to build from source
+
+### Build & Run
+
+```bash
+git clone https://github.com/smalex-z/gopher.git
+cd gopher
+./scripts/build.sh        # builds frontend then compiles Go binary
+sudo ./gopher             # needs root (or passwordless sudo) to manage Caddy/rathole/systemd
+# Open http://localhost:8080
+```
+
+The build script:
+1. Runs `npm ci && npm run build` inside `frontend/`, producing a compiled React app in `cmd/server/frontend/dist/`
+2. Compiles the Go binary with the frontend embedded via `//go:embed` — a single self-contained binary
+
+To rebuild only the Go binary after a backend-only change:
+```bash
+go build -o gopher ./cmd/server/...
+```
+
+### Workflow
+
+1. **Server tab** — run the setup wizard to install Caddy and rathole-server locally and configure your domain.
+2. **Machines tab** — click **Bootstrap New Machine**, run the generated one-liner on any remote machine. It installs rathole and establishes a persistent reverse tunnel back to this VPS.
+3. **Tunnels tab** — map subdomains to services: `subdomain → machine:local_port`.
+4. Done — `https://subdomain.yourdomain.com` is live with automatic TLS.
+
+## Project Structure
+
+```
+gopher/
+├── cmd/server/
+│   ├── main.go                     # Entry point; embeds frontend/dist
+│   └── frontend/dist/              # Compiled React app (git-ignored)
+├── frontend/                       # React + TypeScript + Tailwind source
+│   └── src/
+│       ├── pages/                  # Dashboard, Machines, Tunnels, Server, Status
+│       ├── components/             # Shared UI components
+│       ├── api/                    # Typed API client wrappers
+│       └── types/                  # Shared TypeScript types
+├── internal/
+│   ├── api/                        # chi router, handlers, middleware
+│   ├── config/                     # Caddyfile + rathole TOML generation
+│   ├── db/                         # SQLite (GORM) models + migrations
+│   ├── service/                    # Business logic
+│   └── ssh/                        # SSH/SFTP client + deploy scripts
+├── scripts/
+│   ├── build.sh                    # Full build (frontend + Go binary)
+│   └── dev.sh                      # Dev mode (Vite dev server + Go)
+└── vps/                            # Reference config templates
+```
+
+## API Reference
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/local/status` | Local service status (Caddy, rathole, domain) |
+| POST | `/api/local/install` | Install Caddy + rathole-server locally |
+| POST | `/api/bootstrap/token` | Generate one-time machine bootstrap token |
+| POST | `/api/bootstrap` | Machine self-registration (called by bootstrap script) |
+| GET | `/api/machines` | List machines |
+| DELETE | `/api/machines/{id}` | Remove machine |
+| POST | `/api/machines/{id}/deploy` | Re-deploy rathole client to machine |
+| GET | `/api/tunnels` | List tunnels |
+| POST | `/api/tunnels` | Create tunnel |
+| PUT | `/api/tunnels/{id}` | Update tunnel |
+| DELETE | `/api/tunnels/{id}` | Delete tunnel |
+
+## Tech Stack
+
+- **Backend:** Go, chi router, GORM + glebarez/sqlite, golang.org/x/crypto/ssh, pkg/sftp, gorilla/websocket
+- **Frontend:** React 18, TypeScript, Tailwind CSS, Vite — embedded in Go binary via `//go:embed`
+- **Tunnel:** Caddy 2 (reverse proxy + HTTPS) + rathole-org/rathole (TCP tunnel)
+
 
 ## Architecture
 

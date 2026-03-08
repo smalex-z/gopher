@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { LayoutDashboard, Server, Monitor, Network, Activity, LogOut } from 'lucide-react'
 import ToastContainer from './components/ToastContainer'
 import DashboardPage from './pages/DashboardPage'
-import VPSPage from './pages/VPSPage'
+import VPSPage from './pages/VPSPage' // repurposed as Server Info page
 import MachinesPage from './pages/MachinesPage'
 import TunnelsPage from './pages/TunnelsPage'
 import StatusPage from './pages/StatusPage'
@@ -47,7 +47,7 @@ function AppShell() {
               <span className="text-xl font-bold text-blue-600 flex items-center gap-2">🐹 Gopher</span>
               <div className="flex gap-1">
                 <NavLink to="/" end className={navClass}><LayoutDashboard size={16} /> Dashboard</NavLink>
-                <NavLink to="/vps" className={navClass}><Server size={16} /> VPS</NavLink>
+                <NavLink to="/vps" className={navClass}><Server size={16} /> Server</NavLink>
                 <NavLink to="/machines" className={navClass}><Monitor size={16} /> Machines</NavLink>
                 <NavLink to="/tunnels" className={navClass}><Network size={16} /> Tunnels</NavLink>
                 <NavLink to="/status" className={navClass}><Activity size={16} /> Status</NavLink>

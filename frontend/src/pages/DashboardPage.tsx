@@ -1,29 +1,15 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { CheckCircle, Circle, ClipboardCopy } from 'lucide-react'
-import client from '../api/client'
-import { vpsApi } from '../api/vps'
 import { machinesApi } from '../api/machines'
 import { tunnelsApi } from '../api/tunnels'
 import { localApi } from '../api/local'
 import StatusBadge from '../components/StatusBadge'
 import { toast } from '../lib/toast'
-import type { StatusData, Machine, Tunnel } from '../types'
+import type { Machine, Tunnel } from '../types'
 
 export default function DashboardPage() {
   const navigate = useNavigate()
-
-  useQuery({
-    queryKey: ['status'],
-    queryFn: () => client.get<{ data: StatusData }>('/status').then(r => r.data.data),
-    refetchInterval: 30000,
-  })
-
-  const { data: vpsData } = useQuery({
-    queryKey: ['vps'],
-    queryFn: () => vpsApi.get(),
-    retry: false,
-  })
 
   const { data: machinesData } = useQuery({
     queryKey: ['machines'],
@@ -41,26 +27,26 @@ export default function DashboardPage() {
     refetchInterval: 10000,
   })
 
-  const vps = vpsData?.data
   const machines: Machine[] = machinesData?.data ?? []
   const tunnels: Tunnel[] = tunnelsData?.data ?? []
 
   const activeMachines = machines.filter(m => m.status === 'active' || m.status === 'connected').length
   const activeTunnels = tunnels.filter(t => t.status === 'active' || t.status === 'connected').length
-  const isHealthy = !!vps && machines.length > 0 && tunnels.length > 0
+  const servicesOk = localStatus?.caddy_active === 'active' && localStatus?.rathole_active === 'active'
+  const isHealthy = servicesOk && machines.length > 0 && tunnels.length > 0
 
   const steps = [
-    { label: 'Configure VPS', done: !!vps, path: '/vps' },
-    { label: 'Add a Machine', done: machines.length > 0, path: '/machines' },
-    { label: 'Add a Tunnel', done: tunnels.length > 0, path: '/tunnels' },
-    { label: 'Deploy & Go Live', done: false, path: '/status', isInfo: true },
+    { label: 'Local services running', done: !!servicesOk, path: '/vps' },
+    { label: 'Bootstrap a machine', done: machines.length > 0, path: '/machines' },
+    { label: 'Add a tunnel', done: tunnels.length > 0, path: '/tunnels' },
+    { label: 'Deploy & go live', done: false, path: '/status', isInfo: true },
   ]
 
-  const showStepper = !vps || machines.length === 0 || tunnels.length === 0
+  const showStepper = !servicesOk || machines.length === 0 || tunnels.length === 0
 
   const copyUrl = (subdomain: string) => {
-    if (vps?.domain) {
-      navigator.clipboard.writeText(`${subdomain}.${vps.domain}`)
+    if (localStatus?.domain) {
+      navigator.clipboard.writeText(`${subdomain}.${localStatus.domain}`)
       toast.success('URL copied!')
     }
   }
@@ -107,11 +93,7 @@ export default function DashboardPage() {
 
         <div onClick={() => navigate('/status')} className="bg-white rounded-xl p-5 shadow-sm border cursor-pointer hover:shadow-md transition-shadow">
           <div className="text-sm text-gray-500 mb-1">System Health</div>
-          {isHealthy ? (
-            <StatusBadge status="active" className="font-semibold" />
-          ) : (
-            <StatusBadge status="inactive" className="font-semibold" />
-          )}
+          <StatusBadge status={isHealthy ? 'active' : 'inactive'} className="font-semibold" />
           <div className="text-xs text-gray-400 mt-2">{isHealthy ? 'All systems operational' : 'Setup required'}</div>
         </div>
       </div>
@@ -240,9 +222,9 @@ export default function DashboardPage() {
                 <div key={t.id} className="flex items-center justify-between">
                   <div>
                     <div className="font-medium text-sm text-gray-800">{t.name}</div>
-                    {vps?.domain ? (
+                    {localStatus?.domain ? (
                       <div className="flex items-center gap-1">
-                        <span className="text-xs text-gray-400">{t.subdomain}.{vps.domain}</span>
+                        <span className="text-xs text-gray-400">{t.subdomain}.{localStatus.domain}</span>
                         <button onClick={() => copyUrl(t.subdomain)} className="text-gray-300 hover:text-gray-600">
                           <ClipboardCopy size={12} />
                         </button>

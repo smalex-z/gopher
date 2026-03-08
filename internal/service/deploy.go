@@ -128,8 +128,16 @@ s.Hub.Broadcast("\x00DONE")
 return err
 }
 
-func (s *DeployService) DeployClient(machine *db.Machine, vpsConfig *db.VPSConfig) error {
+func (s *DeployService) DeployClient(machine *db.Machine) error {
 w := s.logWriter()
+
+settings, err := db.GetSettings()
+if err != nil {
+fmt.Fprintf(w, "ERROR: Failed to get settings: %v\n", err)
+s.Hub.Broadcast("\x00DONE")
+return err
+}
+
 tunnels, err := db.GetTunnelsByMachine(machine.ID)
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to get tunnels: %v\n", err)
@@ -137,7 +145,7 @@ s.Hub.Broadcast("\x00DONE")
 return err
 }
 
-clientConfig, err := config.GenerateClientConfig(vpsConfig.Host, tunnels)
+clientConfig, err := config.GenerateClientConfig(settings.Domain, tunnels)
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to generate client config: %v\n", err)
 s.Hub.Broadcast("\x00DONE")
@@ -145,13 +153,14 @@ return err
 }
 
 var client *sshpkg.SSHClient
-if machine.TunnelPort > 0 && vpsConfig.SSHPrivateKey != "" {
-fmt.Fprintln(w, "Connecting via VPS jump tunnel...")
-client, err = sshpkg.NewClientViaJump(vpsConfig.Host, vpsConfig.Port, vpsConfig.Username, vpsConfig.PrivateKey,
-machine.Username, vpsConfig.SSHPrivateKey, machine.TunnelPort)
-} else {
+if machine.TunnelPort > 0 && settings.SSHPrivateKey != "" {
+fmt.Fprintln(w, "Connecting to machine via tunnel...")
+client, err = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
+} else if machine.Host != "" {
 fmt.Fprintln(w, "Connecting directly to machine...")
 client, err = sshpkg.NewClient(machine.Host, machine.Port, machine.Username, machine.PrivateKey)
+} else {
+err = fmt.Errorf("no SSH access: machine has no host and tunnel is not established")
 }
 if err != nil {
 fmt.Fprintf(w, "ERROR: Failed to connect to machine: %v\n", err)
