@@ -1,0 +1,11 @@
+[client]
+remote_addr = "{{.VPSHost}}:2333"
+
+[client.default_token]
+default_token = "changeme"
+
+{{range .Tunnels}}
+[client.services.{{.Name}}]
+token = "{{.ID}}"
+local_addr = "127.0.0.1:{{.LocalPort}}"
+{{end}}

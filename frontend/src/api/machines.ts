@@ -1,0 +1,12 @@
+import client from './client'
+import type { Machine, ApiResponse } from '../types'
+
+export const machinesApi = {
+  list: () => client.get<ApiResponse<Machine[]>>('/machines/').then(r => r.data),
+  get: (id: string) => client.get<ApiResponse<Machine>>(`/machines/${id}`).then(r => r.data),
+  create: (data: Partial<Machine>) => client.post<ApiResponse<Machine>>('/machines/', data).then(r => r.data),
+  update: (id: string, data: Partial<Machine>) => client.put<ApiResponse<Machine>>(`/machines/${id}`, data).then(r => r.data),
+  delete: (id: string) => client.delete(`/machines/${id}`).then(r => r.data),
+  deploy: (id: string) => client.post(`/machines/${id}/deploy`).then(r => r.data),
+  status: (id: string) => client.get(`/machines/${id}/status`).then(r => r.data),
+}

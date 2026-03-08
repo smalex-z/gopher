@@ -1,0 +1,7 @@
+{
+    email admin@yourdomain.com
+}
+
+service.yourdomain.com {
+    reverse_proxy localhost:7000
+}

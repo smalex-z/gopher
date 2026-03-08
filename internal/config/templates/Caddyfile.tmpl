@@ -1,0 +1,9 @@
+{
+    email admin@{{.Domain}}
+}
+
+{{range .Tunnels}}
+{{.Subdomain}}.{{$.Domain}} {
+    reverse_proxy localhost:{{.RatholePort}}
+}
+{{end}}

@@ -1,0 +1,33 @@
+version: '3.8'
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - tunnel_net
+
+  rathole:
+    image: rapiz1/rathole:latest
+    restart: unless-stopped
+    ports:
+      - "2333:2333"
+    volumes:
+      - ./rathole-server.toml:/app/config.toml
+    command: ["--server", "/app/config.toml"]
+    networks:
+      - tunnel_net
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  tunnel_net:
+    driver: bridge

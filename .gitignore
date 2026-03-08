@@ -1,0 +1,31 @@
+# Go binary
+gopher
+gopher.exe
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend dependencies
+frontend/node_modules/
+
+# Frontend stale local dist (build output goes to cmd/server/frontend/dist/ for go:embed)
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.test
+coverage.out
+
+# Temporary files
+/tmp/
