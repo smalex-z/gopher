@@ -73,7 +73,21 @@ session.Stderr = w
 
 return session.Run(cmd)
 }
+func (c *SSHClient) ReadFile(remotePath string) ([]byte, error) {
+	sftpClient, err := sftp.NewClient(c.client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SFTP client: %w", err)
+	}
+	defer sftpClient.Close()
 
+	f, err := sftpClient.Open(remotePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return io.ReadAll(f)
+}
 func (c *SSHClient) UploadFile(content []byte, remotePath string) error {
 sftpClient, err := sftp.NewClient(c.client)
 if err != nil {

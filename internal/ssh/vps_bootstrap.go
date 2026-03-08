@@ -47,6 +47,11 @@ networks:
 const initialCaddyfile = `{
     email admin@example.com
 }
+
+# ===== BEGIN CUSTOM CONFIGURATION =====
+# Everything below this line will NOT be overwritten on deploy.
+# Add any custom Caddy directives or site blocks here.
+# ===== END CUSTOM CONFIGURATION =====
 `
 
 const initialRatholeConfig = `[server]
@@ -54,6 +59,11 @@ bind_addr = "0.0.0.0:2333"
 
 [server.default_token]
 default_token = "changeme"
+
+# ===== BEGIN CUSTOM CONFIGURATION =====
+# Everything below this line will NOT be overwritten on deploy.
+# Add any custom rathole service entries here.
+# ===== END CUSTOM CONFIGURATION =====
 `
 
 func BootstrapVPS(client *SSHClient, logWriter io.Writer) error {

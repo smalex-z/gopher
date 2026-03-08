@@ -44,15 +44,25 @@ Internet
 ### Prerequisites
 - A publicly accessible VPS (Ubuntu/Debian recommended)
 - Go 1.21+ on your host machine
+- Node.js 18+ and npm (for building the frontend)
 
 ### Build & Run
 
 ```bash
 git clone https://github.com/smalex-z/gopher.git
 cd gopher
-go build -o gopher .
+./scripts/build.sh        # builds frontend then compiles Go binary
 ./gopher
 # Open http://localhost:8080
+```
+
+The build script:
+1. Runs `npm ci && npm run build` inside `frontend/`, producing a compiled React app in `cmd/server/frontend/dist/`
+2. Compiles the Go binary with the frontend embedded via `//go:embed` — a single self-contained binary with no external file dependencies
+
+To rebuild only the Go binary after a backend-only change:
+```bash
+go build -o gopher ./cmd/server/...
 ```
 
 ### Workflow
@@ -68,29 +78,43 @@ go build -o gopher .
 
 ```
 gopher/
-├── main.go                     # Entry point, embeds frontend
-├── go.mod
+├── cmd/server/
+│   ├── main.go                     # Entry point; embeds frontend/dist
+│   └── frontend/dist/              # Compiled React app (git-ignored, produced by build)
+├── frontend/                       # React + TypeScript + Tailwind source
+│   ├── src/
+│   │   ├── pages/                  # Dashboard, Machines, Tunnels, VPS, Status
+│   │   ├── components/             # Shared UI components
+│   │   ├── api/                    # Typed API client wrappers
+│   │   └── types/                  # Shared TypeScript types
+│   ├── vite.config.ts              # Builds to cmd/server/frontend/dist
+│   └── package.json
 ├── internal/
 │   ├── api/
-│   │   └── handlers.go         # HTTP API (gorilla/mux)
+│   │   ├── router.go               # gorilla/mux route definitions
+│   │   ├── handlers/               # HTTP handlers (vps, machines, tunnels, ...)
+│   │   └── dto/                    # Request/response DTOs
 │   ├── config/
-│   │   ├── caddy.go            # Caddyfile generation
-│   │   └── rathole.go          # rathole TOML generation
+│   │   ├── caddy.go                # Caddyfile generation
+│   │   ├── rathole.go              # rathole TOML generation
+│   │   └── templates/              # Embedded config templates
 │   ├── db/
-│   │   ├── db.go               # SQLite open + migrate
-│   │   ├── vps.go              # vps_config table
-│   │   ├── machines.go         # machines table
-│   │   └── tunnels.go          # tunnels table
+│   │   ├── db.go                   # SQLite open + migrate
+│   │   ├── models.go               # GORM models
+│   │   ├── repository.go           # DB queries
+│   │   └── migrations/             # SQL migration files
+│   ├── service/                    # Business logic (deploy, machine, tunnel, ...)
 │   └── ssh/
-│       ├── client.go           # SSH client wrapper
-│       ├── vps.go              # VPS setup/deploy via SSH
-│       └── client_deploy.go    # rathole client deploy via SSH
-├── frontend/
-│   └── index.html              # React SPA (CDN, no build step)
+│       ├── client.go               # SSH/SFTP client wrapper
+│       ├── vps_bootstrap.go        # Full VPS setup via SSH
+│       ├── vps_deploy.go           # Config deploy + service restart
+│       └── client_deploy.go        # rathole client install on machines
+├── scripts/
+│   ├── build.sh                    # Full build (frontend + Go binary)
+│   └── dev.sh                      # Dev mode (Vite dev server + Go with hot reload)
 └── vps/
-    ├── docker-compose.yml      # Caddy + rathole stack
-    ├── Caddyfile.template
-    └── rathole-server.toml.template
+    ├── docker-compose.yml          # Caddy + rathole stack
+    └── *.template                  # Reference config templates
 ```
 
 ## API Reference
@@ -119,7 +143,7 @@ gopher/
 
 ## Tech Stack
 
-- **Backend:** Go, gorilla/mux, mattn/go-sqlite3, golang.org/x/crypto/ssh
-- **Frontend:** React 18 (CDN), vanilla CSS, no build step required
+- **Backend:** Go, gorilla/mux, GORM + mattn/go-sqlite3, golang.org/x/crypto/ssh, pkg/sftp
+- **Frontend:** React 18, TypeScript, Tailwind CSS, Vite — compiled and embedded in the Go binary via `//go:embed`
 - **VPS:** Docker Compose — Caddy 2 + rapiz1/rathole
 - **Clients:** rathole binary + systemd on each private machine

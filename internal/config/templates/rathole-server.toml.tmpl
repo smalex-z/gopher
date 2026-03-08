@@ -15,3 +15,8 @@ type = "tcp"
 token = "{{.RatholeSSHToken}}"
 bind_addr = "0.0.0.0:{{.TunnelPort}}"
 {{end}}{{end}}
+
+# ===== BEGIN CUSTOM CONFIGURATION =====
+# Everything below this line will NOT be overwritten on deploy.
+# Add any custom rathole service entries here.
+# ===== END CUSTOM CONFIGURATION =====
