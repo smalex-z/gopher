@@ -170,3 +170,21 @@ return 6000, nil
 }
 return m.TunnelPort + 1, nil
 }
+
+// App Settings Repository
+
+func GetSettings() (*AppSettings, error) {
+var s AppSettings
+if err := DB.First(&s, "id = 'singleton'").Error; err != nil {
+if err == gorm.ErrRecordNotFound {
+return &AppSettings{ID: "singleton", IsSetup: false}, nil
+}
+return nil, err
+}
+return &s, nil
+}
+
+func SaveSettings(s *AppSettings) error {
+s.ID = "singleton"
+return DB.Save(s).Error
+}

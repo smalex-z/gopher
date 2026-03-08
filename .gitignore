@@ -10,8 +10,8 @@ gopher.exe
 # Frontend dependencies
 frontend/node_modules/
 
-# Frontend stale local dist (build output goes to cmd/server/frontend/dist/ for go:embed)
-frontend/dist/
+# Frontend build output (embedded into Go binary via go:embed; produced by build.sh)
+cmd/server/frontend/dist/
 
 # IDE
 .vscode/

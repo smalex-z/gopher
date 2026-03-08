@@ -8,6 +8,7 @@ import (
 
 "github.com/go-chi/cors"
 "github.com/smalex-z/gopher/internal/api/response"
+"github.com/smalex-z/gopher/internal/service"
 )
 
 func CORSMiddleware() func(http.Handler) http.Handler {
@@ -40,6 +41,19 @@ response.InternalError(w, "internal server error")
 }()
 next.ServeHTTP(w, r)
 })
+}
+
+func AuthMiddleware(authSvc *service.AuthService) func(http.Handler) http.Handler {
+return func(next http.Handler) http.Handler {
+return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+cookie, err := r.Cookie("gopher_session")
+if err != nil || !authSvc.ValidateSession(cookie.Value) {
+response.Error(w, http.StatusUnauthorized, "unauthorized")
+return
+}
+next.ServeHTTP(w, r)
+})
+}
 }
 
 type responseWriter struct {

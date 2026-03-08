@@ -52,3 +52,11 @@ type BootstrapToken struct {
 	MachineID *string    `json:"machine_id"`
 	CreatedAt time.Time  `json:"created_at"`
 }
+
+type AppSettings struct {
+	ID           string    `json:"id" gorm:"primaryKey"`
+	PasswordHash string    `json:"-"`
+	IsSetup      bool      `json:"is_setup"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
