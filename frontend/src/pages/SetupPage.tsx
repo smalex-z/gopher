@@ -22,8 +22,9 @@ function PasswordStep({ onDone }: { onDone: () => void }) {
     try {
       await client.post('/auth/setup', { password })
       onDone()
-    } catch (err: any) {
-      toast.error(err.response?.data?.error ?? 'Setup failed')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Setup failed'
+      toast.error(msg)
     } finally {
       setLoading(false)
     }
@@ -78,8 +79,6 @@ function PasswordStep({ onDone }: { onDone: () => void }) {
 }
 
 // ─── Step 2: Local Services ───────────────────────────────────────────────────
-
-type ServiceState = 'unknown' | 'active' | 'inactive' | 'not-found' | 'activating' | 'failed'
 
 function ServicePill({ state, label }: { state: string; label: string }) {
   const map: Record<string, string> = {
