@@ -7,7 +7,6 @@ import (
 )
 
 const customBeginMarker = "# ===== BEGIN CUSTOM CONFIGURATION ====="
-const customEndMarker = "# ===== END CUSTOM CONFIGURATION ====="
 
 // preserveCustomSection replaces the custom section in newContent with the one
 // found in oldContent, so user edits between the markers are never overwritten.
