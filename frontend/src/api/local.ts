@@ -15,4 +15,5 @@ export const localApi = {
   status: () => client.get<{ data: LocalServiceStatus }>('/local/status').then(r => r.data.data),
   install: (domain: string) => client.post('/local/install', { domain }).then(r => r.data),
   skip: (domain?: string) => client.post('/local/skip', { domain }).then(r => r.data),
+  downloadSSHKey: () => client.get('/local/ssh-key', { responseType: 'blob' }).then(r => r.data as Blob),
 }

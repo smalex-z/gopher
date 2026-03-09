@@ -66,3 +66,20 @@ func (h *LocalHandler) Reconcile(w http.ResponseWriter, r *http.Request) {
 	}
 	response.Success(w, map[string]string{"message": "server config reconciled"})
 }
+
+// GET /api/local/ssh-key — download the VPS SSH private key
+func (h *LocalHandler) DownloadSSHKey(w http.ResponseWriter, r *http.Request) {
+	key, err := h.svc.GetSSHPrivateKey()
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	if key == "" {
+		response.NotFound(w, "no SSH key generated yet; bootstrap at least one machine first")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="gopher_id_rsa"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(key))
+}

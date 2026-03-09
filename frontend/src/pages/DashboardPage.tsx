@@ -51,6 +51,20 @@ export default function DashboardPage() {
     }
   }
 
+  const downloadSSHKey = async () => {
+    try {
+      const blob = await localApi.downloadSSHKey()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'gopher_id_rsa'
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      toast.error('No SSH key available yet — bootstrap a machine first')
+    }
+  }
+
   return (
     <div className="space-y-8">
       <div>
@@ -141,6 +155,33 @@ export default function DashboardPage() {
               )
             })}
           </div>
+        </div>
+      )}
+      {/* SSH Key download */}
+      {localStatus?.ssh_public_key && (
+        <div className="bg-white rounded-xl shadow-sm border p-6">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Server SSH Key</h2>
+              <p className="text-sm text-gray-500 mt-0.5">The private key lets you SSH into bootstrapped machines via their tunnels</p>
+            </div>
+            <button
+              onClick={downloadSSHKey}
+              className="px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-900 text-sm font-medium flex items-center gap-2"
+            >
+              ⬇ Download gopher_id_rsa
+            </button>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-3">
+            <div className="text-xs text-gray-500 mb-1">Public key (add to authorized_keys on any machine you want direct access to)</div>
+            <div className="flex items-center gap-2">
+              <code className="text-xs text-gray-700 break-all flex-1">{localStatus.ssh_public_key}</code>
+              <button onClick={() => { navigator.clipboard.writeText(localStatus.ssh_public_key); toast.success('Copied!') }} className="shrink-0 text-gray-400 hover:text-gray-600">
+                <ClipboardCopy size={14} />
+              </button>
+            </div>
+          </div>
+          <p className="text-xs text-gray-400 mt-2">Usage: <code className="bg-gray-100 px-1 rounded">ssh -i gopher_id_rsa -p &lt;tunnel-port&gt; &lt;username&gt;@{localStatus.domain ?? 'your-vps'}</code></p>
         </div>
       )}
       {showStepper && (
