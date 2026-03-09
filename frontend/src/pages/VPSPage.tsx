@@ -59,13 +59,13 @@ export default function ServerPage() {
         </div>
         {status?.domain && (
           <a
-            href={`https://dashboard.${status.domain}`}
+            href={`https://router.${status.domain}`}
             target="_blank"
             rel="noreferrer"
             className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:underline"
           >
             <ExternalLink size={14} />
-            https://dashboard.{status.domain}
+            https://router.{status.domain}
           </a>
         )}
         {!status?.domain && (

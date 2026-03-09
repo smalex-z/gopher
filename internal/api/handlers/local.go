@@ -8,6 +8,7 @@ import (
 	"github.com/smalex-z/gopher/internal/service"
 )
 
+
 type LocalHandler struct {
 	svc *service.LocalSetupService
 }
@@ -45,9 +46,23 @@ func (h *LocalHandler) Install(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/local/skip
 func (h *LocalHandler) Skip(w http.ResponseWriter, r *http.Request) {
-	if err := h.svc.Skip(); err != nil {
+	var body struct {
+		Domain string `json:"domain"`
+	}
+	// Ignore decode errors — domain is optional
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := h.svc.Skip(body.Domain); err != nil {
 		response.InternalError(w, err.Error())
 		return
 	}
 	response.Success(w, map[string]string{"message": "skipped"})
+}
+
+// POST /api/local/reconcile — rebuild server.toml from DB
+func (h *LocalHandler) Reconcile(w http.ResponseWriter, r *http.Request) {
+	if err := h.svc.ReconcileServerConfig(); err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"message": "server config reconciled"})
 }

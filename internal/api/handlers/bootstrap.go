@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/smalex-z/gopher/internal/api/response"
+	"github.com/smalex-z/gopher/internal/db"
 	"github.com/smalex-z/gopher/internal/service"
 )
 
@@ -17,6 +18,27 @@ func NewBootstrapHandler(svc *service.BootstrapService) *BootstrapHandler {
 	return &BootstrapHandler{svc: svc}
 }
 
+// hostURL builds the canonical base URL from settings + request context.
+// It uses the configured domain when available so the URL is always correct
+// regardless of which subdomain/IP the request arrived on. The scheme is
+// detected from the X-Forwarded-Proto header (set by Caddy) and falls back
+// to https when a domain is configured.
+func hostURL(r *http.Request) string {
+	scheme := "https"
+	if fwd := r.Header.Get("X-Forwarded-Proto"); fwd != "" {
+		scheme = fwd
+	} else if r.TLS != nil {
+		scheme = "https"
+	} else if r.Host == "localhost" || len(r.Host) > 0 && r.Host[0] == '[' {
+		scheme = "http"
+	}
+
+	if settings, err := db.GetSettings(); err == nil && settings.Domain != "" {
+		return fmt.Sprintf("%s://router.%s", scheme, settings.Domain)
+	}
+	return fmt.Sprintf("%s://%s", scheme, r.Host)
+}
+
 // POST /api/bootstrap/token - generate a one-time bootstrap token
 func (h *BootstrapHandler) GenerateToken(w http.ResponseWriter, r *http.Request) {
 	bt, err := h.svc.GenerateToken()
@@ -25,13 +47,8 @@ func (h *BootstrapHandler) GenerateToken(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	host := r.Host
-	hostURL := fmt.Sprintf("%s://%s", scheme, host)
-	bootstrapCmd := fmt.Sprintf("curl -s %s/static/bootstrap.sh | bash -s -- %s", hostURL, bt.Token)
+	base := hostURL(r)
+	bootstrapCmd := fmt.Sprintf("curl -fsSL %s/static/bootstrap.sh | bash -s -- %s", base, bt.Token)
 
 	response.Success(w, map[string]string{
 		"token":             bt.Token,
@@ -54,7 +71,7 @@ func (h *BootstrapHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.svc.Register(req, r.Host)
 	if err != nil {
-		response.InternalError(w, err.Error())
+		response.BadRequest(w, err.Error())
 		return
 	}
 	response.Success(w, resp)
@@ -62,13 +79,8 @@ func (h *BootstrapHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 // GET /static/bootstrap.sh - serve bootstrap script dynamically
 func (h *BootstrapHandler) ServeScript(w http.ResponseWriter, r *http.Request) {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	hostURL := fmt.Sprintf("%s://%s", scheme, r.Host)
-
-	script := generateBootstrapScript(hostURL)
+	base := hostURL(r)
+	script := generateBootstrapScript(base)
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, script)
@@ -113,19 +125,25 @@ fi
 # ── Register with control plane ───────────────────────────────────────────────
 echo ""
 echo "Registering with Gopher control plane..."
-RESPONSE=$(curl -sf -X POST "$HOST_URL/api/bootstrap" \
+RESPONSE=$(curl -sS -w "\n__HTTP_STATUS__:%{http_code}" -X POST "$HOST_URL/api/bootstrap" \
   -H "Content-Type: application/json" \
-  -d "{\"token\":\"$TOKEN\",\"name\":\"$MACHINE_NAME\",\"username\":\"$SSH_USER\"}") || {
-  echo "ERROR: Registration failed. Is the token valid and not expired?"
+  -d "{\"token\":\"$TOKEN\",\"name\":\"$MACHINE_NAME\",\"username\":\"$SSH_USER\"}" 2>&1)
+
+HTTP_STATUS=$(printf '%s' "$RESPONSE" | tail -1 | sed 's/.*__HTTP_STATUS__://')
+RESPONSE=$(printf '%s' "$RESPONSE" | sed '$d' | sed 's/__HTTP_STATUS__:[0-9]*//')
+
+if [ "$HTTP_STATUS" != "200" ]; then
+  echo "ERROR: Registration failed (HTTP $HTTP_STATUS)."
+  echo "Server response: $RESPONSE"
   exit 1
-}
+fi
 
 # Parse response (jq preferred, python3 fallback)
 _json() {
   if command -v jq &>/dev/null; then
-    echo "$RESPONSE" | jq -r ".data.$1"
+    printf '%s\n' "$RESPONSE" | jq -r ".data.$1"
   else
-    echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['$1'])"
+    printf '%s\n' "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['$1'])"
   fi
 }
 
@@ -196,7 +214,8 @@ echo "  rathole binary: $RATHOLE_BIN"
 echo "Writing rathole client config..."
 if [ "$HAS_SUDO" = true ]; then
   sudo mkdir -p /etc/rathole
-  echo "$RATHOLE_CONFIG" | sudo tee /etc/rathole/client.toml >/dev/null
+  sudo chown "$SSH_USER" /etc/rathole
+  echo "$RATHOLE_CONFIG" > /etc/rathole/client.toml
   CONFIG_PATH=/etc/rathole/client.toml
 else
   mkdir -p "$HOME/.config/rathole"
@@ -215,6 +234,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=$SSH_USER
 ExecStart=$RATHOLE_BIN $CONFIG_PATH
 Restart=always
 RestartSec=10
@@ -227,7 +247,7 @@ EOF
   sudo systemctl daemon-reload
   sudo systemctl enable rathole-client
   sudo systemctl restart rathole-client
-  echo "  Service installed (system). Check: sudo systemctl status rathole-client"
+  echo "  Service installed (system, running as $SSH_USER). Check: systemctl status rathole-client"
 else
   mkdir -p "$HOME/.config/systemd/user"
   cat > "$HOME/.config/systemd/user/rathole-client.service" <<EOF

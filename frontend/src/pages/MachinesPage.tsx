@@ -1,25 +1,31 @@
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Server, Copy, Check } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Server, Copy, Check, ChevronDown, ChevronRight, Plus } from 'lucide-react'
 import { machinesApi } from '../api/machines'
+import { localApi } from '../api/local'
 import { vpsApi } from '../api/vps'
 import StatusBadge from '../components/StatusBadge'
 import DeployLogModal from '../components/DeployLogModal'
 import { toast } from '../lib/toast'
-import type { Machine } from '../types'
+import type { Machine, Tunnel } from '../types'
 
 interface BootstrapModal { isOpen: boolean; command: string; token: string; expiresAt: string }
 interface DeployModalState { isOpen: boolean; machineId: string; machineName: string }
 
 export default function MachinesPage() {
   const qc = useQueryClient()
+  const navigate = useNavigate()
   const [bootstrapModal, setBootstrapModal] = useState<BootstrapModal>({ isOpen: false, command: '', token: '', expiresAt: '' })
   const [deployModal, setDeployModal] = useState<DeployModalState>({ isOpen: false, machineId: '', machineName: '' })
   const [copied, setCopied] = useState(false)
   const [tokenLoading, setTokenLoading] = useState(false)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const { data, isLoading } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list() })
+  const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
   const machines: Machine[] = data?.data ?? []
+  const domain = localStatus?.domain ?? ''
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => machinesApi.delete(id),
@@ -62,6 +68,18 @@ export default function MachinesPage() {
     }
   }
 
+  const toggleExpand = (id: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  const addTunnel = (machineId: string) => {
+    navigate(`/tunnels?machine=${machineId}`)
+  }
+
   if (isLoading) return <div className="text-gray-400 text-center py-12">Loading...</div>
 
   return (
@@ -69,7 +87,7 @@ export default function MachinesPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Machines</h1>
-          <p className="text-gray-500 mt-1">Linux servers registered via bootstrap tunnel</p>
+          <p className="text-gray-500 mt-1">Servers registered via bootstrap tunnel</p>
         </div>
         <button
           onClick={generateToken}
@@ -100,45 +118,99 @@ export default function MachinesPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
               <tr>
-                {['Name', 'Tunnel Port', 'Username', 'Status', 'Last Seen', 'Actions'].map(h => (
+                {['', 'Name', 'Username', 'Status', 'Last Seen', 'Actions'].map(h => (
                   <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody className="divide-y">
-              {machines.map(m => (
-                <React.Fragment key={m.id}>
-                  <tr className="hover:bg-gray-50">
-                    <td className="px-4 py-3 font-medium text-gray-900">{m.name}</td>
-                    <td className="px-4 py-3 text-gray-600">
-                      {m.tunnel_port > 0 ? (
-                        <span className="font-mono bg-gray-100 px-2 py-0.5 rounded text-xs">{m.tunnel_port}</span>
-                      ) : (
-                        <span className="text-gray-400">—</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-gray-600">{m.username}</td>
-                    <td className="px-4 py-3"><StatusBadge status={m.status} /></td>
-                    <td className="px-4 py-3 text-gray-500">{m.last_seen ? new Date(m.last_seen).toLocaleString() : 'Never'}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => setDeployModal({ isOpen: true, machineId: m.id, machineName: m.name })}
-                          className="px-2 py-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded hover:bg-blue-100"
-                        >
-                          Deploy Client
+              {machines.map(m => {
+                const isOpen = expanded.has(m.id)
+                const tunnels: Tunnel[] = m.tunnels ?? []
+                return (
+                  <React.Fragment key={m.id}>
+                    {/* Machine row */}
+                    <tr className="hover:bg-gray-50">
+                      <td className="px-3 py-3 w-6">
+                        <button onClick={() => toggleExpand(m.id)} className="text-gray-400 hover:text-gray-600">
+                          {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                         </button>
-                        <button
-                          onClick={() => handleDelete(m.id)}
-                          className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                </React.Fragment>
-              ))}
+                      </td>
+                      <td className="px-4 py-3 font-medium text-gray-900">{m.name}</td>
+                      <td className="px-4 py-3 text-gray-600">{m.username}</td>
+                      <td className="px-4 py-3"><StatusBadge status={m.status} /></td>
+                      <td className="px-4 py-3 text-gray-500">{m.last_seen ? new Date(m.last_seen).toLocaleString() : 'Never'}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => addTunnel(m.id)}
+                            className="px-2 py-1 text-xs bg-green-50 text-green-700 border border-green-200 rounded hover:bg-green-100 flex items-center gap-1"
+                          >
+                            <Plus size={11} /> Tunnel
+                          </button>
+                          <button
+                            onClick={() => setDeployModal({ isOpen: true, machineId: m.id, machineName: m.name })}
+                            className="px-2 py-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded hover:bg-blue-100"
+                          >
+                            Deploy
+                          </button>
+                          <button
+                            onClick={() => handleDelete(m.id)}
+                            className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+
+                    {/* Expanded tunnel list */}
+                    {isOpen && (
+                      <tr className="bg-gray-50">
+                        <td /> {/* chevron col */}
+                        <td colSpan={5} className="px-4 py-3">
+                          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Tunnels</div>
+                          <div className="space-y-1">
+                            {/* Built-in SSH tunnel */}
+                            {m.tunnel_port > 0 && (
+                              <div className="flex items-center gap-3 bg-white border border-gray-200 rounded-lg px-3 py-2">
+                                <span className="font-mono text-xs text-gray-700">
+                                  {domain ? `${domain}:${m.tunnel_port}` : `:${m.tunnel_port}`}
+                                  <span className="text-gray-400"> → </span>
+                                  localhost:22
+                                </span>
+                                <span className="text-xs bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">SSH</span>
+                                <StatusBadge status={m.status === 'connected' ? 'active' : m.status} />
+                              </div>
+                            )}
+                            {/* Service tunnels */}
+                            {tunnels.map(t => (
+                              <div key={t.id} className="flex items-center gap-3 bg-white border border-gray-200 rounded-lg px-3 py-2">
+                                <span className="font-mono text-xs text-gray-700">
+                                  {domain ? `${t.subdomain}.${domain}` : t.subdomain}
+                                  <span className="text-gray-400"> → </span>
+                                  localhost:{t.local_port}
+                                </span>
+                                <span className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded uppercase">{t.protocol}</span>
+                                <StatusBadge status={t.status} />
+                              </div>
+                            ))}
+                            {tunnels.length === 0 && m.tunnel_port === 0 && (
+                              <p className="text-xs text-gray-400 italic">No tunnels yet</p>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => addTunnel(m.id)}
+                            className="mt-2 flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800"
+                          >
+                            <Plus size={12} /> Add service tunnel
+                          </button>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                )
+              })}
             </tbody>
           </table>
         </div>

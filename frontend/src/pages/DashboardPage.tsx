@@ -69,7 +69,7 @@ export default function DashboardPage() {
                 className="font-semibold"
               />
               <div className="text-xs text-gray-400 mt-2 truncate">{localStatus.domain}</div>
-              <div className="text-xs text-gray-400 truncate">dashboard.{localStatus.domain}</div>
+              <div className="text-xs text-gray-400 truncate">router.{localStatus.domain}</div>
             </>
           ) : (
             <>
@@ -134,7 +134,7 @@ export default function DashboardPage() {
                   </div>
                   {localStatus.domain && status === 'active' && svc.name.startsWith('Caddy') && (
                     <div className="text-xs text-gray-500 mt-1 truncate">
-                      dashboard.{localStatus.domain}
+                      router.{localStatus.domain}
                     </div>
                   )}
                 </div>

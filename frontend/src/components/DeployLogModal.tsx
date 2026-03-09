@@ -32,7 +32,8 @@ export default function DeployLogModal({ isOpen, onClose, title, onStart }: Prop
 
     setStatus('connecting')
     setLogs([])
-    const ws = new WebSocket(`ws://${window.location.host}/api/logs/ws`)
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${wsProto}//${window.location.host}/api/logs/ws`)
     wsRef.current = ws
 
     ws.onopen = () => {

@@ -43,6 +43,9 @@ func NewRouter(
 		r.Get("/auth/status", authH.Status)
 		r.Post("/auth/setup", authH.Setup)
 		r.Post("/auth/login", authH.Login)
+		r.Get("/local/status", localH.Status)
+		r.Post("/local/install", localH.Install)
+		r.Post("/local/skip", localH.Skip)
 
 		// All routes below require a valid session
 		r.Group(func(r chi.Router) {
@@ -56,6 +59,7 @@ func NewRouter(
 				r.Get("/status", localH.Status)
 				r.Post("/install", localH.Install)
 				r.Post("/skip", localH.Skip)
+				r.Post("/reconcile", localH.Reconcile)
 			})
 
 			r.Route("/vps", func(r chi.Router) {
@@ -80,6 +84,7 @@ func NewRouter(
 
 			r.Route("/tunnels", func(r chi.Router) {
 				r.Get("/", tunnelH.List)
+				r.Get("/next-port", tunnelH.NextPort)
 				r.Post("/", tunnelH.Create)
 				r.Get("/{id}", tunnelH.Get)
 				r.Put("/{id}", tunnelH.Update)

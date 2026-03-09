@@ -127,7 +127,14 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
 
   const handleSkip = async () => {
     setSkipping(true)
-    await localApi.skip().catch(() => {})
+    await localApi.skip(domain || undefined).catch(() => {})
+    onDone()
+  }
+
+  const handleContinue = async () => {
+    if (domain) {
+      await localApi.skip(domain).catch(() => {})
+    }
     onDone()
   }
 
@@ -184,12 +191,28 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
         />
         {domain ? (
           <p className="text-xs text-gray-400 mt-1">
-            Dashboard will be accessible at <strong>https://dashboard.{domain}</strong>
+            Dashboard will be accessible at <strong>https://router.{domain}</strong>
           </p>
         ) : (
           <p className="text-xs text-orange-500 mt-1">Required — used to configure the Caddy reverse proxy</p>
         )}
       </div>
+
+      {/* Wildcard DNS notice */}
+      {domain && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800 space-y-1">
+          <div className="font-semibold">📋 DNS setup required</div>
+          <p>
+            Point a <strong>wildcard A record</strong> at your DNS provider to this server's IP:
+          </p>
+          <code className="block bg-white border border-blue-200 rounded px-3 py-1.5 text-xs font-mono mt-1">
+            *.{domain}  →  {'<your server IP>'}
+          </code>
+          <p className="text-xs text-blue-600 mt-1">
+            This lets every subdomain (e.g. <code>photos.{domain}</code>, <code>router.{domain}</code>) resolve to this machine automatically.
+          </p>
+        </div>
+      )}
 
       <div className="flex gap-3">
         <button
@@ -210,7 +233,7 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
 
       {allGood && (
         <button
-          onClick={onDone}
+          onClick={handleContinue}
           disabled={!domain}
           className="w-full bg-green-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
@@ -231,11 +254,9 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
 
 // ─── Main SetupPage ───────────────────────────────────────────────────────────
 
-export default function SetupPage() {
+export default function SetupPage({ initialStep = 1 }: { initialStep?: 1 | 2 }) {
   const { refetch } = useAuth()
-  // step 1 = password, step 2 = services.
-  // We deliberately do NOT call refetch after step 1 so this page stays mounted.
-  const [step, setStep] = useState<1 | 2>(1)
+  const [step, setStep] = useState<1 | 2>(initialStep)
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">

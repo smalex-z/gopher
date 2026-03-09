@@ -20,12 +20,21 @@ return &TunnelHandler{svc: svc}
 }
 
 func (h *TunnelHandler) List(w http.ResponseWriter, r *http.Request) {
-tunnels, err := h.svc.List()
-if err != nil {
-response.InternalError(w, err.Error())
-return
+	tunnels, err := h.svc.List()
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, tunnels)
 }
-response.Success(w, tunnels)
+
+func (h *TunnelHandler) NextPort(w http.ResponseWriter, r *http.Request) {
+	port, err := h.svc.NextPort()
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]int{"port": port})
 }
 
 func (h *TunnelHandler) Create(w http.ResponseWriter, r *http.Request) {

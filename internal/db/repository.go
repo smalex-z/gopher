@@ -107,22 +107,33 @@ return DB.Delete(&Tunnel{}, "id = ?", id).Error
 }
 
 func NextRatholePort() (int, error) {
-var tunnel Tunnel
-if err := DB.Order("rathole_port DESC").First(&tunnel).Error; err != nil {
-if err == gorm.ErrRecordNotFound {
-return 7000, nil
-}
-return 0, err
-}
-return tunnel.RatholePort + 1, nil
+	var tunnel Tunnel
+	if err := DB.Order("rathole_port DESC").First(&tunnel).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return 20000, nil
+		}
+		return 0, err
+	}
+	if tunnel.RatholePort < 20000 {
+		return 20000, nil
+	}
+	return tunnel.RatholePort + 1, nil
 }
 
 func CheckSubdomainExists(subdomain string) (bool, error) {
-var count int64
-if err := DB.Model(&Tunnel{}).Where("subdomain = ?", subdomain).Count(&count).Error; err != nil {
-return false, err
+	var count int64
+	if err := DB.Model(&Tunnel{}).Where("subdomain = ?", subdomain).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
-return count > 0, nil
+
+func CheckRatholePortExists(port int) (bool, error) {
+	var count int64
+	if err := DB.Model(&Tunnel{}).Where("rathole_port = ?", port).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func GetAllTunnelsForVPS() ([]Tunnel, error) {

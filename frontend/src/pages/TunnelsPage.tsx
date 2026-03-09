@@ -1,9 +1,10 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Network, ClipboardCopy } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
+import { Network, ClipboardCopy, ArrowRight } from 'lucide-react'
 import { tunnelsApi } from '../api/tunnels'
 import { machinesApi } from '../api/machines'
-import { vpsApi } from '../api/vps'
+import { localApi } from '../api/local'
 import StatusBadge from '../components/StatusBadge'
 import { toast } from '../lib/toast'
 import type { Tunnel } from '../types'
@@ -15,27 +16,50 @@ interface FormState {
   name: string
   subdomain: string
   local_port: number
-  protocol: string
+  rathole_port: number
 }
 
-const defaultForm: FormState = { machine_id: '', name: '', subdomain: '', local_port: 3000, protocol: 'http' }
+const defaultForm: FormState = { machine_id: '', name: '', subdomain: '', local_port: 3000, rathole_port: 0 }
 
 export default function TunnelsPage() {
   const qc = useQueryClient()
+  const [searchParams] = useSearchParams()
   const [modal, setModal] = useState<ModalState>({ isOpen: false })
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({})
   const [form, setForm] = useState<FormState>(defaultForm)
+  const [nextPortLoading, setNextPortLoading] = useState(false)
+
+  const openAddModal = async () => {
+    setNextPortLoading(true)
+    try {
+      const port = await tunnelsApi.nextPort()
+      setForm({ ...defaultForm, rathole_port: port })
+    } catch {
+      setForm(defaultForm)
+    } finally {
+      setNextPortLoading(false)
+    }
+    setModal({ isOpen: true })
+  }
 
   const { data: tunnelsData, isLoading } = useQuery({ queryKey: ['tunnels'], queryFn: () => tunnelsApi.list() })
   const { data: machinesData } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list() })
-  const { data: vpsData } = useQuery({ queryKey: ['vps'], queryFn: () => vpsApi.get(), retry: false })
+  const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
 
   const tunnels: Tunnel[] = tunnelsData?.data ?? []
   const machines = machinesData?.data ?? []
-  const vps = vpsData?.data
+  const domain = localStatus?.domain
+
+  useEffect(() => {
+    const machineId = searchParams.get('machine')
+    if (machineId) {
+      setForm(f => ({ ...f, machine_id: machineId }))
+      setModal({ isOpen: true })
+    }
+  }, [searchParams])
 
   const createMutation = useMutation({
-    mutationFn: (d: Partial<Tunnel>) => tunnelsApi.create(d),
+    mutationFn: (d: Partial<FormState>) => tunnelsApi.create(d),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['tunnels'] })
       setModal({ isOpen: false })
@@ -70,11 +94,10 @@ export default function TunnelsPage() {
 
   const getMachineName = (machineId: string) => machines.find(m => m.id === machineId)?.name ?? machineId
 
-  const copyUrl = (subdomain: string) => {
-    if (vps?.domain) {
-      navigator.clipboard.writeText(`${subdomain}.${vps.domain}`)
-      toast.success('URL copied!')
-    }
+  const copyUrl = (t: Tunnel) => {
+    const url = t.subdomain && domain ? `${t.subdomain}.${domain}` : `${domain}:${t.rathole_port}`
+    navigator.clipboard.writeText(url)
+    toast.success('Copied!')
   }
 
   if (isLoading) return <div className="text-gray-400 text-center py-12">Loading...</div>
@@ -86,9 +109,9 @@ export default function TunnelsPage() {
           <h1 className="text-2xl font-bold text-gray-900">Tunnels</h1>
           <p className="text-gray-500 mt-1">Expose local services through your VPS</p>
         </div>
-        <button onClick={() => { setForm(defaultForm); setModal({ isOpen: true }) }}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium">
-          + Add Tunnel
+        <button onClick={openAddModal} disabled={nextPortLoading}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50">
+          {nextPortLoading ? 'Loading...' : '+ Add Tunnel'}
         </button>
       </div>
 
@@ -96,10 +119,10 @@ export default function TunnelsPage() {
         <div className="bg-white rounded-xl shadow-sm border p-12 text-center">
           <Network className="w-12 h-12 text-gray-300 mx-auto mb-4" />
           <h2 className="text-lg font-semibold text-gray-700 mb-2">No tunnels configured yet</h2>
-          <p className="text-gray-400 text-sm mb-6 max-w-sm mx-auto">Tunnels route traffic from your VPS domain to services running on your local machines</p>
-          <button onClick={() => { setForm(defaultForm); setModal({ isOpen: true }) }}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium">
-            Add Your First Tunnel
+          <p className="text-gray-400 text-sm mb-6 max-w-sm mx-auto">Tunnels route traffic from your VPS to services running on your machines</p>
+          <button onClick={openAddModal} disabled={nextPortLoading}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50">
+            {nextPortLoading ? 'Loading...' : 'Add Your First Tunnel'}
           </button>
         </div>
       ) : (
@@ -107,7 +130,7 @@ export default function TunnelsPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
               <tr>
-                {['Name', 'Machine', 'URL', 'Local Port', 'Protocol', 'Status', 'Actions'].map(h => (
+                {['Name', 'Machine', 'Routing', 'Status', 'Actions'].map(h => (
                   <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
@@ -119,21 +142,20 @@ export default function TunnelsPage() {
                     <td className="px-4 py-3 font-medium text-gray-900">{t.name}</td>
                     <td className="px-4 py-3 text-gray-600">{getMachineName(t.machine_id)}</td>
                     <td className="px-4 py-3">
-                      {vps?.domain ? (
-                        <div className="flex items-center gap-1">
-                          <a href={`https://${t.subdomain}.${vps.domain}`} target="_blank" rel="noopener noreferrer"
-                            className="text-blue-600 hover:underline text-xs">{t.subdomain}.{vps.domain}</a>
-                          <button onClick={() => copyUrl(t.subdomain)} className="text-gray-300 hover:text-gray-600 ml-1">
-                            <ClipboardCopy size={12} />
-                          </button>
+                      <div className="flex items-center gap-2 font-mono text-xs text-gray-700">
+                        <div className="flex flex-col gap-0.5">
+                          {t.subdomain && domain && (
+                            <a href={`https://${t.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
+                              className="text-blue-600 hover:underline">{t.subdomain}.{domain}</a>
+                          )}
+                          <span className="text-gray-500">{domain ?? 'server'}:{t.rathole_port}</span>
                         </div>
-                      ) : (
-                        <span className="text-xs text-gray-400">{t.subdomain} <span className="text-gray-300">(configure VPS domain)</span></span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-gray-600">{t.local_port}</td>
-                    <td className="px-4 py-3">
-                      <span className="uppercase text-xs font-mono bg-gray-100 px-2 py-0.5 rounded">{t.protocol}</span>
+                        <ArrowRight size={12} className="text-gray-400 shrink-0" />
+                        <span>localhost:{t.local_port}</span>
+                        <button onClick={() => copyUrl(t)} className="text-gray-300 hover:text-gray-600 ml-1">
+                          <ClipboardCopy size={12} />
+                        </button>
+                      </div>
                     </td>
                     <td className="px-4 py-3"><StatusBadge status={t.status} /></td>
                     <td className="px-4 py-3">
@@ -145,7 +167,7 @@ export default function TunnelsPage() {
                   </tr>
                   {testResults[t.id] && (
                     <tr>
-                      <td colSpan={7} className="px-4 py-2">
+                      <td colSpan={5} className="px-4 py-2">
                         <span className={`text-xs px-2 py-1 rounded ${testResults[t.id].ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
                           {testResults[t.id].ok ? '✅' : '❌'} {testResults[t.id].message}
                         </span>
@@ -159,7 +181,6 @@ export default function TunnelsPage() {
         </div>
       )}
 
-      {/* Add Tunnel Modal */}
       {modal.isOpen && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg">
@@ -167,7 +188,12 @@ export default function TunnelsPage() {
               <h2 className="text-lg font-semibold">Add Tunnel</h2>
               <button onClick={() => setModal({ isOpen: false })} className="text-gray-400 hover:text-gray-600 text-xl">×</button>
             </div>
-            <div className="p-4 space-y-3">
+            <div className="p-4 space-y-4">
+              <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
+                <strong>HTTP traffic only via subdomain.</strong> Caddy proxies subdomain → local port over plain HTTP.
+                For raw TCP (SSH, databases), use the server port directly — no subdomain needed.
+              </div>
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Machine</label>
                 <select
@@ -176,40 +202,64 @@ export default function TunnelsPage() {
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                 >
                   <option value="">Select a machine...</option>
-                  {machines.map(m => <option key={m.id} value={m.id}>{m.name} ({m.host})</option>)}
+                  {machines.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                 </select>
               </div>
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
                 <input type="text" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="My Web App"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
               </div>
+
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Subdomain</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Local Port
+                  <span className="ml-1 font-normal text-gray-400 text-xs">(port your service listens on)</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-500 font-mono shrink-0">localhost:</span>
+                  <input type="number" value={form.local_port} onChange={e => setForm(f => ({ ...f, local_port: Number(e.target.value) }))}
+                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Subdomain
+                  <span className="ml-1 font-normal text-gray-400 text-xs">(optional — HTTP web apps only)</span>
+                </label>
                 <input type="text" value={form.subdomain} onChange={e => setForm(f => ({ ...f, subdomain: e.target.value }))} placeholder="photos"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                <p className="text-xs text-gray-400 mt-1">e.g. 'photos' → photos.yourdomain.com</p>
-                {vps?.domain && form.subdomain && (
-                  <div className="mt-1 text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded">
-                    Preview: <strong>{form.subdomain}.{vps.domain}</strong>
+                {domain && form.subdomain ? (
+                  <div className="mt-1 text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded font-mono">
+                    https://{form.subdomain}.{domain} → localhost:{form.local_port}
                   </div>
+                ) : (
+                  <p className="text-xs text-gray-400 mt-1">
+                    Leave blank to use raw TCP port only (e.g. {domain ?? 'server'}:20000).
+                  </p>
                 )}
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Local Port</label>
-                  <input type="number" value={form.local_port} onChange={e => setForm(f => ({ ...f, local_port: Number(e.target.value) }))}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Server Port
+                  <span className="ml-1 font-normal text-gray-400 text-xs">(port on your VPS — must be 20000–65535)</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-500 font-mono shrink-0 truncate max-w-[160px]" title={domain ?? 'server'}>{domain ?? 'server'}:</span>
+                  <input
+                    type="number"
+                    min={20000}
+                    max={65535}
+                    value={form.rathole_port || ''}
+                    onChange={e => setForm(f => ({ ...f, rathole_port: Number(e.target.value) }))}
+                    placeholder="20000"
+                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Protocol</label>
-                  <select value={form.protocol} onChange={e => setForm(f => ({ ...f, protocol: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
-                    <option value="http">HTTP</option>
-                    <option value="tcp">TCP</option>
-                  </select>
-                  <p className="text-xs text-gray-400 mt-1">{form.protocol === 'http' ? 'HTTP: web apps' : 'TCP: SSH, databases'}</p>
-                </div>
+                <p className="text-xs text-gray-400 mt-1">Leave at 0 to auto-assign the next available port.</p>
               </div>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
