@@ -26,7 +26,12 @@ jobs:
         run: go test -v -coverprofile=coverage.out ./... | tee test_output.txt
 
       - name: Generate coverage summary
-        run: go tool cover -func=coverage.out > coverage_summary.txt && cat coverage_summary.txt
+        run: |
+          if [ -f coverage.out ]; then
+            go tool cover -func=coverage.out | tee coverage_summary.txt
+          else
+            echo "No coverage data (no test files found)" | tee coverage_summary.txt
+          fi
 
       - name: Upload coverage report
         if: github.event_name == 'pull_request'
@@ -34,7 +39,6 @@ jobs:
         with:
           name: coverage-report
           path: |
-            coverage.out
             coverage_summary.txt
 
       - name: Comment test summary on PR
