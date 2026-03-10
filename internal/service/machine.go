@@ -1,20 +1,24 @@
 package service
 
 import (
-"time"
+	"fmt"
+	"os"
+	"os/exec"
+	"time"
 
-"github.com/google/uuid"
-"github.com/smalex-z/gopher/internal/api/dto"
-"github.com/smalex-z/gopher/internal/db"
-sshpkg "github.com/smalex-z/gopher/internal/ssh"
+	"github.com/google/uuid"
+	"github.com/smalex-z/gopher/internal/api/dto"
+	"github.com/smalex-z/gopher/internal/db"
+	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
 type MachineService struct {
-deploy *DeployService
+	deploy *DeployService
+	local  *LocalSetupService
 }
 
-func NewMachineService(deploy *DeployService) *MachineService {
-return &MachineService{deploy: deploy}
+func NewMachineService(deploy *DeployService, local *LocalSetupService) *MachineService {
+	return &MachineService{deploy: deploy, local: local}
 }
 
 func (s *MachineService) List() ([]db.Machine, error) {
@@ -69,7 +73,47 @@ return machine, nil
 }
 
 func (s *MachineService) Delete(id string) error {
-return db.DeleteMachine(id)
+	machine, err := db.GetMachine(id)
+	if err != nil {
+		return err
+	}
+
+	// Best-effort: SSH into the client machine and remove all gopher configs.
+	_ = s.local.RemoveMachineClient(machine)
+
+	// Remove Caddy blocks for every tunnel that belongs to this machine.
+	if tunnels, _ := db.GetTunnelsByMachine(id); len(tunnels) > 0 {
+		if settings, _ := db.GetSettings(); settings != nil && settings.Domain != "" {
+			const caddyFile = "/etc/caddy/Caddyfile"
+			if cc, readErr := os.ReadFile(caddyFile); readErr == nil {
+				content := string(cc)
+				changed := false
+				for _, t := range tunnels {
+					if t.Subdomain != "" {
+						updated := removeCaddyBlock(content, fmt.Sprintf("%s.%s", t.Subdomain, settings.Domain))
+						if updated != content {
+							content = updated
+							changed = true
+						}
+					}
+				}
+				if changed {
+					_ = writeLocalFile(caddyFile, content)
+					_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
+				}
+			}
+		}
+		for _, t := range tunnels {
+			_ = db.DeleteTunnel(t.ID)
+		}
+	}
+
+	if err := db.DeleteMachine(id); err != nil {
+		return err
+	}
+	// Reconcile server.toml now that machine + tunnels are gone from DB.
+	_ = s.local.ReconcileServerConfig()
+	return nil
 }
 
 func (s *MachineService) Deploy(id string) error {

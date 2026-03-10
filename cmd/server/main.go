@@ -25,9 +25,9 @@ log.Fatalf("Failed to initialize database: %v", err)
 }
 
 	deploySvc := service.NewDeployService()
-	vpsSvc := service.NewVPSService(deploySvc)
-	machineSvc := service.NewMachineService(deploySvc)
 	localSvc := service.NewLocalSetupService(deploySvc.Hub)
+	vpsSvc := service.NewVPSService(deploySvc)
+	machineSvc := service.NewMachineService(deploySvc, localSvc)
 	tunnelSvc := service.NewTunnelService(localSvc)
 	authSvc := service.NewAuthService()
 	bootstrapSvc := service.NewBootstrapService(localSvc)

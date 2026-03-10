@@ -273,6 +273,93 @@ func (s *LocalSetupService) RemoveServiceTunnel(tunnel *db.Tunnel, machine *db.M
 	}
 }
 
+// RemoveMachineClient SSHes into a client machine via its reverse tunnel and
+// removes all gopher-managed configuration: the rathole-client service,
+// client.toml, and the VPS public key from ~/.ssh/authorized_keys.
+//
+// Errors are best-effort — callers should proceed with DB cleanup even on failure.
+func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
+	settings, err := db.GetSettings()
+	if err != nil || settings.SSHPrivateKey == "" {
+		return fmt.Errorf("no server SSH key available")
+	}
+	if machine.TunnelPort == 0 {
+		return fmt.Errorf("machine has no tunnel port")
+	}
+
+	sshClient, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
+	if err != nil {
+		return fmt.Errorf("failed to SSH into machine via tunnel (port %d): %w", machine.TunnelPort, err)
+	}
+	defer sshClient.Close()
+
+	// Stop and disable rathole-client (system service and user-level service).
+	_, _ = sshClient.Execute(
+		"pkill -x rathole 2>/dev/null; " +
+			"sudo -n systemctl stop rathole-client 2>/dev/null; " +
+			"sudo -n systemctl disable rathole-client 2>/dev/null; " +
+			"systemctl --user stop rathole-client 2>/dev/null; " +
+			"systemctl --user disable rathole-client 2>/dev/null; true")
+
+	// Remove service unit files and trigger daemon reload.
+	_, _ = sshClient.Execute(
+		"sudo -n rm -f /etc/systemd/system/rathole-client.service 2>/dev/null; " +
+			"rm -f ~/.config/systemd/user/rathole-client.service 2>/dev/null; " +
+			"sudo -n systemctl daemon-reload 2>/dev/null; " +
+			"systemctl --user daemon-reload 2>/dev/null; true")
+
+	// Resolve the home directory (SFTP can't expand $HOME).
+	homeDir, _ := sshClient.Execute("echo $HOME")
+	homeDir = strings.TrimSpace(homeDir)
+	// Sanitize: reject values that look like shell injection attempts.
+	if !strings.HasPrefix(homeDir, "/") || strings.ContainsAny(homeDir, ";|&$`\\\"'") {
+		homeDir = "/home/" + machine.Username
+	}
+
+	// Remove client.toml from all known locations.
+	_, _ = sshClient.Execute(
+		"sudo -n rm -f /etc/rathole/client.toml 2>/dev/null; " +
+			"rm -f " + homeDir + "/.config/rathole/client.toml 2>/dev/null; true")
+
+	// Remove the VPS public key from authorized_keys.
+	if settings.SSHPublicKey != "" {
+		akContent, readErr := sshClient.Execute("cat " + homeDir + "/.ssh/authorized_keys 2>/dev/null")
+		if readErr == nil {
+			filtered := removeSSHPublicKey(akContent, settings.SSHPublicKey)
+			_ = sshClient.UploadFile([]byte(filtered), homeDir+"/.ssh/authorized_keys")
+		}
+	}
+
+	return nil
+}
+
+// removeSSHPublicKey removes a public key line from an authorized_keys document.
+// Lines are matched by their base64 key blob (the second field), so key-type
+// prefix and trailing comment are ignored.
+func removeSSHPublicKey(authorizedKeys, publicKey string) string {
+	targetBlob := sshKeyBlob(publicKey)
+	if targetBlob == "" {
+		return authorizedKeys
+	}
+	var out []string
+	for _, line := range strings.Split(authorizedKeys, "\n") {
+		if sshKeyBlob(line) != targetBlob {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// sshKeyBlob returns the base64 key blob (second whitespace-separated field)
+// from an authorized_keys line, or "" for blank/malformed lines.
+func sshKeyBlob(line string) string {
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) < 2 {
+		return ""
+	}
+	return fields[1]
+}
+
 // removeTomlSection removes a [section.name] block from a TOML string.
 func removeTomlSection(content, sectionName string) string {
 	lines := strings.Split(content, "\n")
