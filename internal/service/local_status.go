@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/smalex-z/gopher/internal/db"
+	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
 // LocalServiceStatus is returned by GET /api/local/status.
@@ -55,6 +56,38 @@ func (s *LocalSetupService) GetSSHPrivateKey() (string, error) {
 		return "", err
 	}
 	return settings.SSHPrivateKey, nil
+}
+
+// GenerateSSHKey creates a new RSA 4096-bit keypair, stores it in settings, and returns the public key.
+func (s *LocalSetupService) GenerateSSHKey() (string, error) {
+	privKey, pubKey, err := sshpkg.GenerateRSAKeypair()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate SSH keypair: %w", err)
+	}
+	settings, err := db.GetSettings()
+	if err != nil {
+		return "", err
+	}
+	settings.SSHPublicKey = pubKey
+	settings.SSHPrivateKey = privKey
+	if err := db.SaveSettings(settings); err != nil {
+		return "", err
+	}
+	return pubKey, nil
+}
+
+// SetSSHKey validates that privateKey and publicKey form a matching pair, then stores them.
+func (s *LocalSetupService) SetSSHKey(privateKey, publicKey string) error {
+	if err := sshpkg.ValidateKeyPair(privateKey, publicKey); err != nil {
+		return err
+	}
+	settings, err := db.GetSettings()
+	if err != nil {
+		return err
+	}
+	settings.SSHPublicKey = publicKey
+	settings.SSHPrivateKey = privateKey
+	return db.SaveSettings(settings)
 }
 
 // writeLocalFile writes content to path. If the direct write fails due to

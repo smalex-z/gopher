@@ -1,6 +1,7 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { CheckCircle, Circle, ClipboardCopy } from 'lucide-react'
+import { CheckCircle, Circle, ClipboardCopy, Key, Upload, RefreshCw } from 'lucide-react'
 import { machinesApi } from '../api/machines'
 import { tunnelsApi } from '../api/tunnels'
 import { localApi } from '../api/local'
@@ -21,7 +22,7 @@ export default function DashboardPage() {
     queryFn: () => tunnelsApi.list(),
   })
 
-  const { data: localStatus } = useQuery({
+  const { data: localStatus, refetch: refetchLocalStatus } = useQuery({
     queryKey: ['local-status'],
     queryFn: () => localApi.status(),
     refetchInterval: 10000,
@@ -29,6 +30,12 @@ export default function DashboardPage() {
 
   const machines: Machine[] = machinesData?.data ?? []
   const tunnels: Tunnel[] = tunnelsData?.data ?? []
+
+  const [showKeyPanel, setShowKeyPanel] = useState(false)
+  const [replaceMode, setReplaceMode] = useState<'choose' | 'upload'>('choose')
+  const [replacePriv, setReplacePriv] = useState('')
+  const [replacePub, setReplacePub] = useState('')
+  const [replacing, setReplacing] = useState(false)
 
   const activeMachines = machines.filter(m => m.status === 'active' || m.status === 'connected').length
   const activeTunnels = tunnels.filter(t => t.status === 'active' || t.status === 'connected').length
@@ -63,6 +70,42 @@ export default function DashboardPage() {
     } catch {
       toast.error('No SSH key available yet — bootstrap a machine first')
     }
+  }
+
+  const handleGenerateKey = async () => {
+    setReplacing(true)
+    try {
+      await localApi.generateSSHKey()
+      toast.success('New SSH key pair generated')
+      setShowKeyPanel(false)
+      refetchLocalStatus()
+    } catch {
+      toast.error('Failed to generate key')
+    } finally {
+      setReplacing(false)
+    }
+  }
+
+  const handleUploadKey = async () => {
+    setReplacing(true)
+    try {
+      await localApi.uploadSSHKey(replacePriv, replacePub)
+      toast.success('SSH key pair updated')
+      setShowKeyPanel(false)
+      setReplacePriv('')
+      setReplacePub('')
+      refetchLocalStatus()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Invalid key pair — ensure they match')
+    } finally {
+      setReplacing(false)
+    }
+  }
+
+  const readKeyFile = (file: File, setter: (v: string) => void) => {
+    const reader = new FileReader()
+    reader.onload = e => setter((e.target?.result as string) ?? '')
+    reader.readAsText(file)
   }
 
   return (
@@ -157,20 +200,28 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
-      {/* SSH Key download */}
+      {/* SSH Key */}
       {localStatus?.ssh_public_key && (
-        <div className="bg-white rounded-xl shadow-sm border p-6">
-          <div className="flex items-center justify-between mb-3">
+        <div className="bg-white rounded-xl shadow-sm border p-6 space-y-4">
+          <div className="flex items-center justify-between">
             <div>
               <h2 className="text-lg font-semibold text-gray-900">Server SSH Key</h2>
-              <p className="text-sm text-gray-500 mt-0.5">The private key lets you SSH into bootstrapped machines via their tunnels</p>
+              <p className="text-sm text-gray-500 mt-0.5">Used to SSH into bootstrapped machines through their tunnels</p>
             </div>
-            <button
-              onClick={downloadSSHKey}
-              className="px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-900 text-sm font-medium flex items-center gap-2"
-            >
-              ⬇ Download gopher_id_rsa
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={downloadSSHKey}
+                className="px-3 py-1.5 bg-gray-800 text-white rounded-lg hover:bg-gray-900 text-sm font-medium flex items-center gap-1.5"
+              >
+                ⬇ Download
+              </button>
+              <button
+                onClick={() => { setShowKeyPanel(v => !v); setReplaceMode('choose') }}
+                className="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-sm font-medium flex items-center gap-1.5"
+              >
+                <Key size={13} /> Replace
+              </button>
+            </div>
           </div>
           <div className="bg-gray-50 rounded-lg p-3">
             <div className="text-xs text-gray-500 mb-1">Public key (add to authorized_keys on any machine you want direct access to)</div>
@@ -181,7 +232,85 @@ export default function DashboardPage() {
               </button>
             </div>
           </div>
-          <p className="text-xs text-gray-400 mt-2">Usage: <code className="bg-gray-100 px-1 rounded">ssh -i gopher_id_rsa -p &lt;tunnel-port&gt; &lt;username&gt;@{localStatus.domain ?? 'your-vps'}</code></p>
+          <p className="text-xs text-gray-400">Usage: <code className="bg-gray-100 px-1 rounded">ssh -i gopher_id_rsa -p &lt;tunnel-port&gt; &lt;username&gt;@{localStatus.domain ?? 'your-vps'}</code></p>
+
+          {showKeyPanel && (
+            <div className="border-t pt-4 space-y-4">
+              {replaceMode === 'choose' ? (
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={handleGenerateKey}
+                    disabled={replacing}
+                    className="flex flex-col items-center gap-2 p-4 border-2 border-blue-200 rounded-xl hover:border-blue-400 hover:bg-blue-50 transition-all disabled:opacity-50"
+                  >
+                    <RefreshCw size={20} className={replacing ? 'text-blue-300 animate-spin' : 'text-blue-500'} />
+                    <div className="font-semibold text-gray-800 text-sm">Generate new</div>
+                    <div className="text-xs text-gray-400">New RSA 4096-bit pair</div>
+                  </button>
+                  <button
+                    onClick={() => setReplaceMode('upload')}
+                    className="flex flex-col items-center gap-2 p-4 border-2 border-gray-200 rounded-xl hover:border-gray-400 hover:bg-gray-50 transition-all"
+                  >
+                    <Upload size={20} className="text-gray-500" />
+                    <div className="font-semibold text-gray-800 text-sm">Upload own</div>
+                    <div className="text-xs text-gray-400">Use id_rsa / id_rsa.pub</div>
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Private key (PEM / OpenSSH)</label>
+                    <div className="flex gap-2">
+                      <textarea
+                        value={replacePriv}
+                        onChange={e => setReplacePriv(e.target.value)}
+                        rows={4}
+                        placeholder={'-----BEGIN RSA PRIVATE KEY-----\n...'}
+                        className="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      <label className="cursor-pointer flex flex-col items-center justify-center px-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 text-xs gap-1">
+                        <Upload size={12} />
+                        Browse
+                        <input type="file" className="hidden" onChange={e => { if (e.target.files?.[0]) readKeyFile(e.target.files[0], setReplacePriv) }} />
+                      </label>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Public key (authorized_keys format)</label>
+                    <div className="flex gap-2">
+                      <textarea
+                        value={replacePub}
+                        onChange={e => setReplacePub(e.target.value)}
+                        rows={2}
+                        placeholder="ssh-rsa AAAA..."
+                        className="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      <label className="cursor-pointer flex flex-col items-center justify-center px-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 text-xs gap-1">
+                        <Upload size={12} />
+                        Browse
+                        <input type="file" className="hidden" onChange={e => { if (e.target.files?.[0]) readKeyFile(e.target.files[0], setReplacePub) }} />
+                      </label>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setReplaceMode('choose')}
+                      className="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg text-xs hover:bg-gray-50"
+                    >
+                      ← Back
+                    </button>
+                    <button
+                      onClick={handleUploadKey}
+                      disabled={replacing || !replacePriv || !replacePub}
+                      className="flex-1 bg-blue-600 text-white py-1.5 rounded-lg text-xs font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {replacing ? 'Validating…' : 'Save key pair'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
       {showStepper && (

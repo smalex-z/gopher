@@ -61,12 +61,8 @@ func NewRouter(
 				r.Post("/skip", localH.Skip)
 				r.Post("/reconcile", localH.Reconcile)
 				r.Get("/ssh-key", localH.DownloadSSHKey)
-			})
-
-			r.Route("/vps", func(r chi.Router) {
-				r.Get("/", vpsH.Get)
-				r.Post("/setup", vpsH.Create)
-				r.Put("/", vpsH.Update)
+					r.Put("/ssh-key", localH.UploadSSHKey)
+					r.Post("/generate-ssh-key", localH.GenerateSSHKey)
 				r.Delete("/", vpsH.Delete)
 				r.Post("/bootstrap", vpsH.Bootstrap)
 				r.Post("/deploy", vpsH.Deploy)

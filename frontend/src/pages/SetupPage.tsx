@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Lock, Eye, EyeOff, CheckCircle2, XCircle, Loader2, SkipForward } from 'lucide-react'
+import { Lock, Eye, EyeOff, CheckCircle2, XCircle, Loader2, SkipForward, Key, RefreshCw, Upload, Download, ClipboardCopy } from 'lucide-react'
 import client from '../api/client'
 import { useAuth } from '../lib/auth'
 import { localApi, type LocalServiceStatus } from '../api/local'
@@ -34,7 +34,7 @@ function PasswordStep({ onDone }: { onDone: () => void }) {
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
       <div className="flex items-center gap-2 mb-6 text-blue-600">
         <Lock size={18} />
-        <span className="font-semibold text-sm uppercase tracking-wide">Step 1 of 2 — Admin password</span>
+        <span className="font-semibold text-sm uppercase tracking-wide">Step 1 of 3 — Admin password</span>
       </div>
       <form onSubmit={handleSubmit} className="space-y-5">
         <div>
@@ -140,7 +140,7 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-6">
       <div className="flex items-center gap-2 text-blue-600">
-        <span className="font-semibold text-sm uppercase tracking-wide">Step 2 of 2 — Local services</span>
+        <span className="font-semibold text-sm uppercase tracking-wide">Step 2 of 3 — Local services</span>
       </div>
 
       <p className="text-sm text-gray-600">
@@ -251,11 +251,229 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
   )
 }
 
-// ─── Main SetupPage ───────────────────────────────────────────────────────────
+// ─── Step 3: SSH Key ─────────────────────────────────────────────────────────
+type KeyMode = 'choose' | 'generate' | 'upload'
 
-export default function SetupPage({ initialStep = 1 }: { initialStep?: 1 | 2 }) {
+function SSHKeyStep({ onDone }: { onDone: () => void }) {
+  const [mode, setMode] = useState<KeyMode>('choose')
+  const [loading, setLoading] = useState(false)
+  const [generatedPubKey, setGeneratedPubKey] = useState('')
+  const [privKeyText, setPrivKeyText] = useState('')
+  const [pubKeyText, setPubKeyText] = useState('')
+
+  const handleGenerate = async () => {
+    setLoading(true)
+    try {
+      const pubKey = await localApi.generateSSHKey()
+      setGeneratedPubKey(pubKey)
+      setMode('generate')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to generate key')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleUploadSave = async () => {
+    setLoading(true)
+    try {
+      await localApi.uploadSSHKey(privKeyText, pubKeyText)
+      toast.success('SSH key pair saved')
+      onDone()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Invalid key pair — ensure private and public keys match')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const readFile = (file: File, setter: (v: string) => void) => {
+    const reader = new FileReader()
+    reader.onload = e => setter((e.target?.result as string) ?? '')
+    reader.readAsText(file)
+  }
+
+  const downloadPrivateKey = async () => {
+    try {
+      const blob = await localApi.downloadSSHKey()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = 'gopher_id_rsa'; a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      toast.error('Download failed')
+    }
+  }
+
+  // ── Choose ────────────────────────────────────────────────────────────────
+  if (mode === 'choose') {
+    return (
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-6">
+        <div className="flex items-center gap-2 text-blue-600">
+          <Key size={18} />
+          <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 3 — SSH key</span>
+        </div>
+        <p className="text-sm text-gray-600">
+          Gopher uses an SSH key pair to connect back into bootstrapped machines through their
+          reverse tunnels. Generate a fresh key or bring your own.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <button
+            onClick={handleGenerate}
+            disabled={loading}
+            className="flex flex-col items-center gap-3 p-6 border-2 border-blue-200 rounded-xl hover:border-blue-400 hover:bg-blue-50 transition-all disabled:opacity-50"
+          >
+            {loading
+              ? <Loader2 size={28} className="text-blue-400 animate-spin" />
+              : <RefreshCw size={28} className="text-blue-500" />}
+            <div className="text-center">
+              <div className="font-semibold text-gray-800">Generate new key</div>
+              <div className="text-xs text-gray-400 mt-1">Create a fresh RSA 4096-bit keypair</div>
+            </div>
+          </button>
+          <button
+            onClick={() => setMode('upload')}
+            className="flex flex-col items-center gap-3 p-6 border-2 border-gray-200 rounded-xl hover:border-gray-400 hover:bg-gray-50 transition-all"
+          >
+            <Upload size={28} className="text-gray-500" />
+            <div className="text-center">
+              <div className="font-semibold text-gray-800">Upload existing key</div>
+              <div className="text-xs text-gray-400 mt-1">Use your own id_rsa / id_rsa.pub</div>
+            </div>
+          </button>
+        </div>
+        <button
+          onClick={onDone}
+          className="w-full text-sm text-gray-400 hover:text-gray-600 py-2 transition-colors"
+        >
+          Skip — I'll set this up later
+        </button>
+      </div>
+    )
+  }
+
+  // ── Generate result ───────────────────────────────────────────────────────
+  if (mode === 'generate') {
+    return (
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-5">
+        <div className="flex items-center gap-2 text-blue-600">
+          <Key size={18} />
+          <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 3 — Key generated</span>
+        </div>
+        <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-start gap-3">
+          <CheckCircle2 size={18} className="text-green-600 mt-0.5 shrink-0" />
+          <div className="text-sm text-green-800">
+            <div className="font-semibold">Key pair generated and saved</div>
+            <div className="text-xs mt-1">Download the private key now — it cannot be retrieved again after leaving this page.</div>
+          </div>
+        </div>
+        <div>
+          <div className="text-xs font-medium text-gray-500 mb-1">Public key</div>
+          <div className="bg-gray-50 rounded-lg p-3 flex items-center gap-2">
+            <code className="text-xs text-gray-700 break-all flex-1">{generatedPubKey}</code>
+            <button
+              onClick={() => { navigator.clipboard.writeText(generatedPubKey); toast.success('Copied!') }}
+              className="shrink-0 text-gray-400 hover:text-gray-600"
+            >
+              <ClipboardCopy size={14} />
+            </button>
+          </div>
+        </div>
+        <button
+          onClick={downloadPrivateKey}
+          className="w-full flex items-center justify-center gap-2 bg-gray-800 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-gray-900 transition-colors"
+        >
+          <Download size={15} /> Download private key (gopher_id_rsa)
+        </button>
+        <button
+          onClick={onDone}
+          className="w-full bg-green-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors"
+        >
+          Continue to Dashboard →
+        </button>
+      </div>
+    )
+  }
+
+  // ── Upload ────────────────────────────────────────────────────────────────
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-5">
+      <div className="flex items-center gap-2 text-blue-600">
+        <Upload size={18} />
+        <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 3 — Upload SSH key</span>
+      </div>
+      <p className="text-sm text-gray-500">Paste your key contents or click Browse to select files.</p>
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Private key <span className="text-gray-400 font-normal">(id_rsa — PEM or OpenSSH format)</span>
+        </label>
+        <div className="flex gap-2">
+          <textarea
+            value={privKeyText}
+            onChange={e => setPrivKeyText(e.target.value)}
+            rows={5}
+            placeholder={'-----BEGIN RSA PRIVATE KEY-----\n...'}
+            className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <label className="cursor-pointer flex flex-col items-center justify-center px-3 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 text-xs gap-1">
+            <Upload size={14} />
+            Browse
+            <input type="file" className="hidden" onChange={e => { if (e.target.files?.[0]) readFile(e.target.files[0], setPrivKeyText) }} />
+          </label>
+        </div>
+      </div>
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Public key <span className="text-gray-400 font-normal">(id_rsa.pub — authorized_keys format)</span>
+        </label>
+        <div className="flex gap-2">
+          <textarea
+            value={pubKeyText}
+            onChange={e => setPubKeyText(e.target.value)}
+            rows={3}
+            placeholder="ssh-rsa AAAA..."
+            className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <label className="cursor-pointer flex flex-col items-center justify-center px-3 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 text-xs gap-1">
+            <Upload size={14} />
+            Browse
+            <input type="file" className="hidden" onChange={e => { if (e.target.files?.[0]) readFile(e.target.files[0], setPubKeyText) }} />
+          </label>
+        </div>
+      </div>
+      <div className="flex gap-3">
+        <button
+          onClick={() => setMode('choose')}
+          className="px-4 py-2.5 border border-gray-300 text-gray-600 rounded-lg text-sm hover:bg-gray-50 transition-colors"
+        >
+          ← Back
+        </button>
+        <button
+          onClick={handleUploadSave}
+          disabled={loading || !privKeyText || !pubKeyText}
+          className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {loading ? 'Validating…' : 'Save key pair'}
+        </button>
+      </div>
+      <button onClick={onDone} className="w-full text-sm text-gray-400 hover:text-gray-600 py-1 transition-colors">
+        Skip
+      </button>
+    </div>
+  )
+}
+
+// ─── Main SetupPage ───────────────────────────────────────────────────────────
+type SetupStep = 1 | 2 | 3
+
+export default function SetupPage({ initialStep = 1 }: { initialStep?: SetupStep }) {
   const { refetch } = useAuth()
-  const [step, setStep] = useState<1 | 2>(initialStep)
+  const [step, setStep] = useState<SetupStep>(initialStep)
+
+  const subtitle =
+    step === 1 ? 'Create an admin password to get started'
+    : step === 2 ? 'Set up local tunnel services'
+    : 'Configure SSH key for machine access'
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
@@ -263,14 +481,14 @@ export default function SetupPage({ initialStep = 1 }: { initialStep?: 1 | 2 }) 
         <div className="text-center mb-8">
           <span className="text-5xl">🐹</span>
           <h1 className="mt-4 text-3xl font-bold text-gray-900">Welcome to Gopher</h1>
-          <p className="mt-2 text-gray-500">
-            {step === 1 ? 'Create an admin password to get started' : 'Set up local tunnel services'}
-          </p>
+          <p className="mt-2 text-gray-500">{subtitle}</p>
         </div>
 
         {step === 1
           ? <PasswordStep onDone={() => setStep(2)} />
-          : <ServicesStep onDone={refetch} />
+          : step === 2
+          ? <ServicesStep onDone={() => setStep(3)} />
+          : <SSHKeyStep onDone={refetch} />
         }
       </div>
     </div>

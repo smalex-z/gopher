@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/smalex-z/gopher/internal/api/response"
 	"github.com/smalex-z/gopher/internal/service"
@@ -65,6 +66,38 @@ func (h *LocalHandler) Reconcile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, map[string]string{"message": "server config reconciled"})
+}
+
+// POST /api/local/generate-ssh-key — generate a new RSA keypair and store it
+func (h *LocalHandler) GenerateSSHKey(w http.ResponseWriter, r *http.Request) {
+	pubKey, err := h.svc.GenerateSSHKey()
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"public_key": strings.TrimSpace(pubKey)})
+}
+
+// PUT /api/local/ssh-key — validate and store an uploaded key pair
+func (h *LocalHandler) UploadSSHKey(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PrivateKey string `json:"private_key"`
+		PublicKey  string `json:"public_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.BadRequest(w, "invalid request body")
+		return
+	}
+	if body.PrivateKey == "" || body.PublicKey == "" {
+		response.BadRequest(w, "private_key and public_key are required")
+		return
+	}
+	if err := h.svc.SetSSHKey(body.PrivateKey, body.PublicKey); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	pubKey := strings.TrimSpace(body.PublicKey)
+	response.Success(w, map[string]string{"message": "SSH key pair saved", "public_key": pubKey})
 }
 
 // GET /api/local/ssh-key — download the VPS SSH private key
