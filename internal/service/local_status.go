@@ -166,18 +166,49 @@ func findExistingRatholeConfig(logWriter io.Writer) string {
 	return ""
 }
 
-// migrateRatholeConfig appends custom-section markers to an existing config if
-// they are not already present.
+// migrateRatholeConfig restructures an existing rathole config for Gopher:
+// the [server] base is preserved, all service entries are moved into the
+// user-owned custom section so Gopher can safely write its managed entries
+// above it on the first ReconcileServerConfig call.
 func migrateRatholeConfig(existing string) string {
 	const beginMarker = "# ===== BEGIN CUSTOM CONFIGURATION ====="
+	const endMarker = "# ===== END CUSTOM CONFIGURATION ====="
+
 	if strings.Contains(existing, beginMarker) {
 		return existing
 	}
-	return strings.TrimRight(existing, "\n") + "\n\n" +
-		"# ===== BEGIN CUSTOM CONFIGURATION =====\n" +
-		"# Everything below this line will NOT be overwritten on deploy.\n" +
-		"# Add any custom rathole service entries here.\n" +
-		"# ===== END CUSTOM CONFIGURATION =====\n"
+
+	// Separate the [server] base table (direct keys only) from sub-tables / other sections.
+	var baseLines, serviceLines []string
+	inServerBase := false
+	for _, line := range strings.Split(existing, "\n") {
+		stripped := strings.TrimSpace(line)
+		if stripped == "[server]" {
+			inServerBase = true
+			baseLines = append(baseLines, line)
+			continue
+		}
+		if stripped != "" && stripped[0] == '[' {
+			inServerBase = false
+		}
+		if inServerBase {
+			baseLines = append(baseLines, line)
+		} else {
+			serviceLines = append(serviceLines, line)
+		}
+	}
+
+	base := strings.TrimRight(strings.Join(baseLines, "\n"), "\n")
+	services := strings.TrimSpace(strings.Join(serviceLines, "\n"))
+
+	custom := beginMarker + "\n" +
+		"# Your existing rathole service entries have been preserved here.\n" +
+		"# Gopher will not modify this section.\n"
+	if services != "" {
+		custom += services + "\n"
+	}
+	custom += endMarker + "\n"
+	return base + "\n\n" + custom
 }
 
 func systemctlStatus(service string) string {

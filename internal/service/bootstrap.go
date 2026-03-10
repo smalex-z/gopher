@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"time"
@@ -77,7 +79,7 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		return nil, fmt.Errorf("failed to allocate tunnel port: %w", err)
 	}
 
-	ratholeToken := uuid.New().String()
+	ratholeToken := shortToken()
 
 	machine := &db.Machine{
 		ID:              uuid.New().String(),
@@ -140,4 +142,12 @@ func (s *BootstrapService) awaitSSHHealth(machine *db.Machine, privateKey string
 	}
 	machine.Status = "failed"
 	_ = db.UpdateMachine(machine)
+}
+
+// shortToken returns 16 random hex characters (8 bytes of entropy).
+// Shorter and easier to read/copy than a UUID while still being unguessable.
+func shortToken() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

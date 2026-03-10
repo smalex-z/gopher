@@ -11,15 +11,16 @@ import (
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
-// AddMachineSSHTunnel appends a new [server.services.*-ssh] entry to
-// /etc/rathole/server.toml inside the custom section, then reloads the service.
+// AddMachineSSHTunnel adds a new [server.services.*-ssh] entry to
+// /etc/rathole/server.toml above the custom section, then reloads the service.
 func (s *LocalSetupService) AddMachineSSHTunnel(machine *db.Machine) error {
 	return s.ReconcileServerConfig()
 }
 
-// ReconcileServerConfig rebuilds the custom section of /etc/rathole/server.toml
-// from the database. This fixes desync between the DB and the config file
-// (e.g. after manual edits, restarts, or stale entries from deleted records).
+// ReconcileServerConfig rebuilds /etc/rathole/server.toml from the database.
+// Gopher-managed entries (machine SSH tunnels, service tunnels) are placed
+// ABOVE the custom section. The custom section is user-owned and never
+// overwritten — it is the right place for pre-existing or user-added services.
 func (s *LocalSetupService) ReconcileServerConfig() error {
 	const configPath = "/etc/rathole/server.toml"
 	const beginMarker = "# ===== BEGIN CUSTOM CONFIGURATION ====="
@@ -30,31 +31,55 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 		return fmt.Errorf("failed to read %s: %w", configPath, err)
 	}
 
-	// Strip all gopher-managed entries from the ENTIRE file (line-by-line parse).
-	// This handles entries that leaked above the markers from older append logic.
-	header := stripGopherServerEntries(string(existing), beginMarker, endMarker)
+	content := string(existing)
 
-	// Rebuild custom entries from DB
+	// Split the file into the header zone (above BEGIN) and the user's custom section.
+	userBody := ""
+	if bIdx := strings.Index(content, beginMarker); bIdx != -1 {
+		above := content[:bIdx]
+		below := content[bIdx+len(beginMarker):]
+		if eIdx := strings.Index(below, endMarker); eIdx != -1 {
+			userBody = below[:eIdx]
+		} else {
+			userBody = below
+		}
+		content = above
+	}
+	// Strip any gopher service entries that old versions incorrectly placed inside
+	// the custom section, and normalise whitespace.
+	userBody = strings.TrimSpace(stripGopherServiceSections(userBody))
+
+	// Strip gopher-managed entries from the header zone and trim trailing whitespace.
+	base := strings.TrimRight(stripGopherServiceSections(content), "\n") + "\n"
+
+	// Rebuild gopher-managed entries from the database.
 	machines, _ := db.GetMachines()
 	tunnels, _ := db.GetTunnels()
 
-	var entries strings.Builder
+	var managed strings.Builder
 	for _, m := range machines {
 		if m.RatholeSSHToken == "" || m.TunnelPort == 0 {
 			continue
 		}
-		fmt.Fprintf(&entries, "\n[server.services.machine-%s-ssh]\ntoken = \"%s\"\nbind_addr = \"0.0.0.0:%d\"\n",
+		fmt.Fprintf(&managed, "\n[server.services.machine-%s-ssh]\ntoken = \"%s\"\nbind_addr = \"0.0.0.0:%d\"\n",
 			m.ID, m.RatholeSSHToken, m.TunnelPort)
 	}
 	for _, t := range tunnels {
 		if t.RatholePort == 0 {
 			continue
 		}
-		fmt.Fprintf(&entries, "\n[server.services.tunnel-%s]\ntoken = \"%s\"\nbind_addr = \"0.0.0.0:%d\"\n",
+		fmt.Fprintf(&managed, "\n[server.services.tunnel-%s]\ntoken = \"%s\"\nbind_addr = \"0.0.0.0:%d\"\n",
 			t.ID, t.ID, t.RatholePort)
 	}
 
-	newContent := header + beginMarker + "\n" + entries.String() + "\n" + endMarker + "\n"
+	// Assemble: base config + gopher entries + custom section.
+	customBlock := beginMarker + "\n"
+	if userBody != "" {
+		customBlock += userBody + "\n"
+	}
+	customBlock += endMarker + "\n"
+	newContent := base + managed.String() + "\n" + customBlock
+
 	if err := writeLocalFile(configPath, newContent); err != nil {
 		return fmt.Errorf("failed to write %s: %w", configPath, err)
 	}
@@ -67,11 +92,11 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	return nil
 }
 
-// stripGopherServerEntries removes all [server.services.machine-UUID-ssh] and
-// [server.services.tunnel-UUID] sections from the file content, then strips
-// everything from beginMarker onward (so the caller can append a fresh section).
-func stripGopherServerEntries(content, beginMarker, endMarker string) string {
-	// UUID pattern: 8-4-4-4-12 hex chars
+// stripGopherServiceSections removes all [server.services.machine-UUID-ssh] and
+// [server.services.tunnel-UUID] blocks from a TOML string. Used to clean both
+// the header zone and any legacy entries that were incorrectly placed inside the
+// custom section by older versions.
+func stripGopherServiceSections(content string) string {
 	isGopherSection := func(line string) bool {
 		if len(line) < 10 || line[0] != '[' {
 			return false
@@ -91,11 +116,6 @@ func stripGopherServerEntries(content, beginMarker, endMarker string) string {
 	skip := false
 	for _, line := range strings.Split(content, "\n") {
 		stripped := strings.TrimSpace(line)
-		if stripped == beginMarker || stripped == endMarker {
-			skip = false
-			// Drop the old marker lines; caller will append new ones
-			continue
-		}
 		if isGopherSection(stripped) {
 			skip = true
 			continue
@@ -107,9 +127,7 @@ func stripGopherServerEntries(content, beginMarker, endMarker string) string {
 			out = append(out, line)
 		}
 	}
-	// Trim trailing blank lines and return header ready for appending
-	header := strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n\n"
-	return header
+	return strings.Join(out, "\n")
 }
 
 // isUUID reports whether s is a standard 8-4-4-4-12 hex UUID.

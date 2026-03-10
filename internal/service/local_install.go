@@ -29,13 +29,8 @@ WantedBy=multi-user.target
 const localInitialRatholeServerConfig = `[server]
 bind_addr = "0.0.0.0:2333"
 
-[server.services.placeholder]
-token = "changeme"
-bind_addr = "0.0.0.0:52000"
-
 # ===== BEGIN CUSTOM CONFIGURATION =====
-# Everything below this line will NOT be overwritten on deploy.
-# Add any custom rathole service entries here.
+# Add your own rathole service entries here. Gopher will not modify this section.
 # ===== END CUSTOM CONFIGURATION =====
 `
 
