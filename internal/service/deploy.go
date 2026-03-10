@@ -169,7 +169,7 @@ return err
 }
 defer client.Close()
 
-err = sshpkg.DeployClient(client, machine.ID, clientConfig, w)
+	err = sshpkg.DeployClient(client, machine.ID, machine.Username, clientConfig, w)
 s.Hub.Broadcast("\x00DONE")
 return err
 }

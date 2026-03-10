@@ -127,6 +127,7 @@ if [ "$HAS_SUDO" = true ]; then
   sudo mkdir -p /etc/rathole
   sudo chown "$SSH_USER" /etc/rathole
   echo "$RATHOLE_CONFIG" > /etc/rathole/client.toml
+  sudo chown "$SSH_USER" /etc/rathole/client.toml
   CONFIG_PATH=/etc/rathole/client.toml
 else
   mkdir -p "$HOME/.config/rathole"

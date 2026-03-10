@@ -107,6 +107,29 @@ _, err = f.Write(content)
 return err
 }
 
+// UploadFileSudo uploads content to remotePath. It first attempts a direct SFTP
+// write (succeeds when the SSH user owns the file/directory). If that is denied,
+// it uploads to a temp path the user can always write and uses "sudo mv" to
+// install it. Pass owner="" to skip the chown step after the move.
+func (c *SSHClient) UploadFileSudo(content []byte, remotePath, owner string) error {
+	if err := c.UploadFile(content, remotePath); err == nil {
+		return nil
+	}
+	tmpPath := fmt.Sprintf("/tmp/.gopher-%d", time.Now().UnixNano())
+	if err := c.UploadFile(content, tmpPath); err != nil {
+		return fmt.Errorf("failed to upload temporary file for sudo install: %w", err)
+	}
+	cmd := fmt.Sprintf("sudo mv %q %q", tmpPath, remotePath)
+	if owner != "" {
+		cmd += fmt.Sprintf(" && sudo chown %q %q", owner, remotePath)
+	}
+	if _, err := c.Execute(cmd); err != nil {
+		_, _ = c.Execute(fmt.Sprintf("rm -f %q", tmpPath))
+		return fmt.Errorf("permission denied writing %s; sudo fallback also failed: %w", remotePath, err)
+	}
+	return nil
+}
+
 func (c *SSHClient) UploadReader(r io.Reader, remotePath string) error {
 sftpClient, err := sftp.NewClient(c.client)
 if err != nil {

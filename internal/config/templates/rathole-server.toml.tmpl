@@ -5,8 +5,8 @@ bind_addr = "0.0.0.0:2333"
 default_token = "changeme"
 
 {{range .Tunnels}}
-[server.services.{{.Name}}]
-token = "{{.ID}}"
+[server.services.tunnel-{{.ID}}]
+token = "{{.RatholeToken}}"
 bind_addr = "0.0.0.0:{{.RatholePort}}"
 {{end}}
 {{range .Machines}}{{if .RatholeSSHToken}}

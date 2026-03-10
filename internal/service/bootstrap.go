@@ -7,7 +7,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
@@ -24,8 +23,8 @@ func NewBootstrapService(local *LocalSetupService) *BootstrapService {
 // GenerateToken creates a one-time bootstrap token valid for 1 hour.
 func (s *BootstrapService) GenerateToken() (*db.BootstrapToken, error) {
 	bt := &db.BootstrapToken{
-		ID:        uuid.New().String(),
-		Token:     uuid.New().String(),
+		ID:        shortToken(),
+		Token:     shortToken(),
 		ExpiresAt: time.Now().Add(time.Hour),
 		CreatedAt: time.Now(),
 	}
@@ -82,7 +81,7 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 	ratholeToken := shortToken()
 
 	machine := &db.Machine{
-		ID:              uuid.New().String(),
+		ID:              shortToken(),
 		Name:            req.Name,
 		Username:        req.Username,
 		TunnelPort:      tunnelPort,

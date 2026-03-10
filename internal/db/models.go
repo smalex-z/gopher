@@ -32,16 +32,17 @@ type Machine struct {
 }
 
 type Tunnel struct {
-	ID          string    `json:"id" gorm:"primaryKey"`
-	MachineID   string    `json:"machine_id"`
-	Name        string    `json:"name"`
-	Subdomain   string    `json:"subdomain"`
-	LocalPort   int       `json:"local_port"`
-	RatholePort int       `json:"rathole_port"`
-	Protocol    string    `json:"protocol"`
-	Status      string    `json:"status"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID           string    `json:"id" gorm:"primaryKey"`
+	MachineID    string    `json:"machine_id"`
+	Name         string    `json:"name"`
+	Subdomain    string    `json:"subdomain"`
+	LocalPort    int       `json:"local_port"`
+	RatholePort  int       `json:"rathole_port"`
+	RatholeToken string    `json:"rathole_token"`
+	Protocol     string    `json:"protocol"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type BootstrapToken struct {

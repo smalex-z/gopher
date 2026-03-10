@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/smalex-z/gopher/internal/api/dto"
 	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
@@ -74,16 +73,17 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 	}
 
 	tunnel := &db.Tunnel{
-		ID:          uuid.New().String(),
-		MachineID:   req.MachineID,
-		Name:        req.Name,
-		Subdomain:   req.Subdomain,
-		LocalPort:   req.LocalPort,
-		RatholePort: ratholePort,
-		Protocol:    "tcp",
-		Status:      "inactive",
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		ID:           shortToken(),
+		MachineID:    req.MachineID,
+		Name:         req.Name,
+		Subdomain:    req.Subdomain,
+		LocalPort:    req.LocalPort,
+		RatholePort:  ratholePort,
+		RatholeToken: shortToken(),
+		Protocol:     "tcp",
+		Status:       "inactive",
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 
 	if err := db.CreateTunnel(tunnel); err != nil {

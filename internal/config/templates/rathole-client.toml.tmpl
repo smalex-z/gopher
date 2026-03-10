@@ -5,7 +5,7 @@ remote_addr = "{{.VPSHost}}:2333"
 default_token = "changeme"
 
 {{range .Tunnels}}
-[client.services.{{.Name}}]
-token = "{{.ID}}"
+[client.services.tunnel-{{.ID}}]
+token = "{{.RatholeToken}}"
 local_addr = "127.0.0.1:{{.LocalPort}}"
 {{end}}

@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/smalex-z/gopher/internal/api/dto"
 	"github.com/smalex-z/gopher/internal/db"
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
@@ -31,7 +30,7 @@ return db.GetMachine(id)
 
 func (s *MachineService) Create(req dto.CreateMachineRequest) (*db.Machine, error) {
 machine := &db.Machine{
-ID:         uuid.New().String(),
+ID:         shortToken(),
 Name:       req.Name,
 Host:       req.Host,
 Port:       req.Port,

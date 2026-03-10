@@ -68,8 +68,12 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 		if t.RatholePort == 0 {
 			continue
 		}
+		token := t.RatholeToken
+		if token == "" {
+			token = t.ID // backward compat for tunnels created before this change
+		}
 		fmt.Fprintf(&managed, "\n[server.services.tunnel-%s]\ntoken = \"%s\"\nbind_addr = \"0.0.0.0:%d\"\n",
-			t.ID, t.ID, t.RatholePort)
+			t.ID, token, t.RatholePort)
 	}
 
 	// Assemble: base config + gopher entries + custom section.
@@ -211,8 +215,12 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	if ratholeHost == "" {
 		return fmt.Errorf("domain not configured; set the domain in Setup before adding tunnels")
 	}
+	token := tunnel.RatholeToken
+	if token == "" {
+		token = tunnel.ID // backward compat
+	}
 	clientEntry := fmt.Sprintf("\n[client.services.tunnel-%s]\ntype = \"tcp\"\ntoken = \"%s\"\nlocal_addr = \"localhost:%d\"\n",
-		tunnel.ID, tunnel.ID, tunnel.LocalPort)
+		tunnel.ID, token, tunnel.LocalPort)
 	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
 	if err != nil || strings.TrimSpace(existing) == "" {
 		// Build from scratch
@@ -233,12 +241,11 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		_, _ = sshClient.Execute("mkdir -p " + homeDir + "/.config/rathole")
 	}
 
-	// Write config directly via SFTP — no sudo required.
-	// Bootstrap sets the user as owner of /etc/rathole/ so this works.
-	// For machines bootstrapped before this fix, run on client:
-	//   sudo chown <user> /etc/rathole /etc/rathole/client.toml
-	if err := sshClient.UploadFile([]byte(updated), configPath); err != nil {
-		return fmt.Errorf("failed to write client.toml on machine: %w\n\nFix: on the client machine run: sudo chown %s /etc/rathole /etc/rathole/client.toml", err, machine.Username)
+	// Write config directly via SFTP — works when the SSH user owns /etc/rathole/
+	// (bootstrap runs chown for sudo-capable machines). UploadFileSudo handles legacy
+	// machines where the file ended up root-owned by falling back to a sudo mv.
+	if err := sshClient.UploadFileSudo([]byte(updated), configPath, machine.Username); err != nil {
+		return fmt.Errorf("failed to write client.toml on machine: %w", err)
 	}
 
 	// Restart rathole-client. Bootstrap now runs the service as the SSH user,
