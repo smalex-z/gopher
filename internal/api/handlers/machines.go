@@ -78,9 +78,13 @@ response.Success(w, machine)
 func (h *MachineHandler) Delete(w http.ResponseWriter, r *http.Request) {
 id := chi.URLParam(r, "id")
 if err := h.svc.Delete(id); err != nil {
-response.InternalError(w, err.Error())
-return
-}
+		if _, ok := err.(*apperrors.NotFoundError); ok {
+			response.NotFound(w, "machine not found")
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
 response.NoContent(w)
 }
 

@@ -24,6 +24,11 @@ if err != nil {
 return fmt.Errorf("failed to open database: %w", err)
 }
 
+	// Enable foreign key enforcement (SQLite disables it by default).
+	if err := DB.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
+		return fmt.Errorf("failed to enable foreign keys: %w", err)
+	}
+
 	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &AppSettings{}); err != nil {
 return fmt.Errorf("failed to auto-migrate: %w", err)
 }

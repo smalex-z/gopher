@@ -99,9 +99,13 @@ response.Success(w, tunnel)
 func (h *TunnelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 id := chi.URLParam(r, "id")
 if err := h.svc.Delete(id); err != nil {
-response.InternalError(w, err.Error())
-return
-}
+		if _, ok := err.(*apperrors.NotFoundError); ok {
+			response.NotFound(w, "tunnel not found")
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
 response.NoContent(w)
 }
 
