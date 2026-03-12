@@ -76,6 +76,12 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 			t.ID, token, t.RatholePort)
 	}
 
+	// Rathole requires at least one [server.services.*] entry to start.
+	// Use a harmless placeholder when both managed and user sections are empty.
+	if managed.Len() == 0 && strings.TrimSpace(userBody) == "" {
+		managed.WriteString("\n[server.services.placeholder]\ntoken = \"placeholder\"\nbind_addr = \"0.0.0.0:52000\"\n")
+	}
+
 	// Assemble: base config + gopher entries + custom section.
 	customBlock := beginMarker + "\n"
 	if userBody != "" {
