@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Lock, Eye, EyeOff, CheckCircle2, XCircle, Loader2, SkipForward, Key, RefreshCw, Upload, Download, ClipboardCopy } from 'lucide-react'
 import client from '../api/client'
 import { useAuth } from '../lib/auth'
@@ -106,6 +106,10 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
   const [status, setStatus] = useState<LocalServiceStatus | null>(null)
   const [showLogs, setShowLogs] = useState(false)
   const [skipping, setSkipping] = useState(false)
+  const [dnsStatus, setDnsStatus] = useState<'idle' | 'checking' | 'ok' | 'fail'>('idle')
+  const [dnsMessage, setDnsMessage] = useState('')
+  const [installComplete, setInstallComplete] = useState(false)
+  const dnsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const load = () => localApi.status().then(setStatus).catch(() => {})
 
@@ -121,6 +125,43 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
     const t = setInterval(load, 5000)
     return () => clearInterval(t)
   }, [])
+
+  // Debounced DNS check whenever domain changes
+  useEffect(() => {
+    if (dnsTimerRef.current) clearTimeout(dnsTimerRef.current)
+    const trimmed = domain.trim()
+    if (!trimmed || !trimmed.includes('.')) {
+      setDnsStatus('idle')
+      setDnsMessage('')
+      return
+    }
+    setDnsStatus('checking')
+    dnsTimerRef.current = setTimeout(async () => {
+      try {
+        const result = await localApi.checkDNS(trimmed)
+        if (result.ok) {
+          setDnsStatus('ok')
+          setDnsMessage(result.resolved_to ? `Resolves to ${result.resolved_to}` : 'DNS resolves ✓')
+        } else {
+          setDnsStatus('fail')
+          setDnsMessage(result.message ?? 'DNS not found')
+        }
+      } catch {
+        setDnsStatus('fail')
+        setDnsMessage('DNS check failed')
+      }
+    }, 1200)
+    return () => { if (dnsTimerRef.current) clearTimeout(dnsTimerRef.current) }
+  }, [domain])
+
+  // Redirect to router.domain after install completes
+  useEffect(() => {
+    if (!installComplete || !domain.trim()) return
+    const t = setTimeout(() => {
+      window.location.href = `https://router.${domain.trim()}`
+    }, 3000)
+    return () => clearTimeout(t)
+  }, [installComplete, domain])
 
   const allGood = status?.caddy_active === 'active' && status?.rathole_active === 'active'
 
@@ -197,18 +238,61 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
         )}
       </div>
 
-      {/* Wildcard DNS notice */}
-      {domain && (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800 space-y-1">
-          <div className="font-semibold">📋 DNS setup required</div>
+      {/* DNS check banner */}
+      {domain && domain.includes('.') && (
+        <div className={`rounded-lg p-4 text-sm border space-y-2 ${
+          dnsStatus === 'ok'
+            ? 'bg-green-50 border-green-200 text-green-800'
+            : dnsStatus === 'fail'
+            ? 'bg-red-50 border-red-200 text-red-800'
+            : 'bg-blue-50 border-blue-200 text-blue-800'
+        }`}>
+          <div className="flex items-center gap-2 font-semibold">
+            {dnsStatus === 'checking' && <Loader2 size={15} className="animate-spin" />}
+            {dnsStatus === 'ok' && <CheckCircle2 size={15} />}
+            {dnsStatus === 'fail' && <XCircle size={15} />}
+            {dnsStatus === 'idle' && '📋'}
+            {dnsStatus === 'checking' ? 'Checking DNS…' :
+             dnsStatus === 'ok' ? 'Wildcard DNS is set up ✓' :
+             dnsStatus === 'fail' ? 'Wildcard DNS not detected' :
+             'DNS setup required'}
+          </div>
+          {dnsStatus === 'ok' && (
+            <p className="text-xs">{dnsMessage}</p>
+          )}
+          {dnsStatus === 'fail' && (
+            <>
+              <p>Point a <strong>wildcard A record</strong> at your DNS provider to this server's IP:</p>
+              <code className="block bg-white border border-red-200 rounded px-3 py-1.5 text-xs font-mono">
+                *.{domain}  →  {'<your server IP>'}
+              </code>
+              <p className="text-xs mt-1">{dnsMessage}</p>
+            </>
+          )}
+          {(dnsStatus === 'idle') && (
+            <>
+              <p>Point a <strong>wildcard A record</strong> at your DNS provider to this server's IP:</p>
+              <code className="block bg-white border border-blue-200 rounded px-3 py-1.5 text-xs font-mono">
+                *.{domain}  →  {'<your server IP>'}
+              </code>
+              <p className="text-xs text-blue-600 mt-1">
+                This lets every subdomain (e.g. <code>router.{domain}</code>) resolve here automatically.
+              </p>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Post-install redirect notice */}
+      {installComplete && (
+        <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-sm text-green-800 space-y-1">
+          <div className="font-semibold flex items-center gap-2"><CheckCircle2 size={15} /> Installation complete!</div>
           <p>
-            Point a <strong>wildcard A record</strong> at your DNS provider to this server's IP:
-          </p>
-          <code className="block bg-white border border-blue-200 rounded px-3 py-1.5 text-xs font-mono mt-1">
-            *.{domain}  →  {'<your server IP>'}
-          </code>
-          <p className="text-xs text-blue-600 mt-1">
-            This lets every subdomain (e.g. <code>photos.{domain}</code>, <code>router.{domain}</code>) resolve to this machine automatically.
+            Redirecting you to{' '}
+            <a href={`https://router.${domain}`} className="underline font-medium">
+              https://router.{domain}
+            </a>{' '}
+            in a moment…
           </p>
         </div>
       )}
@@ -216,8 +300,9 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       <div className="flex gap-3">
         <button
           onClick={() => setShowLogs(true)}
-          disabled={!domain || (status != null && !status.has_install_permission)}
+          disabled={!domain || dnsStatus !== 'ok' || (status != null && !status.has_install_permission)}
           className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          title={dnsStatus !== 'ok' ? 'Waiting for DNS to resolve before installing…' : undefined}
         >
           {allGood ? '↻ Re-configure' : '⚙ Install & Configure'}
         </button>
@@ -243,6 +328,7 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       <DeployLogModal
         isOpen={showLogs}
         onClose={() => { setShowLogs(false); load() }}
+        onComplete={() => setInstallComplete(true)}
         title="Installing Local Services"
         onStart={() => localApi.install(domain)}
         autoStart

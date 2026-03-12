@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"strings"
 
@@ -115,4 +117,35 @@ func (h *LocalHandler) DownloadSSHKey(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="gopher_id_rsa"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(key))
+}
+
+// GET /api/local/check-dns?domain=example.com
+// Public endpoint — called during setup wizard before auth is established.
+// Resolves router.DOMAIN to verify the wildcard DNS record is in place.
+func (h *LocalHandler) CheckDNS(w http.ResponseWriter, r *http.Request) {
+	domain := strings.TrimSpace(r.URL.Query().Get("domain"))
+	if domain == "" {
+		response.BadRequest(w, "domain is required")
+		return
+	}
+
+	host := fmt.Sprintf("router.%s", domain)
+	ips, err := net.LookupHost(host)
+	if err != nil || len(ips) == 0 {
+		msg := fmt.Sprintf("DNS lookup for %s returned no results", host)
+		if err != nil {
+			msg = err.Error()
+		}
+		response.Success(w, map[string]interface{}{
+			"ok":      false,
+			"message": msg,
+		})
+		return
+	}
+
+	response.Success(w, map[string]interface{}{
+		"ok":          true,
+		"resolved_to": ips[0],
+		"host":        host,
+	})
 }

@@ -6,19 +6,25 @@ interface Props {
   title: string
   onStart: () => Promise<void>
   autoStart?: boolean
+  onComplete?: () => void
 }
 
 type Status = 'idle' | 'connecting' | 'running' | 'complete' | 'error'
 
-export default function DeployLogModal({ isOpen, onClose, title, onStart }: Props) {
+export default function DeployLogModal({ isOpen, onClose, title, onStart, onComplete }: Props) {
   const [status, setStatus] = useState<Status>('idle')
   const [logs, setLogs] = useState<string[]>([])
   const wsRef = useRef<WebSocket | null>(null)
   const logEndRef = useRef<HTMLDivElement>(null)
   const onStartRef = useRef(onStart)
+  const onCompleteRef = useRef(onComplete)
 
   useEffect(() => {
     onStartRef.current = onStart
+  })
+
+  useEffect(() => {
+    onCompleteRef.current = onComplete
   })
 
   useEffect(() => {
@@ -49,6 +55,7 @@ export default function DeployLogModal({ isOpen, onClose, title, onStart }: Prop
       if (e.data === '\x00DONE') {
         setStatus('complete')
         ws.close()
+        onCompleteRef.current?.()
         return
       }
       setLogs(prev => [...prev, e.data as string])
