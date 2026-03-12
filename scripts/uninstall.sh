@@ -13,7 +13,7 @@
 #                       Without this flag, only the Gopher-managed entries are
 #                       stripped from /etc/rathole/server.toml.
 #   --domain DOMAIN     The domain used during Gopher setup (e.g. example.com).
-#                       Required to remove the router.DOMAIN and DOMAIN:8080
+#                       Required to remove the router.DOMAIN Caddy block that
 #                       Caddy blocks that Gopher inserted above the custom section.
 #   --db PATH           Path to the Gopher SQLite database (default: ./gopher.db).
 #                       The script will ask before deleting it.
@@ -151,7 +151,6 @@ if BEGIN in content and END in content:
 # --- 2. Remove Gopher dashboard blocks above the custom section ---
 if domain:
     content = remove_block(content, f"router.{domain}")
-    content = remove_block(content, f"{domain}:8080")
 
 # --- 3. Re-attach preserved user content (if any non-blank lines survived) ---
 preserved = "\n".join(user_lines).strip()

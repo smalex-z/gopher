@@ -14,15 +14,11 @@ router.%s {
     reverse_proxy localhost:8080
 }
 
-%s:8080 {
-    redir https://router.%s{uri} permanent
-}
-
 # ===== BEGIN CUSTOM CONFIGURATION =====
 # Everything below this line will NOT be overwritten on local setup.
 # Add any custom Caddy directives or site blocks here.
 # ===== END CUSTOM CONFIGURATION =====
-`, domain, domain, domain, domain)
+`, domain, domain)
 }
 
 // removeCaddyBlock removes a site block starting with `host {` from a Caddyfile.
@@ -69,7 +65,7 @@ func removeCaddyBlock(content, host string) string {
 func mergeCaddyfile(existing, domain string) string {
 	const beginMarker = "# ===== BEGIN CUSTOM CONFIGURATION ====="
 	const endMarker = "# ===== END CUSTOM CONFIGURATION ====="
-	dashboardBlock := fmt.Sprintf("router.%s {\n    reverse_proxy localhost:8080\n}\n\n%s:8080 {\n    redir https://router.%s{uri} permanent\n}\n", domain, domain, domain)
+	dashboardBlock := fmt.Sprintf("router.%s {\n    reverse_proxy localhost:8080\n}\n", domain)
 
 	if idx := strings.Index(existing, beginMarker); idx != -1 {
 		// Markers already present: managed zone is everything before BEGIN.
