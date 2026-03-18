@@ -180,15 +180,19 @@ gopher/
 
 |  | Gopher | ngrok | Cloudflare Tunnel | Port Forwarding |
 |---|--------|-------|-------------------|-----------------|
-| **Permanent URLs** | ✅ | ❌ (ephemeral) | ✅ | ✅ |
-| **Custom domains** | ✅ | 💰 (paid) | ⚠️ (requires CF) | ✅ |
+| **Cost** | VPS (~$3-5/mo) | $8-20/mo | Free* | None |
+| **Custom domain** | ✅ | 💰 Paid tier | ⚠️ CF DNS required | ✅ |
+| **Permanent URLs** | ✅ | ❌ Ephemeral | ✅ | ✅ |
 | **Self-hosted** | ✅ | ❌ | ❌ | N/A |
-| **Multi-network** | ✅ | ✅ | ✅ | ❌ |
-| **Automatic HTTPS** | ✅ | ✅ | ✅ | ❌ |
+| **Vendor lock-in** | ❌ | ✅ | ✅ | ❌ |
+| **Protocol support** | HTTP/TCP/UDP | HTTP/TCP | HTTP only** | All |
 | **Works behind NAT** | ✅ | ✅ | ✅ | ❌ |
-| **URL routing** | ✅ subdomain | ✅ random | ✅ subdomain | ❌ ports only |
-| **Cost** | VPS only | $$ subscription | Free (vendor lock) | ISP only |
-| **You own infrastructure** | ✅ | ❌ | ❌ | ✅ |
+| **Automatic HTTPS** | ✅ | ✅ | ✅ | ❌ |
+| **Traffic privacy** | ✅ You control | ❌ ngrok sees all | ❌ CF sees all | ✅ |
+| **Custom middleware** | ✅ Full Caddy | ❌ | ⚠️ CF Workers | N/A |
+
+*Cloudflare Tunnel: Free for HTTP/HTTPS; TCP requires Cloudflare Access (paid)  
+**Non-HTTP protocols require Cloudflare Access subscription
 
 ## Contributing
 
