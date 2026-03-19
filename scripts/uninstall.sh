@@ -14,7 +14,7 @@
 #                       stripped from /etc/rathole/server.toml.
 #   --domain DOMAIN     The domain used during Gopher setup (e.g. example.com).
 #                       Required to remove the router.DOMAIN Caddy block that
-#                       Caddy blocks that Gopher inserted above the custom section.
+#                       Gopher inserted above the custom section.
 #   --db PATH           Path to the Gopher SQLite database (default: ./gopher.db).
 #                       The script will ask before deleting it.
 #   -y, --yes           Non-interactive: skip the database-removal confirmation.

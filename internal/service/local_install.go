@@ -210,6 +210,9 @@ func installLocalRathole(logWriter io.Writer) error {
 	// Ensure unzip is available before attempting to extract.
 	if !isCommandAvailable("unzip") {
 		fmt.Fprintln(logWriter, "  unzip not found, installing via apt...")
+		if err := runLocalCmd(logWriter, "apt-get", "update", "-qq"); err != nil {
+			return fmt.Errorf("failed to run apt-get update: %w", err)
+		}
 		if err := runLocalCmd(logWriter, "apt-get", "install", "-y", "-qq", "unzip"); err != nil {
 			return fmt.Errorf("failed to install unzip: %w", err)
 		}

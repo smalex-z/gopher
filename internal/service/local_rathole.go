@@ -92,42 +92,25 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	return nil
 }
 
-// stripGopherServiceSections removes all [server.services.machine-*-ssh] and
-// [server.services.tunnel-*] blocks from a TOML string. Used to clean both
-// the header zone and any legacy entries that were incorrectly placed inside the
-// custom section by older versions.
+// stripGopherServiceSections removes only marker-delimited Gopher-managed
+// blocks (between # gopher-*-start: / # gopher-*-end: lines) from a TOML
+// string. Used to clean legacy entries that were incorrectly placed inside the
+// custom section by older versions. Does NOT strip sections by name prefix, so
+// user entries that happen to share naming patterns are never deleted.
 func stripGopherServiceSections(content string) string {
-	isGopherSection := func(line string) bool {
-		if len(line) < 10 || line[0] != '[' {
-			return false
-		}
-		const pfxM = "[server.services.machine-"
-		const pfxT = "[server.services.tunnel-"
-		if strings.HasPrefix(line, pfxM) && strings.HasSuffix(line, "-ssh]") {
-			return true
-		}
-		if strings.HasPrefix(line, pfxT) && strings.HasSuffix(line, "]") {
-			return true
-		}
-		return false
-	}
-
 	var out []string
 	skip := false
 	for _, line := range strings.Split(content, "\n") {
 		stripped := strings.TrimSpace(line)
 		if strings.HasPrefix(stripped, "# gopher-machine-start:") ||
-			strings.HasPrefix(stripped, "# gopher-machine-end:") ||
-			strings.HasPrefix(stripped, "# gopher-tunnel-start:") ||
-			strings.HasPrefix(stripped, "# gopher-tunnel-end:") {
-			continue
-		}
-		if isGopherSection(stripped) {
+			strings.HasPrefix(stripped, "# gopher-tunnel-start:") {
 			skip = true
 			continue
 		}
-		if skip && strings.HasPrefix(stripped, "[") {
+		if strings.HasPrefix(stripped, "# gopher-machine-end:") ||
+			strings.HasPrefix(stripped, "# gopher-tunnel-end:") {
 			skip = false
+			continue
 		}
 		if !skip {
 			out = append(out, line)
