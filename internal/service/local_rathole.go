@@ -89,6 +89,10 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	}
 	customBlock += endMarker + "\n"
 	newContent := base + managed.String() + "\n" + customBlock
+	newContent, removed := dedupeServerServiceSections(newContent)
+	if removed > 0 {
+		fmt.Printf("INFO: removed %d duplicate rathole service entries during reconcile\n", removed)
+	}
 
 	if err := writeLocalFile(configPath, newContent); err != nil {
 		return fmt.Errorf("failed to write %s: %w", configPath, err)
@@ -102,8 +106,8 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	return nil
 }
 
-// stripGopherServiceSections removes all [server.services.machine-UUID-ssh] and
-// [server.services.tunnel-UUID] blocks from a TOML string. Used to clean both
+// stripGopherServiceSections removes all [server.services.machine-*-ssh] and
+// [server.services.tunnel-*] blocks from a TOML string. Used to clean both
 // the header zone and any legacy entries that were incorrectly placed inside the
 // custom section by older versions.
 func stripGopherServiceSections(content string) string {
@@ -114,10 +118,10 @@ func stripGopherServiceSections(content string) string {
 		const pfxM = "[server.services.machine-"
 		const pfxT = "[server.services.tunnel-"
 		if strings.HasPrefix(line, pfxM) && strings.HasSuffix(line, "-ssh]") {
-			return isUUID(line[len(pfxM) : len(line)-len("-ssh]")])
+			return true
 		}
 		if strings.HasPrefix(line, pfxT) && strings.HasSuffix(line, "]") {
-			return isUUID(line[len(pfxT) : len(line)-1])
+			return true
 		}
 		return false
 	}
@@ -140,24 +144,61 @@ func stripGopherServiceSections(content string) string {
 	return strings.Join(out, "\n")
 }
 
-// isUUID reports whether s is a standard 8-4-4-4-12 hex UUID.
-func isUUID(s string) bool {
-	if len(s) != 36 {
-		return false
+type tomlBlock struct {
+	header string
+	lines  []string
+}
+
+// dedupeServerServiceSections removes duplicate [server.services.*] sections,
+// keeping the last occurrence of each section header.
+func dedupeServerServiceSections(content string) (string, int) {
+	lines := strings.Split(content, "\n")
+	blocks := make([]tomlBlock, 0, len(lines))
+	current := tomlBlock{}
+
+	flush := func() {
+		if len(current.lines) == 0 {
+			return
+		}
+		blocks = append(blocks, current)
+		current = tomlBlock{}
 	}
-	for i, c := range s {
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-				return false
-			}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			flush()
+			current.header = trimmed
+			current.lines = append(current.lines, line)
+			continue
+		}
+		current.lines = append(current.lines, line)
+	}
+	flush()
+
+	counts := make(map[string]int)
+	for _, block := range blocks {
+		if isServerServiceHeader(block.header) {
+			counts[block.header]++
 		}
 	}
-	return true
+
+	removed := 0
+	out := make([]string, 0, len(lines))
+	for _, block := range blocks {
+		if isServerServiceHeader(block.header) && counts[block.header] > 1 {
+			counts[block.header]--
+			removed++
+			continue
+		}
+		out = append(out, block.lines...)
+	}
+
+	return strings.Join(out, "\n"), removed
+}
+
+func isServerServiceHeader(header string) bool {
+	return strings.HasPrefix(header, "[server.services.") && strings.HasSuffix(header, "]")
 }
 
 // AddServiceTunnel adds a user-defined service tunnel to the server's

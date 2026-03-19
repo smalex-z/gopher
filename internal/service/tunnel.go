@@ -19,11 +19,11 @@ func NewTunnelService(local *LocalSetupService) *TunnelService {
 }
 
 func (s *TunnelService) List() ([]db.Tunnel, error) {
-return db.GetTunnels()
+	return db.GetTunnels()
 }
 
 func (s *TunnelService) ListByMachine(machineID string) ([]db.Tunnel, error) {
-return db.GetTunnelsByMachine(machineID)
+	return db.GetTunnelsByMachine(machineID)
 }
 
 func (s *TunnelService) Get(id string) (*db.Tunnel, error) {
@@ -52,9 +52,9 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 	}
 
 	var ratholePort int
-	if req.RatholePort >= 20000 {
-		if req.RatholePort > 65535 {
-			return nil, &apperrors.ValidationError{Field: "rathole_port", Message: "port must be between 20000 and 65535"}
+	if req.RatholePort != 0 {
+		if err := config.ValidatePort(req.RatholePort); err != nil {
+			return nil, &apperrors.ValidationError{Field: "rathole_port", Message: err.Error()}
 		}
 		exists, err := db.CheckRatholePortExists(req.RatholePort)
 		if err != nil {
@@ -104,33 +104,33 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 }
 
 func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunnel, error) {
-tunnel, err := db.GetTunnel(id)
-if err != nil {
-return nil, err
-}
+	tunnel, err := db.GetTunnel(id)
+	if err != nil {
+		return nil, err
+	}
 
-if req.Subdomain != tunnel.Subdomain {
-if err := config.ValidateSubdomain(req.Subdomain); err != nil {
-return nil, &apperrors.ValidationError{Field: "subdomain", Message: err.Error()}
-}
-exists, err := db.CheckSubdomainExists(req.Subdomain)
-if err != nil {
-return nil, err
-}
-if exists {
-return nil, &apperrors.ConflictError{Message: "subdomain already exists"}
-}
-tunnel.Subdomain = req.Subdomain
-}
+	if req.Subdomain != tunnel.Subdomain {
+		if err := config.ValidateSubdomain(req.Subdomain); err != nil {
+			return nil, &apperrors.ValidationError{Field: "subdomain", Message: err.Error()}
+		}
+		exists, err := db.CheckSubdomainExists(req.Subdomain)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			return nil, &apperrors.ConflictError{Message: "subdomain already exists"}
+		}
+		tunnel.Subdomain = req.Subdomain
+	}
 
-tunnel.Name = req.Name
-tunnel.LocalPort = req.LocalPort
-tunnel.UpdatedAt = time.Now()
+	tunnel.Name = req.Name
+	tunnel.LocalPort = req.LocalPort
+	tunnel.UpdatedAt = time.Now()
 
-if err := db.UpdateTunnel(tunnel); err != nil {
-return nil, err
-}
-return tunnel, nil
+	if err := db.UpdateTunnel(tunnel); err != nil {
+		return nil, err
+	}
+	return tunnel, nil
 }
 
 func (s *TunnelService) Delete(id string) error {

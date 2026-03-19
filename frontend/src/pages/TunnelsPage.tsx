@@ -245,17 +245,17 @@ export default function TunnelsPage() {
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Server Port
-                  <span className="ml-1 font-normal text-gray-400 text-xs">(port on your VPS — must be 20000–65535)</span>
+                  <span className="ml-1 font-normal text-gray-400 text-xs">(port on your VPS — must be 1–65535)</span>
                 </label>
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-gray-500 font-mono shrink-0 truncate max-w-[160px]" title={domain ?? 'server'}>{domain ?? 'server'}:</span>
                   <input
                     type="number"
-                    min={20000}
+                    min={1}
                     max={65535}
                     value={form.rathole_port || ''}
                     onChange={e => setForm(f => ({ ...f, rathole_port: Number(e.target.value) }))}
-                    placeholder="20000"
+                    placeholder="80"
                     className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                   />
                 </div>
