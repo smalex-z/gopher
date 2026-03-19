@@ -1,11 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/smalex-z/gopher/internal/api/response"
 	"github.com/smalex-z/gopher/internal/service"
@@ -129,8 +132,16 @@ func (h *LocalHandler) CheckDNS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate domain: only allow valid hostname characters and reasonable length.
+	if len(domain) > 253 || !validDomain.MatchString(domain) {
+		response.BadRequest(w, "invalid domain")
+		return
+	}
+
 	host := fmt.Sprintf("router.%s", domain)
-	ips, err := net.LookupHost(host)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupHost(ctx, host)
 	if err != nil || len(ips) == 0 {
 		msg := fmt.Sprintf("DNS lookup for %s returned no results", host)
 		if err != nil {
@@ -149,3 +160,6 @@ func (h *LocalHandler) CheckDNS(w http.ResponseWriter, r *http.Request) {
 		"host":        host,
 	})
 }
+
+// validDomain matches a reasonable FQDN: labels of alphanumeric + hyphens separated by dots.
+var validDomain = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)
