@@ -1,6 +1,6 @@
 ## Description
 <!-- Provide a brief description of the changes in this PR -->
-Resolves Issue #__
+Resolves #__
 
 ## Changes Made
 <!-- List the main changes -->

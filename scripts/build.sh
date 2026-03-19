@@ -17,4 +17,4 @@ cd "$ROOT"
 go build -o gopher ./cmd/server/...
 
 echo "✓ Build complete: $ROOT/gopher"
-echo "  Run with: ./gopher [--port 8080] [--db ./gopher.db]"
+echo "  Run with: sudo ./gopher [--port 8080] [--db ./gopher.db]"

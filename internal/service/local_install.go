@@ -29,6 +29,10 @@ WantedBy=multi-user.target
 const localInitialRatholeServerConfig = `[server]
 bind_addr = "0.0.0.0:2333"
 
+[server.services.placeholder]
+token = "placeholder"
+bind_addr = "0.0.0.0:52000"
+
 # ===== BEGIN CUSTOM CONFIGURATION =====
 # Add your own rathole service entries here. Gopher will not modify this section.
 # ===== END CUSTOM CONFIGURATION =====
@@ -202,11 +206,24 @@ func installLocalRathole(logWriter io.Writer) error {
 		"https://github.com/rathole-org/rathole/releases/download/%s/rathole-%s.zip",
 		version, archTag,
 	)
+
+	// Ensure unzip is available before attempting to extract.
+	if !isCommandAvailable("unzip") {
+		fmt.Fprintln(logWriter, "  unzip not found, installing via apt...")
+		if err := runLocalCmd(logWriter, "apt-get", "update", "-qq"); err != nil {
+			return fmt.Errorf("failed to run apt-get update: %w", err)
+		}
+		if err := runLocalCmd(logWriter, "apt-get", "install", "-y", "-qq", "unzip"); err != nil {
+			return fmt.Errorf("failed to install unzip: %w", err)
+		}
+	}
+
 	steps := [][]string{
 		{"curl", "-fsSL", url, "-o", "/tmp/rathole.zip"},
-		{"unzip", "-q", "/tmp/rathole.zip", "-d", "/tmp/rathole-dl"},
+		{"unzip", "-q", "-o", "/tmp/rathole.zip", "-d", "/tmp/rathole-dl"},
 		{"mv", "/tmp/rathole-dl/rathole", "/usr/local/bin/rathole"},
 		{"chmod", "+x", "/usr/local/bin/rathole"},
+		{"rm", "-rf", "/tmp/rathole.zip", "/tmp/rathole-dl"},
 	}
 	for _, args := range steps {
 		if err := runLocalCmd(logWriter, args[0], args[1:]...); err != nil {

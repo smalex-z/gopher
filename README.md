@@ -58,8 +58,8 @@ git clone https://github.com/smalex-z/gopher.git
 cd gopher
 ./scripts/build.sh        # Builds frontend + Go binary
 
-# Run
-./gopher
+# Run (sudo required to manage Caddy/rathole system services)
+sudo ./gopher
 # Open http://localhost:8080
 ```
 
@@ -160,7 +160,7 @@ gopher/
 
 # Production build
 ./scripts/build.sh
-./gopher
+sudo ./gopher
 ```
 
 ## VPS Recommendations

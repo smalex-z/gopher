@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
@@ -33,56 +34,51 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 
 	content := string(existing)
 
-	// Split the file into the header zone (above BEGIN) and the user's custom section.
+	// Extract the user-owned custom section.
 	userBody := ""
 	if bIdx := strings.Index(content, beginMarker); bIdx != -1 {
-		above := content[:bIdx]
 		below := content[bIdx+len(beginMarker):]
 		if eIdx := strings.Index(below, endMarker); eIdx != -1 {
 			userBody = below[:eIdx]
 		} else {
 			userBody = below
 		}
-		content = above
 	}
-	// Strip any gopher service entries that old versions incorrectly placed inside
-	// the custom section, and normalise whitespace.
+
+	// Strip any gopher-managed entries that old versions may have placed inside
+	// the custom section, then normalise whitespace.
 	userBody = strings.TrimSpace(stripGopherServiceSections(userBody))
 
-	// Strip gopher-managed entries from the header zone and trim trailing whitespace.
-	base := strings.TrimRight(stripGopherServiceSections(content), "\n") + "\n"
-
-	// Rebuild gopher-managed entries from the database.
-	machines, _ := db.GetMachines()
-	tunnels, _ := db.GetTunnels()
-
-	var managed strings.Builder
-	for _, m := range machines {
-		if m.RatholeSSHToken == "" || m.TunnelPort == 0 {
-			continue
-		}
-		fmt.Fprintf(&managed, "\n[server.services.machine-%s-ssh]\ntoken = \"%s\"\nbind_addr = \"0.0.0.0:%d\"\n",
-			m.ID, m.RatholeSSHToken, m.TunnelPort)
+	machines, err := db.GetMachines()
+	if err != nil {
+		return fmt.Errorf("failed to load machines: %w", err)
 	}
-	for _, t := range tunnels {
-		if t.RatholePort == 0 {
-			continue
-		}
-		token := t.RatholeToken
-		if token == "" {
-			token = t.ID // backward compat for tunnels created before this change
-		}
-		fmt.Fprintf(&managed, "\n[server.services.tunnel-%s]\ntoken = \"%s\"\nbind_addr = \"0.0.0.0:%d\"\n",
-			t.ID, token, t.RatholePort)
+	tunnels, err := db.GetTunnels()
+	if err != nil {
+		return fmt.Errorf("failed to load tunnels: %w", err)
 	}
 
-	// Assemble: base config + gopher entries + custom section.
+	// Rebuild gopher-managed config from DB using the canonical generator.
+	managedConfig := config.GenerateRatholeServerConfig(machines, tunnels)
+
+	// Guardrail: never write a generated config that fails self-validation.
+	validation := config.ValidateRatholeConfig(managedConfig, machines, tunnels)
+	if !validation.Valid {
+		return fmt.Errorf("generated rathole config failed validation: %s", strings.Join(validation.Errors, "; "))
+	}
+
+	// If the user has custom services, the placeholder is unnecessary noise.
+	if userBody != "" {
+		managedConfig = removeTomlSection(managedConfig, "server.services.placeholder")
+	}
+
+	// Assemble final file: managed config + user-owned custom section.
 	customBlock := beginMarker + "\n"
 	if userBody != "" {
 		customBlock += userBody + "\n"
 	}
 	customBlock += endMarker + "\n"
-	newContent := base + managed.String() + "\n" + customBlock
+	newContent := strings.TrimRight(managedConfig, "\n") + "\n\n" + customBlock
 
 	if err := writeLocalFile(configPath, newContent); err != nil {
 		return fmt.Errorf("failed to write %s: %w", configPath, err)
@@ -96,62 +92,31 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	return nil
 }
 
-// stripGopherServiceSections removes all [server.services.machine-UUID-ssh] and
-// [server.services.tunnel-UUID] blocks from a TOML string. Used to clean both
-// the header zone and any legacy entries that were incorrectly placed inside the
-// custom section by older versions.
+// stripGopherServiceSections removes only marker-delimited Gopher-managed
+// blocks (between # gopher-*-start: / # gopher-*-end: lines) from a TOML
+// string. Used to clean legacy entries that were incorrectly placed inside the
+// custom section by older versions. Does NOT strip sections by name prefix, so
+// user entries that happen to share naming patterns are never deleted.
 func stripGopherServiceSections(content string) string {
-	isGopherSection := func(line string) bool {
-		if len(line) < 10 || line[0] != '[' {
-			return false
-		}
-		const pfxM = "[server.services.machine-"
-		const pfxT = "[server.services.tunnel-"
-		if strings.HasPrefix(line, pfxM) && strings.HasSuffix(line, "-ssh]") {
-			return isUUID(line[len(pfxM) : len(line)-len("-ssh]")])
-		}
-		if strings.HasPrefix(line, pfxT) && strings.HasSuffix(line, "]") {
-			return isUUID(line[len(pfxT) : len(line)-1])
-		}
-		return false
-	}
-
 	var out []string
 	skip := false
 	for _, line := range strings.Split(content, "\n") {
 		stripped := strings.TrimSpace(line)
-		if isGopherSection(stripped) {
+		if strings.HasPrefix(stripped, "# gopher-machine-start:") ||
+			strings.HasPrefix(stripped, "# gopher-tunnel-start:") {
 			skip = true
 			continue
 		}
-		if skip && strings.HasPrefix(stripped, "[") {
+		if strings.HasPrefix(stripped, "# gopher-machine-end:") ||
+			strings.HasPrefix(stripped, "# gopher-tunnel-end:") {
 			skip = false
+			continue
 		}
 		if !skip {
 			out = append(out, line)
 		}
 	}
 	return strings.Join(out, "\n")
-}
-
-// isUUID reports whether s is a standard 8-4-4-4-12 hex UUID.
-func isUUID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i, c := range s {
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // AddServiceTunnel adds a user-defined service tunnel to the server's

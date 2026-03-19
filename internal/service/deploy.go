@@ -103,23 +103,31 @@ return err
 
 machines, err := db.GetMachines()
 if err != nil {
-fmt.Fprintf(w, "ERROR: Failed to get machines: %v\n", err)
-s.Hub.Broadcast("\x00DONE")
-return err
+	fmt.Fprintf(w, "ERROR: Failed to get machines: %v\n", err)
+	s.Hub.Broadcast("\x00DONE")
+	return err
 }
 
-ratholeConfig, err := config.GenerateServerConfig(tunnels, machines)
-if err != nil {
-fmt.Fprintf(w, "ERROR: Failed to generate rathole config: %v\n", err)
-s.Hub.Broadcast("\x00DONE")
-return err
+// Generate config from database (always regenerate from scratch)
+ratholeConfig := config.GenerateRatholeServerConfig(machines, tunnels)
+
+// Validate generated config against database state
+validation := config.ValidateRatholeConfig(ratholeConfig, machines, tunnels)
+if !validation.Valid {
+	fmt.Fprintf(w, "ERROR: Config validation failed. Not deploying invalid config:\n")
+	for _, vErr := range validation.Errors {
+		fmt.Fprintf(w, "  - %s\n", vErr)
+	}
+	s.Hub.Broadcast("\x00DONE")
+	return fmt.Errorf("config validation failed")
 }
 
+// Proceed with deployment
 client, err := sshpkg.NewClient(vpsConfig.Host, vpsConfig.Port, vpsConfig.Username, vpsConfig.PrivateKey)
 if err != nil {
-fmt.Fprintf(w, "ERROR: Failed to connect: %v\n", err)
-s.Hub.Broadcast("\x00DONE")
-return err
+	fmt.Fprintf(w, "ERROR: Failed to connect: %v\n", err)
+	s.Hub.Broadcast("\x00DONE")
+	return err
 }
 defer client.Close()
 

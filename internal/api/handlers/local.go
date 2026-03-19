@@ -1,9 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/smalex-z/gopher/internal/api/response"
 	"github.com/smalex-z/gopher/internal/service"
@@ -116,3 +121,45 @@ func (h *LocalHandler) DownloadSSHKey(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(key))
 }
+
+// GET /api/local/check-dns?domain=example.com
+// Public endpoint — called during setup wizard before auth is established.
+// Resolves router.DOMAIN to verify the wildcard DNS record is in place.
+func (h *LocalHandler) CheckDNS(w http.ResponseWriter, r *http.Request) {
+	domain := strings.TrimSpace(r.URL.Query().Get("domain"))
+	if domain == "" {
+		response.BadRequest(w, "domain is required")
+		return
+	}
+
+	// Validate domain: only allow valid hostname characters and reasonable length.
+	if len(domain) > 253 || !validDomain.MatchString(domain) {
+		response.BadRequest(w, "invalid domain")
+		return
+	}
+
+	host := fmt.Sprintf("router.%s", domain)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil || len(ips) == 0 {
+		msg := fmt.Sprintf("DNS lookup for %s returned no results", host)
+		if err != nil {
+			msg = err.Error()
+		}
+		response.Success(w, map[string]interface{}{
+			"ok":      false,
+			"message": msg,
+		})
+		return
+	}
+
+	response.Success(w, map[string]interface{}{
+		"ok":          true,
+		"resolved_to": ips[0],
+		"host":        host,
+	})
+}
+
+// validDomain matches a reasonable FQDN: labels of alphanumeric + hyphens separated by dots.
+var validDomain = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/smalex-z/gopher/internal/api/response"
 	"github.com/smalex-z/gopher/internal/config"
@@ -59,11 +60,8 @@ func (h *DebugHandler) GetRatholeServerConfig(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	cfg, err := config.GenerateServerConfig(tunnels, machines)
-	if err != nil {
-		response.InternalError(w, err.Error())
-		return
-	}
+	cfg := config.GenerateRatholeServerConfig(machines, tunnels)
+	cfg = strings.TrimRight(cfg, "\n") + "\n\n# ===== BEGIN CUSTOM CONFIGURATION =====\n# ===== END CUSTOM CONFIGURATION =====\n"
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(cfg))

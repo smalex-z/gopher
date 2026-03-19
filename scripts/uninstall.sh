@@ -13,8 +13,8 @@
 #                       Without this flag, only the Gopher-managed entries are
 #                       stripped from /etc/rathole/server.toml.
 #   --domain DOMAIN     The domain used during Gopher setup (e.g. example.com).
-#                       Required to remove the router.DOMAIN and DOMAIN:8080
-#                       Caddy blocks that Gopher inserted above the custom section.
+#                       Required to remove the router.DOMAIN Caddy block that
+#                       Gopher inserted above the custom section.
 #   --db PATH           Path to the Gopher SQLite database (default: ./gopher.db).
 #                       The script will ask before deleting it.
 #   -y, --yes           Non-interactive: skip the database-removal confirmation.
@@ -69,7 +69,7 @@ sudo_run() { sudo -- "$@"; }
 
 # strip_caddyfile PATH DOMAIN
 #   Removes Gopher-managed blocks from the Caddyfile at PATH.
-#   DOMAIN may be empty; in that case only the custom-section markers are removed.
+#   DOMAIN may be empty; the function will attempt to auto-detect it.
 strip_caddyfile() {
     local path="$1" domain="$2"
     sudo_run python3 - "$path" "$domain" <<'PYEOF'
@@ -84,12 +84,19 @@ END   = "# ===== END CUSTOM CONFIGURATION ====="
 with open(path) as fh:
     content = fh.read()
 
+# Auto-detect domain if not supplied by looking for a router.DOMAIN block.
+if not domain:
+    m = re.search(r'^router\.(\S+)\s*\{', content, re.MULTILINE)
+    if m:
+        domain = m.group(1)
+        print(f"    Auto-detected domain: {domain}")
+
 def remove_block(text, host_prefix):
-    """Remove the Caddy site block that starts with host_prefix {"""
-    lines   = text.split("\n")
-    result  = []
-    depth   = 0
-    skip    = False
+    """Remove the Caddy site block whose opening line starts with host_prefix."""
+    lines  = text.split("\n")
+    result = []
+    depth  = 0
+    skip   = False
     for line in lines:
         stripped = line.strip()
         if not skip and stripped.startswith(host_prefix) and stripped.endswith("{"):
@@ -105,14 +112,16 @@ def remove_block(text, host_prefix):
     return "\n".join(result)
 
 # --- 1. Extract and clean user content inside the custom section ---
+# Tunnel blocks are inserted just before the END marker (inside the custom
+# section). They look like:  subdomain.DOMAIN {\n    reverse_proxy ...\n}
 user_lines = []
 if BEGIN in content and END in content:
-    b_idx = content.index(BEGIN)
-    e_idx = content.index(END) + len(END)
+    b_idx        = content.index(BEGIN)
+    e_idx        = content.index(END) + len(END)
     section_body = content[b_idx + len(BEGIN) : content.index(END)]
-    raw_lines = section_body.split("\n")
+    raw_lines    = section_body.split("\n")
 
-    # Strip the two standard header comment lines Gopher writes.
+    # Standard header comment lines inserted by Gopher — always remove these.
     skip_comments = {
         "# Everything below this line will NOT be overwritten on local setup.",
         "# Add any custom Caddy directives or site blocks here.",
@@ -120,8 +129,14 @@ if BEGIN in content and END in content:
         "# Add your own Caddy site blocks here.",
     }
 
-    # Remove Gopher-managed tunnel blocks (subdomain.domain { reverse_proxy }).
     if domain:
+        # Remove Gopher-managed tunnel blocks whose header ends with .DOMAIN {
+        # e.g.  photos.example.com {
+        # This is intentionally strict (requires the line to END with .domain {)
+        # so user blocks for unrelated domains are never accidentally removed.
+        tunnel_header_re = re.compile(
+            r'^[\w\-\*]+\.' + re.escape(domain) + r'\s*\{$'
+        )
         filtered = []
         depth = 0
         skip  = False
@@ -129,7 +144,7 @@ if BEGIN in content and END in content:
             stripped = line.strip()
             if stripped in skip_comments:
                 continue
-            if not skip and domain in stripped and stripped.endswith("{"):
+            if not skip and tunnel_header_re.match(stripped):
                 skip  = True
                 depth = 1
                 continue
@@ -143,15 +158,14 @@ if BEGIN in content and END in content:
     else:
         user_lines = [l for l in raw_lines if l.strip() not in skip_comments]
 
-    # Remove the entire BEGIN…END block from content (including surrounding \n).
-    before = content[:b_idx].rstrip()
-    after  = content[e_idx:].lstrip("\n")
+    # Remove the entire BEGIN…END block from content.
+    before  = content[:b_idx].rstrip()
+    after   = content[e_idx:].lstrip("\n")
     content = (before + "\n" + after) if after else (before + "\n")
 
-# --- 2. Remove Gopher dashboard blocks above the custom section ---
+# --- 2. Remove Gopher's router dashboard block (lives above the custom section) ---
 if domain:
     content = remove_block(content, f"router.{domain}")
-    content = remove_block(content, f"{domain}:8080")
 
 # --- 3. Re-attach preserved user content (if any non-blank lines survived) ---
 preserved = "\n".join(user_lines).strip()
@@ -169,6 +183,7 @@ PYEOF
 
 # strip_rathole_config PATH
 #   Strips Gopher-managed entries from /etc/rathole/server.toml.
+#   Gopher entries sit ABOVE the custom section; the custom section is preserved.
 strip_rathole_config() {
     local path="$1"
     sudo_run python3 - "$path" <<'PYEOF'
@@ -179,49 +194,63 @@ path = sys.argv[1]
 BEGIN = "# ===== BEGIN CUSTOM CONFIGURATION ====="
 END   = "# ===== END CUSTOM CONFIGURATION ====="
 
-UUID_RE = re.compile(
+# Match both new short 16-char hex tokens and old full UUIDs (backward compat).
+SHORT_HEX = re.compile(r'^[0-9a-f]{16}$')
+UUID_PAT  = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
 
 def is_gopher_section(line):
-    line = line.strip()
-    if line.startswith("[server.services.machine-") and line.endswith("-ssh]"):
-        uuid_part = line[len("[server.services.machine-"):-len("-ssh]")]
-        return bool(UUID_RE.match(uuid_part))
-    if line.startswith("[server.services.tunnel-") and line.endswith("]"):
-        uuid_part = line[len("[server.services.tunnel-"):-1]
-        return bool(UUID_RE.match(uuid_part))
+    s = line.strip()
+    # Remove the harmless placeholder Gopher injects when no services are active.
+    if s == "[server.services.placeholder]":
+        return True
+    if s.startswith("[server.services.machine-") and s.endswith("-ssh]"):
+        tok = s[len("[server.services.machine-"):-len("-ssh]")]
+        return bool(SHORT_HEX.match(tok) or UUID_PAT.match(tok))
+    if s.startswith("[server.services.tunnel-") and s.endswith("]"):
+        tok = s[len("[server.services.tunnel-"):-1]
+        return bool(SHORT_HEX.match(tok) or UUID_PAT.match(tok))
     return False
+
+def strip_gopher_sections(text):
+    lines  = text.split("\n")
+    result = []
+    skip   = False
+    for line in lines:
+        s = line.strip()
+        if is_gopher_section(s):
+            skip = True
+            continue
+        if skip and s.startswith("["):
+            skip = False
+        if not skip:
+            result.append(line)
+    return "\n".join(result)
 
 with open(path) as fh:
     content = fh.read()
 
-# Strip BEGIN…END block.
+# Split: header zone (above BEGIN) + custom section (BEGIN onward, verbatim).
+# Gopher-managed service entries live only in the header zone.
+# The custom section is user-owned and must not be modified.
+custom_section = ""
 if BEGIN in content:
-    b_idx = content.index(BEGIN)
-    if END in content:
-        e_idx = content.index(END) + len(END)
-        content = content[:b_idx].rstrip() + "\n"
-    else:
-        content = content[:b_idx].rstrip() + "\n"
+    b_idx          = content.index(BEGIN)
+    custom_section = content[b_idx:]   # includes BEGIN…END and any trailing text
+    content        = content[:b_idx]
 
-# Also strip any gopher machine/tunnel entries that leaked outside the markers.
-lines  = content.split("\n")
-result = []
-skip   = False
-for line in lines:
-    if is_gopher_section(line):
-        skip = True
-        continue
-    if skip and line.strip().startswith("["):
-        skip = False
-    if not skip:
-        result.append(line)
+# Remove only Gopher's managed service blocks from the header zone.
+header = strip_gopher_sections(content).rstrip("\n") + "\n"
 
-content = "\n".join(result).strip() + "\n"
+# Reassemble: clean header + custom section.
+if custom_section.strip():
+    result = header + "\n" + custom_section
+else:
+    result = header
 
 with open(path, "w") as fh:
-    fh.write(content)
+    fh.write(result.strip() + "\n")
 
 print("    server.toml cleaned.")
 PYEOF
@@ -251,6 +280,8 @@ if [[ -f /etc/systemd/system/gopher.service ]]; then
     sudo_run systemctl daemon-reload
     success "gopher.service unit removed."
 fi
+# Also terminate any gopher process running directly (e.g. sudo ./gopher).
+sudo_run pkill -x gopher 2>/dev/null || true
 
 # --- Step 2: Remove the gopher binary ---------------------------------------
 echo "[2/5] Removing Gopher binary..."

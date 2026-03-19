@@ -14,23 +14,19 @@ router.%s {
     reverse_proxy localhost:8080
 }
 
-%s:8080 {
-    redir https://router.%s{uri} permanent
-}
-
 # ===== BEGIN CUSTOM CONFIGURATION =====
 # Everything below this line will NOT be overwritten on local setup.
 # Add any custom Caddy directives or site blocks here.
 # ===== END CUSTOM CONFIGURATION =====
-`, domain, domain, domain, domain)
+`, domain, domain)
 }
 
-// removeCaddyBlock removes a site block starting with `host {` from a Caddyfile.
+// removeCaddyBlock removes a top-level site block that starts with "host {".
 func removeCaddyBlock(content, host string) string {
 	lines := strings.Split(content, "\n")
 	result := make([]string, 0, len(lines))
-	depth := 0
 	skip := false
+	depth := 0
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if !skip && strings.HasPrefix(trimmed, host) && strings.HasSuffix(trimmed, "{") {
@@ -56,6 +52,48 @@ func removeCaddyBlock(content, host string) string {
 	return strings.Join(result, "\n")
 }
 
+// removeExtraGlobalBlocks keeps only the first Caddy global options block.
+func removeExtraGlobalBlocks(content string) string {
+	lines := strings.Split(content, "\n")
+	result := make([]string, 0, len(lines))
+
+	globalSeen := false
+	skip := false
+	depth := 0
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !skip && trimmed == "{" {
+			if globalSeen {
+				skip = true
+				depth = 1
+				continue
+			}
+			globalSeen = true
+			result = append(result, line)
+			continue
+		}
+
+		if skip {
+			for _, ch := range line {
+				if ch == '{' {
+					depth++
+				} else if ch == '}' {
+					depth--
+				}
+			}
+			if depth <= 0 {
+				skip = false
+			}
+			continue
+		}
+
+		result = append(result, line)
+	}
+
+	return strings.Join(result, "\n")
+}
+
 // mergeCaddyfile builds a new Caddyfile that places Gopher's managed
 // dashboard block above the custom section.
 //
@@ -69,21 +107,23 @@ func removeCaddyBlock(content, host string) string {
 func mergeCaddyfile(existing, domain string) string {
 	const beginMarker = "# ===== BEGIN CUSTOM CONFIGURATION ====="
 	const endMarker = "# ===== END CUSTOM CONFIGURATION ====="
-	dashboardBlock := fmt.Sprintf("router.%s {\n    reverse_proxy localhost:8080\n}\n\n%s:8080 {\n    redir https://router.%s{uri} permanent\n}\n", domain, domain, domain)
+	dashboardBlock := fmt.Sprintf("router.%s {\n    reverse_proxy localhost:8080\n}\n", domain)
 
-	if idx := strings.Index(existing, beginMarker); idx != -1 {
+	cleanedExisting := removeExtraGlobalBlocks(existing)
+
+	if idx := strings.Index(cleanedExisting, beginMarker); idx != -1 {
 		// Markers already present: managed zone is everything before BEGIN.
-		managedZone := strings.TrimSpace(existing[:idx])
-		customSection := existing[idx:] // preserve from BEGIN to end verbatim
-		if strings.Contains(managedZone, fmt.Sprintf("router.%s", domain)) {
-			// Dashboard block already in managed zone — nothing to do.
-			return existing
+		managedZone := strings.TrimSpace(cleanedExisting[:idx])
+		managedZone = strings.TrimSpace(removeCaddyBlock(managedZone, fmt.Sprintf("router.%s", domain)))
+		customSection := cleanedExisting[idx:] // Preserve from BEGIN to end verbatim.
+		if managedZone == "" {
+			return dashboardBlock + "\n" + customSection
 		}
 		return managedZone + "\n\n" + dashboardBlock + "\n" + customSection
 	}
 
 	// No markers yet: move all existing content into the custom section.
-	trimmed := strings.TrimRight(existing, "\n")
+	trimmed := strings.TrimRight(cleanedExisting, "\n")
 	return dashboardBlock + "\n" +
 		beginMarker + "\n" +
 		"# Everything below this line will NOT be overwritten.\n" +

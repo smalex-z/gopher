@@ -1,10 +1,10 @@
-name: Go Tests
+name: Go Unit Tests
 
 on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main, feat/cicd-build ]
+    branches: [ main ]
 
 permissions:
   contents: read
@@ -14,7 +14,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -22,28 +23,41 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run tests
-        run: go test -v -coverprofile=coverage.out ./... | tee test_output.txt
-
-      - name: Generate coverage summary
+      - name: Ensure embedded frontend path exists
         run: |
-          if [ -f coverage.out ]; then
-            go tool cover -func=coverage.out | tee coverage_summary.txt
-          else
-            echo "No coverage data (no test files found)" | tee coverage_summary.txt
-          fi
+          mkdir -p cmd/server/frontend/dist
+          printf '%s\n' '<!doctype html><html><head><meta charset="utf-8"></head><body></body></html>' > cmd/server/frontend/dist/index.html
 
-      - name: Upload coverage report
-        if: github.event_name == 'pull_request'
+      - name: Run unit tests and generate coverage
+        run: |
+          set -euo pipefail
+          go test -v ./... | tee test_output.txt
+          go test -v -coverprofile=coverage.out -coverpkg=./... ./tests/unit/... | tee -a test_output.txt
+          go tool cover -func=coverage.out > coverage.txt
+          go tool cover -html=coverage.out -o coverage.html
+
+      - name: Parse test results and coverage summary
+        if: always()
+        run: |
+          TESTS_PASSED=$(grep -c -- '--- PASS:' test_output.txt || true)
+          TESTS_TOTAL=$(grep -c -- '=== RUN' test_output.txt || true)
+          COVERAGE=$(grep '^total:' coverage.txt | awk '{print $3}' || true)
+          echo "Unit tests run: ${TESTS_TOTAL:-0}" > test_summary.txt
+          echo "Unit tests passed: ${TESTS_PASSED:-0}" >> test_summary.txt
+          echo "Test coverage: ${COVERAGE:-0.0%}" >> test_summary.txt
+
+      - name: Upload coverage report (PR only)
+        if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: |
-            coverage_summary.txt
+            coverage.txt
+            coverage.html
 
-      - name: Comment test summary on PR
-        if: github.event_name == 'pull_request'
+      - name: Comment test summary (PR only)
+        if: always() && github.event_name == 'pull_request'
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           recreate: true
-          path: coverage_summary.txt
+          path: test_summary.txt

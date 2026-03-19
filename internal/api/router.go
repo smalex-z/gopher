@@ -47,6 +47,7 @@ func NewRouter(
 		r.Get("/local/status", localH.Status)
 		r.Post("/local/install", localH.Install)
 		r.Post("/local/skip", localH.Skip)
+		r.Get("/local/check-dns", localH.CheckDNS)
 
 		// All routes below require a valid session
 		r.Group(func(r chi.Router) {
@@ -57,13 +58,16 @@ func NewRouter(
 			r.Post("/bootstrap/token", bootstrapH.GenerateToken)
 
 			r.Route("/local", func(r chi.Router) {
-				r.Get("/status", localH.Status)
-				r.Post("/install", localH.Install)
-				r.Post("/skip", localH.Skip)
 				r.Post("/reconcile", localH.Reconcile)
 				r.Get("/ssh-key", localH.DownloadSSHKey)
-					r.Put("/ssh-key", localH.UploadSSHKey)
-					r.Post("/generate-ssh-key", localH.GenerateSSHKey)
+				r.Put("/ssh-key", localH.UploadSSHKey)
+				r.Post("/generate-ssh-key", localH.GenerateSSHKey)
+			})
+
+			r.Route("/vps", func(r chi.Router) {
+				r.Get("/", vpsH.Get)
+				r.Post("/setup", vpsH.Create)
+				r.Put("/", vpsH.Update)
 				r.Delete("/", vpsH.Delete)
 				r.Post("/bootstrap", vpsH.Bootstrap)
 				r.Post("/deploy", vpsH.Deploy)

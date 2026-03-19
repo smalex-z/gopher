@@ -255,7 +255,7 @@ export default function TunnelsPage() {
                     max={65535}
                     value={form.rathole_port || ''}
                     onChange={e => setForm(f => ({ ...f, rathole_port: Number(e.target.value) }))}
-                    placeholder="20000"
+                    placeholder="80"
                     className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                   />
                 </div>
