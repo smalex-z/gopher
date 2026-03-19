@@ -58,9 +58,6 @@ func NewRouter(
 			r.Post("/bootstrap/token", bootstrapH.GenerateToken)
 
 			r.Route("/local", func(r chi.Router) {
-				r.Get("/status", localH.Status)
-				r.Post("/install", localH.Install)
-				r.Post("/skip", localH.Skip)
 				r.Post("/reconcile", localH.Reconcile)
 				r.Get("/ssh-key", localH.DownloadSSHKey)
 				r.Put("/ssh-key", localH.UploadSSHKey)

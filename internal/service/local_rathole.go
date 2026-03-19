@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
@@ -33,66 +34,51 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 
 	content := string(existing)
 
-	// Split the file into the header zone (above BEGIN) and the user's custom section.
+	// Extract the user-owned custom section.
 	userBody := ""
 	if bIdx := strings.Index(content, beginMarker); bIdx != -1 {
-		above := content[:bIdx]
 		below := content[bIdx+len(beginMarker):]
 		if eIdx := strings.Index(below, endMarker); eIdx != -1 {
 			userBody = below[:eIdx]
 		} else {
 			userBody = below
 		}
-		content = above
 	}
-	// Strip any gopher service entries that old versions incorrectly placed inside
-	// the custom section, and normalise whitespace.
+
+	// Strip any gopher-managed entries that old versions may have placed inside
+	// the custom section, then normalise whitespace.
 	userBody = strings.TrimSpace(stripGopherServiceSections(userBody))
 
-	// Strip gopher-managed entries from the header zone and trim trailing whitespace.
-	base := strings.TrimRight(stripGopherServiceSections(content), "\n") + "\n"
-
-	// Rebuild gopher-managed entries from the database.
-	machines, _ := db.GetMachines()
-	tunnels, _ := db.GetTunnels()
-
-	var managed strings.Builder
-	for _, m := range machines {
-		if m.RatholeSSHToken == "" || m.TunnelPort == 0 {
-			continue
-		}
-		fmt.Fprintf(&managed, "\n[server.services.machine-%s-ssh]\ntoken = \"%s\"\nbind_addr = \"0.0.0.0:%d\"\n",
-			m.ID, m.RatholeSSHToken, m.TunnelPort)
+	machines, err := db.GetMachines()
+	if err != nil {
+		return fmt.Errorf("failed to load machines: %w", err)
 	}
-	for _, t := range tunnels {
-		if t.RatholePort == 0 {
-			continue
-		}
-		token := t.RatholeToken
-		if token == "" {
-			token = t.ID // backward compat for tunnels created before this change
-		}
-		fmt.Fprintf(&managed, "\n[server.services.tunnel-%s]\ntoken = \"%s\"\nbind_addr = \"0.0.0.0:%d\"\n",
-			t.ID, token, t.RatholePort)
+	tunnels, err := db.GetTunnels()
+	if err != nil {
+		return fmt.Errorf("failed to load tunnels: %w", err)
 	}
 
-	// Rathole requires at least one [server.services.*] entry to start.
-	// Use a harmless placeholder when both managed and user sections are empty.
-	if managed.Len() == 0 && strings.TrimSpace(userBody) == "" {
-		managed.WriteString("\n[server.services.placeholder]\ntoken = \"placeholder\"\nbind_addr = \"0.0.0.0:52000\"\n")
+	// Rebuild gopher-managed config from DB using the canonical generator.
+	managedConfig := config.GenerateRatholeServerConfig(machines, tunnels)
+
+	// Guardrail: never write a generated config that fails self-validation.
+	validation := config.ValidateRatholeConfig(managedConfig, machines, tunnels)
+	if !validation.Valid {
+		return fmt.Errorf("generated rathole config failed validation: %s", strings.Join(validation.Errors, "; "))
 	}
 
-	// Assemble: base config + gopher entries + custom section.
+	// If the user has custom services, the placeholder is unnecessary noise.
+	if userBody != "" {
+		managedConfig = removeTomlSection(managedConfig, "server.services.placeholder")
+	}
+
+	// Assemble final file: managed config + user-owned custom section.
 	customBlock := beginMarker + "\n"
 	if userBody != "" {
 		customBlock += userBody + "\n"
 	}
 	customBlock += endMarker + "\n"
-	newContent := base + managed.String() + "\n" + customBlock
-	newContent, removed := dedupeServerServiceSections(newContent)
-	if removed > 0 {
-		fmt.Printf("INFO: removed %d duplicate rathole service entries during reconcile\n", removed)
-	}
+	newContent := strings.TrimRight(managedConfig, "\n") + "\n\n" + customBlock
 
 	if err := writeLocalFile(configPath, newContent); err != nil {
 		return fmt.Errorf("failed to write %s: %w", configPath, err)
@@ -130,6 +116,12 @@ func stripGopherServiceSections(content string) string {
 	skip := false
 	for _, line := range strings.Split(content, "\n") {
 		stripped := strings.TrimSpace(line)
+		if strings.HasPrefix(stripped, "# gopher-machine-start:") ||
+			strings.HasPrefix(stripped, "# gopher-machine-end:") ||
+			strings.HasPrefix(stripped, "# gopher-tunnel-start:") ||
+			strings.HasPrefix(stripped, "# gopher-tunnel-end:") {
+			continue
+		}
 		if isGopherSection(stripped) {
 			skip = true
 			continue
@@ -142,63 +134,6 @@ func stripGopherServiceSections(content string) string {
 		}
 	}
 	return strings.Join(out, "\n")
-}
-
-type tomlBlock struct {
-	header string
-	lines  []string
-}
-
-// dedupeServerServiceSections removes duplicate [server.services.*] sections,
-// keeping the last occurrence of each section header.
-func dedupeServerServiceSections(content string) (string, int) {
-	lines := strings.Split(content, "\n")
-	blocks := make([]tomlBlock, 0, len(lines))
-	current := tomlBlock{}
-
-	flush := func() {
-		if len(current.lines) == 0 {
-			return
-		}
-		blocks = append(blocks, current)
-		current = tomlBlock{}
-	}
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			flush()
-			current.header = trimmed
-			current.lines = append(current.lines, line)
-			continue
-		}
-		current.lines = append(current.lines, line)
-	}
-	flush()
-
-	counts := make(map[string]int)
-	for _, block := range blocks {
-		if isServerServiceHeader(block.header) {
-			counts[block.header]++
-		}
-	}
-
-	removed := 0
-	out := make([]string, 0, len(lines))
-	for _, block := range blocks {
-		if isServerServiceHeader(block.header) && counts[block.header] > 1 {
-			counts[block.header]--
-			removed++
-			continue
-		}
-		out = append(out, block.lines...)
-	}
-
-	return strings.Join(out, "\n"), removed
-}
-
-func isServerServiceHeader(header string) bool {
-	return strings.HasPrefix(header, "[server.services.") && strings.HasSuffix(header, "]")
 }
 
 // AddServiceTunnel adds a user-defined service tunnel to the server's
