@@ -105,6 +105,10 @@ if entry.Token != machine.RatholeSSHToken {
 result.Valid = false
 result.Errors = append(result.Errors, fmt.Sprintf("Token mismatch for machine %s", id))
 }
+			if extractPortFromBindAddr(entry.BindAddr) != machine.TunnelPort {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("Port mismatch for machine %s", id))
+			}
 }
 }
 for id, tunnel := range expectedTunnelIDs {
@@ -117,6 +121,10 @@ if entry.Token != expectedToken {
 result.Valid = false
 result.Errors = append(result.Errors, fmt.Sprintf("Token mismatch for tunnel %s", id))
 }
+			if extractPortFromBindAddr(entry.BindAddr) != tunnel.RatholePort {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("Port mismatch for tunnel %s", id))
+			}
 }
 }
 

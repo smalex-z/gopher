@@ -305,6 +305,40 @@ if !hasTokenError {
 t.Error("Should have token mismatch error")
 }
 }
+
+// Test port mismatch detection
+func TestValidatePortMismatch(t *testing.T) {
+	cfg := `[server]
+bind_addr = "0.0.0.0:2333"
+
+# gopher-tunnel-start: test-id
+[server.services.tunnel-test-id]
+token = "correct-token"
+bind_addr = "0.0.0.0:29999"
+# gopher-tunnel-end: test-id
+`
+
+	tunnels := []db.Tunnel{
+		{ID: "test-id", RatholePort: 20000, RatholeToken: "correct-token", CreatedAt: time.Now(), UpdatedAt: time.Now()},
+	}
+
+	result := config.ValidateRatholeConfig(cfg, []db.Machine{}, tunnels)
+
+	if result.Valid {
+		t.Error("Should detect port mismatch")
+	}
+	hasPortError := false
+	for _, err := range result.Errors {
+		if strings.Contains(err, "Port mismatch") {
+			hasPortError = true
+			break
+		}
+	}
+	if !hasPortError {
+		t.Error("Should have port mismatch error")
+	}
+}
+
 // Test multiple machines generate without duplication
 func TestGenerateMultipleMachinesNoDuplicates(t *testing.T) {
 	machines := []db.Machine{
@@ -508,5 +542,25 @@ func TestGenerateEmptyDatabaseValidStructure(t *testing.T) {
 	// Should not have tunnel markers
 	if strings.Contains(cfg, "# gopher-tunnel-start") {
 		t.Error("Should not have tunnel markers when empty")
+	}
+}
+
+// Test placeholder is generated when all DB entries are incomplete/skipped
+func TestGenerateAddsPlaceholderWhenAllEntriesIncomplete(t *testing.T) {
+	machines := []db.Machine{
+		{ID: "no-token", TunnelPort: 10000, RatholeSSHToken: ""},
+		{ID: "no-port", TunnelPort: 0, RatholeSSHToken: "ssh-token"},
+	}
+	tunnels := []db.Tunnel{
+		{ID: "no-port", RatholePort: 0, RatholeToken: "tok"},
+	}
+
+	cfg := config.GenerateRatholeServerConfig(machines, tunnels)
+
+	if !strings.Contains(cfg, "[server.services.placeholder]") {
+		t.Error("Should include placeholder when all entries are skipped")
+	}
+	if !strings.Contains(cfg, "bind_addr = \"0.0.0.0:52000\"") {
+		t.Error("Placeholder bind_addr should be present")
 	}
 }

@@ -88,6 +88,7 @@ local_addr = "0.0.0.0:22"
 // Never appends to existing config; always regenerates completely.
 func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel) string {
 	var buf strings.Builder
+	managedEntries := 0
 
 	// Write server section
 	buf.WriteString("[server]\n")
@@ -103,6 +104,7 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel) str
 		buf.WriteString(fmt.Sprintf("token = \"%s\"\n", m.RatholeSSHToken))
 		buf.WriteString(fmt.Sprintf("bind_addr = \"0.0.0.0:%d\"\n", m.TunnelPort))
 		buf.WriteString(fmt.Sprintf("# gopher-machine-end: %s\n", m.ID))
+		managedEntries++
 	}
 
 	// Write service tunnels with markers
@@ -119,10 +121,11 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel) str
 		buf.WriteString(fmt.Sprintf("token = \"%s\"\n", token))
 		buf.WriteString(fmt.Sprintf("bind_addr = \"0.0.0.0:%d\"\n", t.RatholePort))
 		buf.WriteString(fmt.Sprintf("# gopher-tunnel-end: %s\n", t.ID))
+		managedEntries++
 	}
 
 	// Add placeholder if no entries to keep rathole happy (requires at least one service)
-	if len(machines) == 0 && len(tunnels) == 0 {
+	if managedEntries == 0 {
 		buf.WriteString("\n[server.services.placeholder]\n")
 		buf.WriteString("token = \"placeholder\"\n")
 		buf.WriteString("bind_addr = \"0.0.0.0:52000\"\n")
