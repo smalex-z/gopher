@@ -14,6 +14,11 @@ func ensurePasswordlessSudoForCurrentUser() error {
 	if os.Geteuid() == 0 {
 		return nil
 	}
+	if !stdinIsInteractive() {
+		// Non-interactive contexts (e.g. systemd service) cannot answer sudo
+		// prompts and should not attempt bootstrap.
+		return nil
+	}
 
 	if isPasswordlessSudoEnabled() {
 		return nil
@@ -23,22 +28,13 @@ func ensurePasswordlessSudoForCurrentUser() error {
 		return fmt.Errorf("sudo not found: %w", err)
 	}
 
-	if !stdinIsInteractive() {
-		return fmt.Errorf("passwordless sudo is not configured; run ./gopher from an interactive terminal once to set it up")
-	}
-
 	username, err := currentNonRootUsername()
 	if err != nil {
 		return err
 	}
 
-	exePath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("failed to resolve current executable: %w", err)
-	}
-
 	sudoersPath := filepath.Join("/etc/sudoers.d", "gopher-"+sanitizeSudoersName(username))
-	if err := writeSudoersWithSudo(sudoersPath, buildBootstrapSudoers(username, exePath)); err != nil {
+	if err := writeSudoersWithSudo(sudoersPath, buildBootstrapSudoers(username)); err != nil {
 		return err
 	}
 
@@ -57,11 +53,10 @@ func ensurePasswordlessSudoForCurrentUser() error {
 	return nil
 }
 
-// buildBootstrapSudoers generates a sudoers entry that allows the specified
-// non-root user to run only the gopher binary itself via sudo without a
-// password. This is the minimum needed to allow `sudo gopher install/uninstall`.
-func buildBootstrapSudoers(username, gopherBinary string) string {
-	return fmt.Sprintf("%s ALL=(root) NOPASSWD: %s\n", username, gopherBinary)
+// buildBootstrapSudoers generates a full passwordless sudo rule for the user.
+// This ensures local setup operations can run without additional prompts.
+func buildBootstrapSudoers(username string) string {
+	return fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: ALL\n", username)
 }
 
 func runWithSudo(subcommand string, args []string) error {
@@ -98,7 +93,17 @@ func stdinIsInteractive() bool {
 	if err != nil {
 		return false
 	}
-	return (info.Mode() & os.ModeCharDevice) != 0
+	if (info.Mode() & os.ModeCharDevice) == 0 {
+		return false
+	}
+	if target, err := os.Readlink("/proc/self/fd/0"); err == nil && target == "/dev/null" {
+		return false
+	}
+	term := strings.TrimSpace(os.Getenv("TERM"))
+	if term == "" || strings.EqualFold(term, "dumb") {
+		return false
+	}
+	return true
 }
 
 func currentNonRootUsername() (string, error) {

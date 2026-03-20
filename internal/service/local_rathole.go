@@ -176,10 +176,6 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	defer sshClient.Close()
 
 	// Read existing client.toml
-	ratholeHost := settings.Domain
-	if ratholeHost == "" {
-		return fmt.Errorf("domain not configured; set the domain in Setup before adding tunnels")
-	}
 	token := tunnel.RatholeToken
 	if token == "" {
 		token = tunnel.ID // backward compat
@@ -188,6 +184,10 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		tunnel.ID, token, tunnel.LocalPort)
 	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
 	if err != nil || strings.TrimSpace(existing) == "" {
+		ratholeHost := strings.TrimSpace(settings.Domain)
+		if ratholeHost == "" {
+			return fmt.Errorf("no existing client.toml and no domain configured; bootstrap the machine again with a reachable server host")
+		}
 		// Build from scratch
 		existing = fmt.Sprintf("[client]\nremote_addr = \"%s:2333\"\n", ratholeHost)
 	}

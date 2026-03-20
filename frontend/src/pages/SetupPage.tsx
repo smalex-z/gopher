@@ -103,6 +103,7 @@ function ServicePill({ state, label }: { state: string; label: string }) {
 
 function ServicesStep({ onDone }: { onDone: () => void }) {
   const [domain, setDomain] = useState('')
+  const [skipCaddy, setSkipCaddy] = useState(false)
   const [status, setStatus] = useState<LocalServiceStatus | null>(null)
   const [showLogs, setShowLogs] = useState(false)
   const [skipping, setSkipping] = useState(false)
@@ -117,7 +118,12 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
   useEffect(() => {
     localApi.status().then(s => {
       setStatus(s)
-      if (s.domain) setDomain(s.domain)
+      if (s.domain) {
+        setDomain(s.domain)
+        setSkipCaddy(false)
+      } else if (s.local_setup_done) {
+        setSkipCaddy(true)
+      }
     }).catch(() => {})
   }, [])
 
@@ -129,6 +135,11 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
   // Debounced DNS check whenever domain changes
   useEffect(() => {
     if (dnsTimerRef.current) clearTimeout(dnsTimerRef.current)
+    if (skipCaddy) {
+      setDnsStatus('idle')
+      setDnsMessage('')
+      return
+    }
     const trimmed = domain.trim()
     if (!trimmed || !trimmed.includes('.')) {
       setDnsStatus('idle')
@@ -152,16 +163,20 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       }
     }, 1200)
     return () => { if (dnsTimerRef.current) clearTimeout(dnsTimerRef.current) }
-  }, [domain])
+  }, [domain, skipCaddy])
 
   // Redirect to router.domain after install completes
   useEffect(() => {
-    if (!installComplete || !domain.trim()) return
+    if (!installComplete) return
     const t = setTimeout(() => {
+      if (skipCaddy || !domain.trim()) {
+        window.location.href = '/'
+        return
+      }
       window.location.href = `https://router.${domain.trim()}`
-    }, 3000)
+    }, skipCaddy || !domain.trim() ? 1000 : 5000)
     return () => clearTimeout(t)
-  }, [installComplete, domain])
+  }, [installComplete, domain, skipCaddy])
 
   const allGood = status?.caddy_active === 'active' && status?.rathole_active === 'active'
 
@@ -171,12 +186,9 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
     onDone()
   }
 
-  const handleContinue = async () => {
-    if (domain) {
-      await localApi.skip(domain).catch(() => {})
-    }
-    onDone()
-  }
+  const canInstall = skipCaddy
+    ? (status == null || status.has_install_permission)
+    : Boolean(domain && dnsStatus === 'ok' && (status == null || status.has_install_permission))
 
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-6">
@@ -185,18 +197,32 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       </div>
 
       <p className="text-sm text-gray-600">
-        Gopher needs <strong>Caddy</strong> (HTTPS reverse proxy) and <strong>rathole</strong> (tunnel server)
-        running locally as systemd services. Enter your domain and click <em>Install &amp; Configure</em> to set
-        them up automatically.
+        Gopher can install <strong>Caddy</strong> (HTTPS reverse proxy) and <strong>rathole</strong> (tunnel server)
+        as local systemd services. Enable Caddy for domain/subdomain routing, or skip it for raw rathole-only ports.
       </p>
+
+      <label className="flex items-start gap-3 text-sm text-gray-700">
+        <input
+          type="checkbox"
+          checked={skipCaddy}
+          onChange={e => setSkipCaddy(e.target.checked)}
+          className="mt-0.5"
+        />
+        <span>
+          <strong>Skip Caddy / reverse proxy</strong>
+          <span className="block text-xs text-gray-500 mt-0.5">
+            Use rathole only. URL/subdomain routing is disabled and tunnels use server ports directly.
+          </span>
+        </span>
+      </label>
 
       {/* Permission warning */}
       {status && !status.has_install_permission && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
           <strong>Permission required:</strong> Gopher needs root access to write to{' '}
           <code>/etc/caddy/</code>, <code>/etc/systemd/system/</code>, and run{' '}
-          <code>systemctl</code>. Run <code>./gopher</code> in a terminal and approve the one-time
-          sudo prompt so Gopher can configure passwordless sudo.
+          <code>systemctl</code>. Run <code>./gopher install</code> once to configure passwordless
+          sudo and service permissions for local setup.
         </div>
       )}
 
@@ -215,31 +241,33 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       )}
 
       {/* Domain input */}
-      <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">
-          Your domain <span className="text-red-500">*</span>{' '}
-          <span className="text-gray-400 font-normal">(e.g. <code>example.com</code>)</span>
-        </label>
-        <input
-          type="text"
-          value={domain}
-          onChange={e => setDomain(e.target.value)}
-          placeholder="example.com"
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          required
-          autoFocus
-        />
-        {domain ? (
-          <p className="text-xs text-gray-400 mt-1">
-            Dashboard will be accessible at <strong>https://router.{domain}</strong>
-          </p>
-        ) : (
-          <p className="text-xs text-orange-500 mt-1">Required — used to configure the Caddy reverse proxy</p>
-        )}
-      </div>
+      {!skipCaddy && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Your domain <span className="text-red-500">*</span>{' '}
+            <span className="text-gray-400 font-normal">(e.g. <code>example.com</code>)</span>
+          </label>
+          <input
+            type="text"
+            value={domain}
+            onChange={e => setDomain(e.target.value)}
+            placeholder="example.com"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            required
+            autoFocus
+          />
+          {domain ? (
+            <p className="text-xs text-gray-400 mt-1">
+              Dashboard will be accessible at <strong>https://router.{domain}</strong>
+            </p>
+          ) : (
+            <p className="text-xs text-orange-500 mt-1">Required — used to configure the Caddy reverse proxy</p>
+          )}
+        </div>
+      )}
 
       {/* DNS check banner */}
-      {domain && domain.includes('.') && (
+      {!skipCaddy && domain && domain.includes('.') && (
         <div className={`rounded-lg p-4 text-sm border space-y-2 ${
           dnsStatus === 'ok'
             ? 'bg-green-50 border-green-200 text-green-800'
@@ -287,24 +315,30 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       {installComplete && (
         <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-sm text-green-800 space-y-1">
           <div className="font-semibold flex items-center gap-2"><CheckCircle2 size={15} /> Installation complete!</div>
-          <p>
-            Redirecting you to{' '}
-            <a href={`https://router.${domain}`} className="underline font-medium">
-              https://router.{domain}
-            </a>{' '}
-            in a moment…
-          </p>
+          {skipCaddy || !domain ? (
+            <p>Redirecting you to the dashboard…</p>
+          ) : (
+            <p>
+              Redirecting you to{' '}
+              <a href={`https://router.${domain}`} className="underline font-medium">
+                https://router.{domain}
+              </a>{' '}
+              in about 5 seconds…
+            </p>
+          )}
         </div>
       )}
 
       <div className="flex gap-3">
         <button
           onClick={() => setShowLogs(true)}
-          disabled={!domain || dnsStatus !== 'ok' || (status != null && !status.has_install_permission)}
+          disabled={!canInstall}
           className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          title={dnsStatus !== 'ok' ? 'Waiting for DNS to resolve before installing…' : undefined}
+          title={!skipCaddy && dnsStatus !== 'ok' ? 'Waiting for DNS to resolve before installing…' : undefined}
         >
-          {allGood ? '↻ Re-configure' : '⚙ Install & Configure'}
+          {skipCaddy
+            ? (status?.rathole_active === 'active' ? '↻ Re-configure Rathole' : '⚙ Install Rathole Only')
+            : (allGood ? '↻ Re-configure' : '⚙ Install & Configure')}
         </button>
         <button
           onClick={handleSkip}
@@ -315,22 +349,12 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
         </button>
       </div>
 
-      {allGood && (
-        <button
-          onClick={handleContinue}
-          disabled={!domain}
-          className="w-full bg-green-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-        >
-          {domain ? '✓ Continue to Dashboard →' : 'Enter a domain name above to continue'}
-        </button>
-      )}
-
       <DeployLogModal
         isOpen={showLogs}
         onClose={() => { setShowLogs(false); load() }}
         onComplete={() => setInstallComplete(true)}
         title="Installing Local Services"
-        onStart={() => localApi.install(domain)}
+        onStart={() => localApi.install(skipCaddy ? '' : domain, skipCaddy)}
         autoStart
       />
     </div>

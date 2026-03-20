@@ -20,7 +20,8 @@ export interface DNSCheckResult {
 
 export const localApi = {
   status: () => client.get<{ data: LocalServiceStatus }>('/local/status').then(r => r.data.data),
-  install: (domain: string) => client.post('/local/install', { domain }).then(r => r.data),
+  install: (domain: string, skipCaddy?: boolean) =>
+    client.post('/local/install', { domain, skip_caddy: Boolean(skipCaddy) }).then(r => r.data),
   skip: (domain?: string) => client.post('/local/skip', { domain }).then(r => r.data),
   checkDNS: (domain: string) =>
     client.get<{ data: DNSCheckResult }>(`/local/check-dns?domain=${encodeURIComponent(domain)}`).then(r => r.data.data),

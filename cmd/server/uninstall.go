@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -36,9 +35,49 @@ func runUninstall(args []string) error {
 		runCommandBestEffort(systemctlPath, "stop", cfg.serviceName)
 		runCommandBestEffort(systemctlPath, "disable", cfg.serviceName)
 	}
-	// Kill any remaining gopher processes, but skip the current PID to avoid
-	// aborting the uninstall mid-way.
-	killGopherProcesses()
+
+	resetCaddy, err := promptYesNo("Reset Caddyfile to remove Gopher-managed changes? [y/N]: ")
+	if err != nil {
+		return fmt.Errorf("failed reading Caddy reset confirmation: %w", err)
+	}
+	removeCaddy, err := promptYesNo("Remove Caddy completely (service, package, config)? [y/N]: ")
+	if err != nil {
+		return fmt.Errorf("failed reading Caddy removal confirmation: %w", err)
+	}
+	resetRathole, err := promptYesNo("Reset rathole server config to remove Gopher-managed changes? [y/N]: ")
+	if err != nil {
+		return fmt.Errorf("failed reading rathole reset confirmation: %w", err)
+	}
+	removeRathole, err := promptYesNo("Remove rathole completely (service, binary, config)? [y/N]: ")
+	if err != nil {
+		return fmt.Errorf("failed reading rathole removal confirmation: %w", err)
+	}
+
+	caddySummary := "Caddy left unchanged"
+	if removeCaddy {
+		if err := removeCaddyCompletely(); err != nil {
+			return err
+		}
+		caddySummary = "Caddy removed completely"
+	} else if resetCaddy {
+		if err := resetCaddyManagedConfig(); err != nil {
+			return err
+		}
+		caddySummary = "Caddyfile reset to remove Gopher-managed blocks"
+	}
+
+	ratholeSummary := "rathole left unchanged"
+	if removeRathole {
+		if err := removeRatholeCompletely(); err != nil {
+			return err
+		}
+		ratholeSummary = "rathole removed completely"
+	} else if resetRathole {
+		if err := resetRatholeManagedConfig(); err != nil {
+			return err
+		}
+		ratholeSummary = "rathole config reset to remove Gopher-managed blocks"
+	}
 
 	servicePath := filepath.Join("/etc/systemd/system", cfg.serviceName+".service")
 	serviceRemoved, err := removeFileIfExists(servicePath)
@@ -95,6 +134,8 @@ func runUninstall(args []string) error {
 	fmt.Printf("Sudoers removed: %s\n", sudoersPath)
 	fmt.Printf("Binary removed: %s\n", targetBinary)
 	fmt.Printf("Data removed: %s\n", cfg.dataDir)
+	fmt.Println(caddySummary)
+	fmt.Println(ratholeSummary)
 	fmt.Println(userSummary)
 	return nil
 }
@@ -123,26 +164,6 @@ func ensureSafeRemovalPath(path string) error {
 func runCommandBestEffort(name string, args ...string) {
 	cmd := exec.Command(name, args...)
 	_ = cmd.Run()
-}
-
-// killGopherProcesses kills any remaining gopher processes, skipping the
-// current process to avoid aborting the uninstall mid-way.
-func killGopherProcesses() {
-	pgrepPath, err := exec.LookPath("pgrep")
-	if err != nil {
-		return
-	}
-	out, err := exec.Command(pgrepPath, "-x", "gopher").Output()
-	if err != nil {
-		return
-	}
-	currentPID := os.Getpid()
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		pid, err := strconv.Atoi(strings.TrimSpace(line))
-		if err == nil && pid != currentPID {
-			runCommandBestEffort("kill", strconv.Itoa(pid))
-		}
-	}
 }
 
 // removeBootstrapSudoers removes any sudoers files in /etc/sudoers.d that were

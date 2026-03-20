@@ -64,10 +64,10 @@ func privilegedCmdPrefix() []string {
 
 // Install runs the full local setup in a background goroutine, streaming logs
 // to the shared deploy hub so the frontend WebSocket log viewer can follow along.
-func (s *LocalSetupService) Install(domain string) {
+func (s *LocalSetupService) Install(domain string, skipCaddy bool) {
 	go func() {
 		w := &hubWriter{hub: s.hub}
-		if err := s.doInstall(domain, w); err != nil {
+		if err := s.doInstall(domain, skipCaddy, w); err != nil {
 			fmt.Fprintf(w, "ERROR: %v\n", err)
 		}
 		// Sentinel tells the frontend the stream is done so it can close the modal.
@@ -87,17 +87,21 @@ func (s *LocalSetupService) Skip(domain string) error {
 	return db.SaveSettings(settings)
 }
 
-func (s *LocalSetupService) doInstall(domain string, logWriter io.Writer) error {
+func (s *LocalSetupService) doInstall(domain string, skipCaddy bool, logWriter io.Writer) error {
 	fmt.Fprintln(logWriter, "=== Installing Local Services ===")
 
-	// Step 1: Caddy
-	if !isCommandAvailable("caddy") {
-		fmt.Fprintln(logWriter, "Step 1: Installing Caddy via apt...")
-		if err := installLocalCaddy(logWriter); err != nil {
-			return fmt.Errorf("failed to install Caddy: %w", err)
-		}
+	// Step 1: Caddy (optional)
+	if skipCaddy {
+		fmt.Fprintln(logWriter, "Step 1: Skipping Caddy setup (reverse proxy disabled)")
 	} else {
-		fmt.Fprintln(logWriter, "Step 1: Caddy already installed ✓")
+		if !isCommandAvailable("caddy") {
+			fmt.Fprintln(logWriter, "Step 1: Installing Caddy via apt...")
+			if err := installLocalCaddy(logWriter); err != nil {
+				return fmt.Errorf("failed to install Caddy: %w", err)
+			}
+		} else {
+			fmt.Fprintln(logWriter, "Step 1: Caddy already installed ✓")
+		}
 	}
 
 	// Step 2: Rathole
@@ -113,16 +117,20 @@ func (s *LocalSetupService) doInstall(domain string, logWriter io.Writer) error 
 	}
 
 	// Step 3: Caddyfile — merge if existing, create fresh if not
-	fmt.Fprintln(logWriter, "Step 3: Configuring /etc/caddy/Caddyfile...")
-	if existingCaddy, readErr := os.ReadFile("/etc/caddy/Caddyfile"); readErr == nil {
-		fmt.Fprintln(logWriter, "  Existing Caddyfile found, merging dashboard block...")
-		merged := mergeCaddyfile(string(existingCaddy), domain)
-		if err := writeLocalFile("/etc/caddy/Caddyfile", merged); err != nil {
-			return fmt.Errorf("failed to write Caddyfile: %w", err)
-		}
+	if skipCaddy {
+		fmt.Fprintln(logWriter, "Step 3: Skipping Caddyfile configuration")
 	} else {
-		if err := writeLocalFile("/etc/caddy/Caddyfile", buildLocalCaddyfile(domain)); err != nil {
-			return fmt.Errorf("failed to write Caddyfile: %w", err)
+		fmt.Fprintln(logWriter, "Step 3: Configuring /etc/caddy/Caddyfile...")
+		if existingCaddy, readErr := os.ReadFile("/etc/caddy/Caddyfile"); readErr == nil {
+			fmt.Fprintln(logWriter, "  Existing Caddyfile found, merging dashboard block...")
+			merged := mergeCaddyfile(string(existingCaddy), domain)
+			if err := writeLocalFile("/etc/caddy/Caddyfile", merged); err != nil {
+				return fmt.Errorf("failed to write Caddyfile: %w", err)
+			}
+		} else {
+			if err := writeLocalFile("/etc/caddy/Caddyfile", buildLocalCaddyfile(domain)); err != nil {
+				return fmt.Errorf("failed to write Caddyfile: %w", err)
+			}
 		}
 	}
 
@@ -159,9 +167,13 @@ func (s *LocalSetupService) doInstall(domain string, logWriter io.Writer) error 
 	}
 
 	// Step 7: Enable + start Caddy
-	fmt.Fprintln(logWriter, "Step 7: Enabling and starting caddy.service...")
-	if err := runLocalCmd(logWriter, "sudo", "systemctl", "enable", "--now", "caddy"); err != nil {
-		return err
+	if skipCaddy {
+		fmt.Fprintln(logWriter, "Step 7: Skipping caddy.service enable/start")
+	} else {
+		fmt.Fprintln(logWriter, "Step 7: Enabling and starting caddy.service...")
+		if err := runLocalCmd(logWriter, "sudo", "systemctl", "enable", "--now", "caddy"); err != nil {
+			return err
+		}
 	}
 
 	// Step 8: Enable + start rathole-server
@@ -171,22 +183,34 @@ func (s *LocalSetupService) doInstall(domain string, logWriter io.Writer) error 
 	}
 
 	// Step 9: Reload Caddy so new Caddyfile takes effect
-	fmt.Fprintln(logWriter, "Step 9: Reloading Caddy config...")
-	_ = runLocalCmd(logWriter, "sudo", "systemctl", "reload", "caddy")
+	if skipCaddy {
+		fmt.Fprintln(logWriter, "Step 9: Skipping Caddy reload")
+	} else {
+		fmt.Fprintln(logWriter, "Step 9: Reloading Caddy config...")
+		_ = runLocalCmd(logWriter, "sudo", "systemctl", "reload", "caddy")
+	}
 
 	// Step 10: Persist settings
 	settings, err := db.GetSettings()
 	if err != nil {
 		return err
 	}
-	settings.Domain = domain
+	if skipCaddy {
+		settings.Domain = ""
+	} else {
+		settings.Domain = domain
+	}
 	settings.LocalSetupDone = true
 	if err := db.SaveSettings(settings); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 
 	fmt.Fprintln(logWriter, "=== Local Setup Complete ===")
-	fmt.Fprintf(logWriter, "Dashboard: https://router.%s\n", domain)
+	if skipCaddy {
+		fmt.Fprintln(logWriter, "Dashboard: local mode (reverse proxy disabled)")
+	} else {
+		fmt.Fprintf(logWriter, "Dashboard: https://router.%s\n", domain)
+	}
 	return nil
 }
 
@@ -195,7 +219,7 @@ func installLocalCaddy(logWriter io.Writer) error {
 	steps := [][]string{
 		append(sudo, "apt-get", "update", "-y"),
 		append(sudo, "apt-get", "install", "-y", "debian-keyring", "debian-archive-keyring", "apt-transport-https", "curl"),
-		append(sudo, "bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg`),
+		append(sudo, "bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --batch --yes --no-tty -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg`),
 		append(sudo, "bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list`),
 		append(sudo, "apt-get", "update", "-y"),
 		append(sudo, "apt-get", "install", "-y", "caddy"),

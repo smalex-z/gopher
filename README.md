@@ -66,12 +66,17 @@ cd gopher
 # Optional: install as a systemd service
 ./gopher install
 
+# In setup, you can optionally check "Skip Caddy / reverse proxy"
+# to run rathole-only mode (no domain/subdomain URL routing).
+
 # Service management
 sudo systemctl status gopher
 sudo systemctl restart gopher
 
 # Uninstall service and installed paths
 ./gopher uninstall
+# During uninstall, Gopher prompts whether to reset or fully remove
+# Caddy and rathole.
 # Open http://localhost:8080
 ```
 

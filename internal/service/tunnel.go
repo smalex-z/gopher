@@ -35,6 +35,14 @@ func (s *TunnelService) NextPort() (int, error) {
 }
 
 func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) {
+	settings, err := db.GetSettings()
+	if err != nil {
+		return nil, err
+	}
+	if req.Subdomain != "" && settings.Domain == "" {
+		return nil, &apperrors.ValidationError{Field: "subdomain", Message: "URL routing is disabled; leave subdomain empty"}
+	}
+
 	if req.Subdomain != "" {
 		if err := config.ValidateSubdomain(req.Subdomain); err != nil {
 			return nil, &apperrors.ValidationError{Field: "subdomain", Message: err.Error()}
@@ -108,8 +116,15 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 	if err != nil {
 		return nil, err
 	}
+	settings, err := db.GetSettings()
+	if err != nil {
+		return nil, err
+	}
 
 	if req.Subdomain != tunnel.Subdomain {
+		if req.Subdomain != "" && settings.Domain == "" {
+			return nil, &apperrors.ValidationError{Field: "subdomain", Message: "URL routing is disabled; leave subdomain empty"}
+		}
 		if err := config.ValidateSubdomain(req.Subdomain); err != nil {
 			return nil, &apperrors.ValidationError{Field: "subdomain", Message: err.Error()}
 		}

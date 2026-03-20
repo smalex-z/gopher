@@ -14,7 +14,6 @@ import (
 	"github.com/smalex-z/gopher/internal/service"
 )
 
-
 type LocalHandler struct {
 	svc *service.LocalSetupService
 }
@@ -36,17 +35,18 @@ func (h *LocalHandler) Status(w http.ResponseWriter, r *http.Request) {
 // POST /api/local/install
 func (h *LocalHandler) Install(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Domain string `json:"domain"`
+		Domain    string `json:"domain"`
+		SkipCaddy bool   `json:"skip_caddy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		response.BadRequest(w, "invalid request body")
 		return
 	}
-	if body.Domain == "" {
+	if !body.SkipCaddy && body.Domain == "" {
 		response.BadRequest(w, "domain is required")
 		return
 	}
-	h.svc.Install(body.Domain)
+	h.svc.Install(body.Domain, body.SkipCaddy)
 	response.Success(w, map[string]string{"message": "install started"})
 }
 

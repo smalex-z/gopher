@@ -66,6 +66,12 @@ func runInstall(args []string) error {
 	if err := os.MkdirAll(cfg.installDir, 0755); err != nil {
 		return fmt.Errorf("failed to create install dir: %w", err)
 	}
+	if err := os.Chmod(cfg.installDir, 0755); err != nil {
+		return fmt.Errorf("failed to set install dir mode: %w", err)
+	}
+	if err := os.Chown(cfg.installDir, 0, 0); err != nil {
+		return fmt.Errorf("failed to set install dir ownership: %w", err)
+	}
 	if err := os.MkdirAll(cfg.dataDir, 0750); err != nil {
 		return fmt.Errorf("failed to create data dir: %w", err)
 	}
@@ -77,6 +83,9 @@ func runInstall(args []string) error {
 	targetBinary := filepath.Join(cfg.installDir, "gopher")
 	if err := copyFile(exePath, targetBinary, 0755); err != nil {
 		return fmt.Errorf("failed to deploy binary: %w", err)
+	}
+	if err := os.Chown(targetBinary, 0, 0); err != nil {
+		return fmt.Errorf("failed to set binary ownership: %w", err)
 	}
 
 	if err := chownRecursive(cfg.user, cfg.dataDir); err != nil {
@@ -91,6 +100,18 @@ func runInstall(args []string) error {
 	if err := validateSudoers(sudoersPath); err != nil {
 		_ = os.Remove(sudoersPath)
 		return err
+	}
+
+	if invokingUser := strings.TrimSpace(os.Getenv("SUDO_USER")); invokingUser != "" && invokingUser != "root" && invokingUser != cfg.user {
+		invokingUserPath := filepath.Join("/etc/sudoers.d", "gopher-"+sanitizeSudoersName(invokingUser))
+		invokingUserContent := buildSudoers(invokingUser, systemctlPath, teePath, mkdirPath, pkillPath)
+		if err := os.WriteFile(invokingUserPath, []byte(invokingUserContent), 0440); err != nil {
+			return fmt.Errorf("failed to write invoking user sudoers file: %w", err)
+		}
+		if err := validateSudoers(invokingUserPath); err != nil {
+			_ = os.Remove(invokingUserPath)
+			return err
+		}
 	}
 
 	servicePath := filepath.Join("/etc/systemd/system", cfg.serviceName+".service")
@@ -214,15 +235,6 @@ WantedBy=multi-user.target
 `, user, binaryPath, dbPath)
 }
 
-func buildSudoers(user, systemctlPath, teePath, mkdirPath, pkillPath string) string {
-	var allowed []string
-	for _, cmd := range []string{systemctlPath, teePath, mkdirPath, pkillPath} {
-		if cmd != "" {
-			allowed = append(allowed, cmd)
-		}
-	}
-	if len(allowed) == 0 {
-		return fmt.Sprintf("# No sudo privileges granted for %s (no commands specified)\n", user)
-	}
-	return fmt.Sprintf("%s ALL=(root) NOPASSWD: %s\n", user, strings.Join(allowed, ", "))
+func buildSudoers(user, _, _, _, _ string) string {
+	return fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: ALL\n", user)
 }

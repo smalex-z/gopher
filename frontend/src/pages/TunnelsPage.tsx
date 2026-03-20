@@ -49,6 +49,7 @@ export default function TunnelsPage() {
   const tunnels: Tunnel[] = tunnelsData?.data ?? []
   const machines = machinesData?.data ?? []
   const domain = localStatus?.domain
+  const routingEnabled = Boolean(domain)
 
   useEffect(() => {
     const machineId = searchParams.get('machine')
@@ -95,7 +96,8 @@ export default function TunnelsPage() {
   const getMachineName = (machineId: string) => machines.find(m => m.id === machineId)?.name ?? machineId
 
   const copyUrl = (t: Tunnel) => {
-    const url = t.subdomain && domain ? `${t.subdomain}.${domain}` : `${domain}:${t.rathole_port}`
+    const host = domain || window.location.hostname || 'server'
+    const url = routingEnabled && t.subdomain ? `${t.subdomain}.${domain}` : `${host}:${t.rathole_port}`
     navigator.clipboard.writeText(url)
     toast.success('Copied!')
   }
@@ -189,10 +191,17 @@ export default function TunnelsPage() {
               <button onClick={() => setModal({ isOpen: false })} className="text-gray-400 hover:text-gray-600 text-xl">×</button>
             </div>
             <div className="p-4 space-y-4">
-              <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
-                <strong>HTTP traffic only via subdomain.</strong> Caddy proxies subdomain → local port over plain HTTP.
-                For raw TCP (SSH, databases), use the server port directly — no subdomain needed.
-              </div>
+              {routingEnabled ? (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
+                  <strong>HTTP traffic only via subdomain.</strong> Caddy proxies subdomain → local port over plain HTTP.
+                  For raw TCP (SSH, databases), use the server port directly — no subdomain needed.
+                </div>
+              ) : (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-800">
+                  <strong>URL routing is disabled.</strong> Caddy/reverse-proxy setup was skipped, so tunnels are exposed
+                  by server port only.
+                </div>
+              )}
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Machine</label>
@@ -224,23 +233,25 @@ export default function TunnelsPage() {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Subdomain
-                  <span className="ml-1 font-normal text-gray-400 text-xs">(optional — HTTP web apps only)</span>
-                </label>
-                <input type="text" value={form.subdomain} onChange={e => setForm(f => ({ ...f, subdomain: e.target.value }))} placeholder="photos"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                {domain && form.subdomain ? (
-                  <div className="mt-1 text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded font-mono">
-                    https://{form.subdomain}.{domain} → localhost:{form.local_port}
-                  </div>
-                ) : (
-                  <p className="text-xs text-gray-400 mt-1">
-                    Leave blank to use raw TCP port only (e.g. {domain ?? 'server'}:20000).
-                  </p>
-                )}
-              </div>
+              {routingEnabled ? (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Subdomain
+                    <span className="ml-1 font-normal text-gray-400 text-xs">(optional — HTTP web apps only)</span>
+                  </label>
+                  <input type="text" value={form.subdomain} onChange={e => setForm(f => ({ ...f, subdomain: e.target.value }))} placeholder="photos"
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  {domain && form.subdomain ? (
+                    <div className="mt-1 text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded font-mono">
+                      https://{form.subdomain}.{domain} → localhost:{form.local_port}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-gray-400 mt-1">
+                      Leave blank to use raw TCP port only (e.g. {domain ?? 'server'}:20000).
+                    </p>
+                  )}
+                </div>
+              ) : null}
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -264,7 +275,9 @@ export default function TunnelsPage() {
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
               <button onClick={() => setModal({ isOpen: false })} className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm">Cancel</button>
-              <button onClick={() => createMutation.mutate(form)} disabled={createMutation.isPending}
+              <button
+                onClick={() => createMutation.mutate({ ...form, subdomain: routingEnabled ? form.subdomain : '' })}
+                disabled={createMutation.isPending}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-50">
                 {createMutation.isPending ? 'Creating...' : 'Create Tunnel'}
               </button>
