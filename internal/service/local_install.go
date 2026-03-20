@@ -38,14 +38,55 @@ bind_addr = "0.0.0.0:52000"
 # ===== END CUSTOM CONFIGURATION =====
 `
 
-// hasInstallPermission returns true if the process can write to system
-// directories — either because it is root (uid 0) or because passwordless
-// sudo is available (sudo -n true succeeds).
+// hasInstallPermission returns true if local setup can run with current
+// privileges. Root always passes. For non-root users, this first checks full
+// passwordless sudo (`sudo -n true`), then falls back to command-level
+// permission checks for constrained sudoers setups.
 func hasInstallPermission() bool {
 	if os.Getuid() == 0 {
 		return true
 	}
-	return exec.Command("sudo", "-n", "true").Run() == nil // #nosec G204
+
+	if !isCommandAvailable("sudo") {
+		return false
+	}
+	if exec.Command("sudo", "-n", "true").Run() == nil { // #nosec G204
+		return true
+	}
+
+	systemctlPath := findCommandPath("systemctl")
+	teePath := findCommandPath("tee")
+	mkdirPath := findCommandPath("mkdir")
+	pkillPath := findCommandPath("pkill")
+	if systemctlPath == "" || teePath == "" || mkdirPath == "" || pkillPath == "" {
+		return false
+	}
+
+	required := [][]string{
+		{systemctlPath, "daemon-reload"},
+		{systemctlPath, "restart", "caddy"},
+		{systemctlPath, "restart", "rathole-server"},
+		{systemctlPath, "enable", "--now", "caddy"},
+		{systemctlPath, "enable", "--now", "rathole-server"},
+		{systemctlPath, "reload", "caddy"},
+		{teePath, "/etc/caddy/Caddyfile"},
+		{mkdirPath, "-p", "/etc/rathole"},
+		{teePath, "/etc/rathole/server.toml"},
+		{pkillPath, "-HUP", "-x", "rathole"},
+	}
+
+	for _, cmd := range required {
+		if !canSudoCommand(cmd...) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func canSudoCommand(commandAndArgs ...string) bool {
+	args := append([]string{"-n", "-l", "--"}, commandAndArgs...)
+	return exec.Command("sudo", args...).Run() == nil // #nosec G204
 }
 
 // Install runs the full local setup in a background goroutine, streaming logs

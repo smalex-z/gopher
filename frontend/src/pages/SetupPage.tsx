@@ -195,8 +195,8 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
           <strong>Permission required:</strong> Gopher needs root access to write to{' '}
           <code>/etc/caddy/</code>, <code>/etc/systemd/system/</code>, and run{' '}
-          <code>systemctl</code>. Restart the binary with <code>sudo ./gopher</code> or ensure
-          passwordless sudo is configured.
+		  <code>systemctl</code>. Run <code>./gopher</code> in a terminal and approve the one-time
+		  sudo prompt so Gopher can configure passwordless sudo.
         </div>
       )}
 

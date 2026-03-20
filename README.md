@@ -58,8 +58,20 @@ git clone https://github.com/smalex-z/gopher.git
 cd gopher
 ./scripts/build.sh        # Builds frontend + Go binary
 
-# Run (sudo required to manage Caddy/rathole system services)
-sudo ./gopher
+# Run
+./gopher
+# On first start, Gopher may prompt once for your sudo password
+# to configure passwordless sudo for local service management.
+
+# Optional: install as a systemd service
+./gopher install
+
+# Service management
+sudo systemctl status gopher
+sudo systemctl restart gopher
+
+# Uninstall service and installed paths
+./gopher uninstall
 # Open http://localhost:8080
 ```
 
@@ -160,7 +172,7 @@ gopher/
 
 # Production build
 ./scripts/build.sh
-sudo ./gopher
+./gopher
 ```
 
 ## VPS Recommendations
