@@ -127,7 +127,12 @@ func ensureSystemUser(username, homeDir string) error {
 		shell = "/bin/false"
 	}
 
-	cmd := exec.Command("useradd", "-r", "-s", shell, "-d", homeDir, "-m", username)
+	useraddPath, err := exec.LookPath("useradd")
+	if err != nil {
+		return fmt.Errorf("useradd not found in PATH: %w", err)
+	}
+
+	cmd := exec.Command(useraddPath, "-r", "-s", shell, "-d", homeDir, "-m", username)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to create user %s: %w (%s)", username, err, strings.TrimSpace(string(out)))
 	}
@@ -209,6 +214,15 @@ WantedBy=multi-user.target
 `, user, binaryPath, dbPath)
 }
 
-func buildSudoers(user, _, _, _, _ string) string {
-	return fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: ALL\n", user)
+func buildSudoers(user, systemctlPath, teePath, mkdirPath, pkillPath string) string {
+	var allowed []string
+	for _, cmd := range []string{systemctlPath, teePath, mkdirPath, pkillPath} {
+		if cmd != "" {
+			allowed = append(allowed, cmd)
+		}
+	}
+	if len(allowed) == 0 {
+		return fmt.Sprintf("# No sudo privileges granted for %s (no commands specified)\n", user)
+	}
+	return fmt.Sprintf("%s ALL=(root) NOPASSWD: %s\n", user, strings.Join(allowed, ", "))
 }

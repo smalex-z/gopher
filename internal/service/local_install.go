@@ -39,9 +39,9 @@ bind_addr = "0.0.0.0:52000"
 `
 
 // hasInstallPermission returns true if local setup can run with current
-// privileges. Root always passes. For non-root users, this first checks full
-// passwordless sudo (`sudo -n true`), then falls back to command-level
-// permission checks for constrained sudoers setups.
+// privileges. Root always passes. For non-root users, full passwordless sudo
+// is required so all privileged operations (apt-get, systemctl, writing to
+// system paths) can be executed via sudo.
 func hasInstallPermission() bool {
 	if os.Getuid() == 0 {
 		return true
@@ -50,43 +50,16 @@ func hasInstallPermission() bool {
 	if !isCommandAvailable("sudo") {
 		return false
 	}
-	if exec.Command("sudo", "-n", "true").Run() == nil { // #nosec G204
-		return true
-	}
-
-	systemctlPath := findCommandPath("systemctl")
-	teePath := findCommandPath("tee")
-	mkdirPath := findCommandPath("mkdir")
-	pkillPath := findCommandPath("pkill")
-	if systemctlPath == "" || teePath == "" || mkdirPath == "" || pkillPath == "" {
-		return false
-	}
-
-	required := [][]string{
-		{systemctlPath, "daemon-reload"},
-		{systemctlPath, "restart", "caddy"},
-		{systemctlPath, "restart", "rathole-server"},
-		{systemctlPath, "enable", "--now", "caddy"},
-		{systemctlPath, "enable", "--now", "rathole-server"},
-		{systemctlPath, "reload", "caddy"},
-		{teePath, "/etc/caddy/Caddyfile"},
-		{mkdirPath, "-p", "/etc/rathole"},
-		{teePath, "/etc/rathole/server.toml"},
-		{pkillPath, "-HUP", "-x", "rathole"},
-	}
-
-	for _, cmd := range required {
-		if !canSudoCommand(cmd...) {
-			return false
-		}
-	}
-
-	return true
+	return exec.Command("sudo", "-n", "true").Run() == nil // #nosec G204
 }
 
-func canSudoCommand(commandAndArgs ...string) bool {
-	args := append([]string{"-n", "-l", "--"}, commandAndArgs...)
-	return exec.Command("sudo", args...).Run() == nil // #nosec G204
+// privilegedCmdPrefix returns a "sudo" prefix slice when not running as root,
+// or nil when already root, so it can be prepended to privileged command args.
+func privilegedCmdPrefix() []string {
+	if os.Getuid() == 0 {
+		return nil
+	}
+	return []string{"sudo"}
 }
 
 // Install runs the full local setup in a background goroutine, streaming logs
@@ -218,13 +191,14 @@ func (s *LocalSetupService) doInstall(domain string, logWriter io.Writer) error 
 }
 
 func installLocalCaddy(logWriter io.Writer) error {
+	sudo := privilegedCmdPrefix()
 	steps := [][]string{
-		{"apt-get", "update", "-y"},
-		{"apt-get", "install", "-y", "debian-keyring", "debian-archive-keyring", "apt-transport-https", "curl"},
-		{"bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg`},
-		{"bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list`},
-		{"apt-get", "update", "-y"},
-		{"apt-get", "install", "-y", "caddy"},
+		append(sudo, "apt-get", "update", "-y"),
+		append(sudo, "apt-get", "install", "-y", "debian-keyring", "debian-archive-keyring", "apt-transport-https", "curl"),
+		append(sudo, "bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg`),
+		append(sudo, "bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list`),
+		append(sudo, "apt-get", "update", "-y"),
+		append(sudo, "apt-get", "install", "-y", "caddy"),
 	}
 	for _, args := range steps {
 		if err := runLocalCmd(logWriter, args[0], args[1:]...); err != nil {
@@ -251,19 +225,23 @@ func installLocalRathole(logWriter io.Writer) error {
 	// Ensure unzip is available before attempting to extract.
 	if !isCommandAvailable("unzip") {
 		fmt.Fprintln(logWriter, "  unzip not found, installing via apt...")
-		if err := runLocalCmd(logWriter, "apt-get", "update", "-qq"); err != nil {
+		aptSudo := privilegedCmdPrefix()
+		aptUpdate := append(aptSudo, "apt-get", "update", "-qq")
+		aptInstall := append(aptSudo, "apt-get", "install", "-y", "-qq", "unzip")
+		if err := runLocalCmd(logWriter, aptUpdate[0], aptUpdate[1:]...); err != nil {
 			return fmt.Errorf("failed to run apt-get update: %w", err)
 		}
-		if err := runLocalCmd(logWriter, "apt-get", "install", "-y", "-qq", "unzip"); err != nil {
+		if err := runLocalCmd(logWriter, aptInstall[0], aptInstall[1:]...); err != nil {
 			return fmt.Errorf("failed to install unzip: %w", err)
 		}
 	}
 
+	sudo := privilegedCmdPrefix()
 	steps := [][]string{
 		{"curl", "-fsSL", url, "-o", "/tmp/rathole.zip"},
 		{"unzip", "-q", "-o", "/tmp/rathole.zip", "-d", "/tmp/rathole-dl"},
-		{"mv", "/tmp/rathole-dl/rathole", "/usr/local/bin/rathole"},
-		{"chmod", "+x", "/usr/local/bin/rathole"},
+		append(sudo, "mv", "/tmp/rathole-dl/rathole", "/usr/local/bin/rathole"),
+		append(sudo, "chmod", "+x", "/usr/local/bin/rathole"),
 		{"rm", "-rf", "/tmp/rathole.zip", "/tmp/rathole-dl"},
 	}
 	for _, args := range steps {

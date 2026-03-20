@@ -15,6 +15,9 @@ func TestEnsureSafeRemovalPath(t *testing.T) {
 		{name: "reject root", path: "/", wantErr: true},
 		{name: "reject dot", path: ".", wantErr: true},
 		{name: "reject empty", path: "", wantErr: true},
+		{name: "reject relative path", path: "var/lib/gopher", wantErr: true},
+		{name: "reject double-dot traversal", path: "../etc", wantErr: true},
+		{name: "reject double-dot only", path: "..", wantErr: true},
 		{name: "accept data dir", path: "/var/lib/gopher", wantErr: false},
 	}
 
@@ -74,5 +77,30 @@ func TestIsYesResponse(t *testing.T) {
 		if got != tt.want {
 			t.Fatalf("isYesResponse(%q) = %v, want %v", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestIsSafeSudoersName(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "simple username", input: "alice", want: true},
+		{name: "username with hyphen", input: "gopher-alice", want: true},
+		{name: "username with underscore", input: "gopher_alice", want: true},
+		{name: "username with dot", input: "alice.smith", want: false},
+		{name: "path traversal", input: "../etc/passwd", want: false},
+		{name: "space", input: "alice bob", want: false},
+		{name: "empty", input: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isSafeSudoersName(tt.input)
+			if got != tt.want {
+				t.Fatalf("isSafeSudoersName(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
 	}
 }
