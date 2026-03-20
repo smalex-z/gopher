@@ -32,8 +32,13 @@ func ensurePasswordlessSudoForCurrentUser() error {
 		return err
 	}
 
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to resolve current executable: %w", err)
+	}
+
 	sudoersPath := filepath.Join("/etc/sudoers.d", "gopher-"+sanitizeSudoersName(username))
-	if err := writeSudoersWithSudo(sudoersPath, buildSudoers(username, "", "", "", "")); err != nil {
+	if err := writeSudoersWithSudo(sudoersPath, buildBootstrapSudoers(username, exePath)); err != nil {
 		return err
 	}
 
@@ -50,6 +55,13 @@ func ensurePasswordlessSudoForCurrentUser() error {
 	}
 
 	return nil
+}
+
+// buildBootstrapSudoers generates a sudoers entry that allows the specified
+// non-root user to run only the gopher binary itself via sudo without a
+// password. This is the minimum needed to allow `sudo gopher install/uninstall`.
+func buildBootstrapSudoers(username, gopherBinary string) string {
+	return fmt.Sprintf("%s ALL=(root) NOPASSWD: %s\n", username, gopherBinary)
 }
 
 func runWithSudo(subcommand string, args []string) error {

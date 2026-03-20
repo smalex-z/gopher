@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -30,15 +31,14 @@ func runUninstall(args []string) error {
 	fmt.Println("Uninstalling Gopher service...")
 
 	systemctlPath, _ := exec.LookPath("systemctl")
-	pkillPath, _ := exec.LookPath("pkill")
 
 	if systemctlPath != "" {
 		runCommandBestEffort(systemctlPath, "stop", cfg.serviceName)
 		runCommandBestEffort(systemctlPath, "disable", cfg.serviceName)
 	}
-	if pkillPath != "" {
-		runCommandBestEffort(pkillPath, "-x", "gopher")
-	}
+	// Kill any remaining gopher processes, but skip the current PID to avoid
+	// aborting the uninstall mid-way.
+	killGopherProcesses()
 
 	servicePath := filepath.Join("/etc/systemd/system", cfg.serviceName+".service")
 	serviceRemoved, err := removeFileIfExists(servicePath)
@@ -54,6 +54,11 @@ func runUninstall(args []string) error {
 	sudoersPath := filepath.Join("/etc/sudoers.d", cfg.user)
 	if _, err := removeFileIfExists(sudoersPath); err != nil {
 		return fmt.Errorf("failed to remove sudoers file: %w", err)
+	}
+	// Also remove any bootstrap sudoers files (gopher-<username>) left by the
+	// passwordless-sudo setup so no elevated privileges remain after uninstall.
+	if err := removeBootstrapSudoers(); err != nil {
+		return fmt.Errorf("failed to remove bootstrap sudoers files: %w", err)
 	}
 
 	targetBinary := filepath.Join(cfg.installDir, "gopher")
@@ -105,6 +110,9 @@ func removeFileIfExists(path string) (bool, error) {
 }
 
 func ensureSafeRemovalPath(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("unsafe path %q: must be absolute", path)
+	}
 	cleaned := filepath.Clean(path)
 	if cleaned == "/" || cleaned == "." || cleaned == "" {
 		return fmt.Errorf("unsafe path %q", path)
@@ -115,6 +123,65 @@ func ensureSafeRemovalPath(path string) error {
 func runCommandBestEffort(name string, args ...string) {
 	cmd := exec.Command(name, args...)
 	_ = cmd.Run()
+}
+
+// killGopherProcesses kills any remaining gopher processes, skipping the
+// current process to avoid aborting the uninstall mid-way.
+func killGopherProcesses() {
+	pgrepPath, err := exec.LookPath("pgrep")
+	if err != nil {
+		return
+	}
+	out, err := exec.Command(pgrepPath, "-x", "gopher").Output()
+	if err != nil {
+		return
+	}
+	currentPID := os.Getpid()
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		pid, err := strconv.Atoi(strings.TrimSpace(line))
+		if err == nil && pid != currentPID {
+			runCommandBestEffort("kill", strconv.Itoa(pid))
+		}
+	}
+}
+
+// removeBootstrapSudoers removes any sudoers files in /etc/sudoers.d that were
+// created by the gopher bootstrap flow (prefixed with "gopher-").
+func removeBootstrapSudoers() error {
+	entries, err := os.ReadDir("/etc/sudoers.d")
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, "gopher-") && isSafeSudoersName(name) {
+			path := filepath.Join("/etc/sudoers.d", name)
+			if _, err := removeFileIfExists(path); err != nil {
+				return fmt.Errorf("failed to remove bootstrap sudoers %s: %w", path, err)
+			}
+		}
+	}
+	return nil
+}
+
+// isSafeSudoersName reports whether name consists only of characters that are
+// safe in a sudoers filename (alphanumeric, hyphen, underscore).
+func isSafeSudoersName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func promptYesNo(prompt string) (bool, error) {

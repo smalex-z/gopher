@@ -23,7 +23,7 @@ func TestBuildSudoers(t *testing.T) {
 	content := buildSudoers("gopher", "/bin/systemctl", "/usr/bin/tee", "/bin/mkdir", "/usr/bin/pkill")
 
 	required := []string{
-		"gopher ALL=(ALL:ALL) NOPASSWD: ALL",
+		"gopher ALL=(root) NOPASSWD: /bin/systemctl, /usr/bin/tee, /bin/mkdir, /usr/bin/pkill",
 	}
 
 	for _, line := range required {
@@ -34,5 +34,25 @@ func TestBuildSudoers(t *testing.T) {
 
 	if !strings.HasSuffix(content, "\n") {
 		t.Fatalf("sudoers should end with newline")
+	}
+}
+
+func TestBuildSudoersEmpty(t *testing.T) {
+	content := buildSudoers("gopher", "", "", "", "")
+	if !strings.Contains(content, "# No sudo privileges granted for gopher") {
+		t.Fatalf("expected comment-only entry for empty commands, got: %s", content)
+	}
+}
+
+func TestBuildSudoersPartial(t *testing.T) {
+	content := buildSudoers("gopher", "/bin/systemctl", "", "/bin/mkdir", "")
+	if !strings.Contains(content, "/bin/systemctl") {
+		t.Fatalf("expected systemctl in entry, got: %s", content)
+	}
+	if !strings.Contains(content, "/bin/mkdir") {
+		t.Fatalf("expected mkdir in entry, got: %s", content)
+	}
+	if strings.Contains(content, ", ,") || strings.Contains(content, "NOPASSWD: ,") {
+		t.Fatalf("unexpected empty entries in sudoers: %s", content)
 	}
 }
