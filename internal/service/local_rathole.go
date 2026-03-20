@@ -121,7 +121,8 @@ func stripGopherServiceSections(content string) string {
 
 // AddServiceTunnel adds a user-defined service tunnel to the server's
 // /etc/rathole/server.toml and SSHes into the machine to update its
-// /etc/rathole/client.toml. If subdomain is set it also adds a Caddy block.
+// /etc/rathole/client.toml. If subdomain is set it also writes a managed
+// Caddy site file under /etc/caddy/conf.d.
 func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Machine) error {
 	settings, err := db.GetSettings()
 	if err != nil {
@@ -133,24 +134,18 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		return fmt.Errorf("failed to update server.toml: %w", err)
 	}
 
-	// --- 2. Update Caddyfile if subdomain is set ---
+	// --- 2. Update managed Caddy entry if subdomain is set ---
 	if tunnel.Subdomain != "" && settings.Domain != "" {
-		const caddyFile = "/etc/caddy/Caddyfile"
-		caddyContent, err := os.ReadFile(caddyFile)
-		if err != nil {
-			return fmt.Errorf("failed to read Caddyfile: %w", err)
+		if err := ensureManagedCaddyLayout(); err != nil {
+			return fmt.Errorf("failed to prepare Caddy managed layout: %w", err)
 		}
-		caddyBlock := fmt.Sprintf("\n%s.%s {\n    reverse_proxy localhost:%d\n}\n",
-			tunnel.Subdomain, settings.Domain, tunnel.RatholePort)
-		cc := string(caddyContent)
-		const caddyEnd = "# ===== END CUSTOM CONFIGURATION ====="
-		if idx := strings.Index(cc, caddyEnd); idx != -1 {
-			cc = cc[:idx] + caddyBlock + "\n" + cc[idx:]
-		} else {
-			cc += caddyBlock
+		if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(settings.Domain)); err != nil {
+			return fmt.Errorf("failed to write router Caddy file: %w", err)
 		}
-		if err := writeLocalFile(caddyFile, cc); err != nil {
-			return fmt.Errorf("failed to write Caddyfile: %w", err)
+		managedPath := managedTunnelCaddyPath(tunnel.ID)
+		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort)
+		if err := writeLocalFile(managedPath, block); err != nil {
+			return fmt.Errorf("failed to write tunnel Caddy file %s: %w", managedPath, err)
 		}
 		_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
 	}
@@ -176,12 +171,6 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	defer sshClient.Close()
 
 	// Read existing client.toml
-	token := tunnel.RatholeToken
-	if token == "" {
-		token = tunnel.ID // backward compat
-	}
-	clientEntry := fmt.Sprintf("\n[client.services.tunnel-%s]\ntype = \"tcp\"\ntoken = \"%s\"\nlocal_addr = \"localhost:%d\"\n",
-		tunnel.ID, token, tunnel.LocalPort)
 	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
 	if err != nil || strings.TrimSpace(existing) == "" {
 		ratholeHost := strings.TrimSpace(settings.Domain)
@@ -191,7 +180,8 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		// Build from scratch
 		existing = fmt.Sprintf("[client]\nremote_addr = \"%s:2333\"\n", ratholeHost)
 	}
-	updated := strings.TrimRight(existing, "\n") + clientEntry
+	cleaned := removeClientManagedSection(existing, "tunnel", tunnel.ID)
+	updated := strings.TrimRight(cleaned, "\n") + "\n\n" + strings.TrimSpace(buildClientTunnelSection(tunnel)) + "\n"
 
 	// Determine the absolute config path on the remote machine.
 	// SFTP does not expand shell variables, so resolve the home dir explicitly.
@@ -221,46 +211,71 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	return nil
 }
 
-// RemoveServiceTunnel removes a tunnel's entries from server.toml, Caddyfile,
-// and the client machine's client.toml.
+// RemoveServiceTunnelClient removes only the tunnel's section from the
+// client machine's /etc/rathole/client.toml (or user-level fallback).
+func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine *db.Machine) error {
+	if tunnel == nil || machine == nil {
+		return nil
+	}
+	settings, err := db.GetSettings()
+	if err != nil || settings.SSHPrivateKey == "" {
+		return nil
+	}
+
+	sshClient, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
+	if err != nil {
+		return err
+	}
+	defer sshClient.Close()
+
+	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
+	if err != nil {
+		return nil
+	}
+	updated := removeClientManagedSection(existing, "tunnel", tunnel.ID)
+
+	// Resolve absolute config path (SFTP cannot expand $HOME).
+	confPath := "/etc/rathole/client.toml"
+	if _, err2 := sshClient.Execute("test -f /etc/rathole/client.toml"); err2 != nil {
+		homeDir, _ := sshClient.Execute("echo $HOME")
+		homeDir = strings.TrimSpace(homeDir)
+		if homeDir == "" {
+			homeDir = "/home/" + machine.Username
+		}
+		confPath = homeDir + "/.config/rathole/client.toml"
+	}
+
+	if err := sshClient.UploadFileSudo([]byte(updated), confPath, machine.Username); err != nil {
+		return err
+	}
+	_, _ = sshClient.Execute("pkill -x rathole 2>/dev/null; sudo -n systemctl restart rathole-client 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true")
+	return nil
+}
+
+// RemoveServiceTunnelCaddy removes only the managed Caddy entry for a tunnel.
+func (s *LocalSetupService) RemoveServiceTunnelCaddy(tunnel *db.Tunnel) error {
+	if tunnel == nil || tunnel.Subdomain == "" {
+		return nil
+	}
+	settings, err := db.GetSettings()
+	if err != nil || settings.Domain == "" {
+		return nil
+	}
+
+	managedPath := managedTunnelCaddyPath(tunnel.ID)
+	if removeErr := os.Remove(managedPath); removeErr != nil && !os.IsNotExist(removeErr) {
+		_ = exec.Command("sudo", "rm", "-f", managedPath).Run() // #nosec G204
+	}
+	_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
+	return nil
+}
+
+// RemoveServiceTunnel keeps backwards compatibility with older callers by
+// performing full tunnel cleanup in the canonical order.
 func (s *LocalSetupService) RemoveServiceTunnel(tunnel *db.Tunnel, machine *db.Machine) {
-	settings, _ := db.GetSettings()
-
-	// Remove from server.toml — use full reconcile so stale entries are also cleaned up
+	_ = s.RemoveServiceTunnelClient(tunnel, machine)
 	_ = s.ReconcileServerConfig()
-
-	// Remove from Caddyfile
-	if tunnel.Subdomain != "" && settings != nil && settings.Domain != "" {
-		const caddyFile = "/etc/caddy/Caddyfile"
-		if cc, err := os.ReadFile(caddyFile); err == nil {
-			block := fmt.Sprintf("%s.%s", tunnel.Subdomain, settings.Domain)
-			updated := removeCaddyBlock(string(cc), block)
-			_ = writeLocalFile(caddyFile, updated)
-			_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
-		}
-	}
-
-	// Remove from client's client.toml
-	if settings != nil && settings.SSHPrivateKey != "" && machine != nil {
-		if sshClient, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey); err == nil {
-			defer sshClient.Close()
-			if existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null"); err == nil {
-				updated := removeTomlSection(existing, fmt.Sprintf("client.services.tunnel-%s", tunnel.ID))
-				// Resolve absolute config path (SFTP can't expand $HOME)
-				confPath := "/etc/rathole/client.toml"
-				if _, err2 := sshClient.Execute("test -f /etc/rathole/client.toml"); err2 != nil {
-					homeDir, _ := sshClient.Execute("echo $HOME")
-					homeDir = strings.TrimSpace(homeDir)
-					if homeDir == "" {
-						homeDir = "/home/" + machine.Username
-					}
-					confPath = homeDir + "/.config/rathole/client.toml"
-				}
-				_ = sshClient.UploadFile([]byte(updated), confPath)
-				_, _ = sshClient.Execute("pkill -x rathole 2>/dev/null; sudo -n systemctl restart rathole-client 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true")
-			}
-		}
-	}
+	_ = s.RemoveServiceTunnelCaddy(tunnel)
 }
 
 // RemoveMachineClient SSHes into a client machine via its reverse tunnel and
@@ -348,6 +363,55 @@ func sshKeyBlob(line string) string {
 		return ""
 	}
 	return fields[1]
+}
+
+func buildClientTunnelSection(tunnel *db.Tunnel) string {
+	token := tunnel.RatholeToken
+	if token == "" {
+		token = tunnel.ID // backward compat
+	}
+	return fmt.Sprintf(`# gopher-tunnel-start: %s
+[client.services.tunnel-%s]
+type = "tcp"
+token = "%s"
+local_addr = "localhost:%d"
+# gopher-tunnel-end: %s
+`, tunnel.ID, tunnel.ID, token, tunnel.LocalPort, tunnel.ID)
+}
+
+func removeClientManagedSection(content, entryType, id string) string {
+	if id == "" || entryType == "" {
+		return content
+	}
+	startMarker := fmt.Sprintf("# gopher-%s-start: %s", entryType, id)
+	endMarker := fmt.Sprintf("# gopher-%s-end: %s", entryType, id)
+
+	lines := strings.Split(content, "\n")
+	result := make([]string, 0, len(lines))
+	skip := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == startMarker {
+			skip = true
+			continue
+		}
+		if skip {
+			if trimmed == endMarker {
+				skip = false
+			}
+			continue
+		}
+		result = append(result, line)
+	}
+
+	updated := strings.Join(result, "\n")
+	if entryType == "tunnel" {
+		updated = removeTomlSection(updated, fmt.Sprintf("client.services.tunnel-%s", id))
+	}
+	if entryType == "machine" {
+		updated = removeTomlSection(updated, fmt.Sprintf("client.services.machine-%s-ssh", id))
+	}
+	return updated
 }
 
 // removeTomlSection removes a [section.name] block from a TOML string.

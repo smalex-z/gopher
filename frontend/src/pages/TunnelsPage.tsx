@@ -140,6 +140,9 @@ export default function TunnelsPage() {
             <tbody className="divide-y">
               {tunnels.map(t => (
                 <React.Fragment key={t.id}>
+                  {(() => {
+                    const isProtectedTunnel = Boolean(t.managed || t.kind === 'machine-ssh' || t.local_port === 22)
+                    return (
                   <tr className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-gray-900">{t.name}</td>
                     <td className="px-4 py-3 text-gray-600">{getMachineName(t.machine_id)}</td>
@@ -163,10 +166,16 @@ export default function TunnelsPage() {
                     <td className="px-4 py-3">
                       <div className="flex gap-2">
                         <button onClick={() => testTunnel(t.id)} className="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50">Test</button>
-                        <button onClick={() => handleDelete(t.id)} className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100">Delete</button>
+                        {isProtectedTunnel ? (
+                          <span className="px-2 py-1 text-xs bg-gray-50 text-gray-500 border border-gray-200 rounded">Managed</span>
+                        ) : (
+                          <button onClick={() => handleDelete(t.id)} className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100">Delete</button>
+                        )}
                       </div>
                     </td>
                   </tr>
+                    )
+                  })()}
                   {testResults[t.id] && (
                     <tr>
                       <td colSpan={5} className="px-4 py-2">

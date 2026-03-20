@@ -7,11 +7,12 @@ interface Props {
   onStart: () => Promise<void>
   autoStart?: boolean
   onComplete?: () => void
+  wsPath?: string
 }
 
 type Status = 'idle' | 'connecting' | 'running' | 'complete' | 'error'
 
-export default function DeployLogModal({ isOpen, onClose, title, onStart, onComplete }: Props) {
+export default function DeployLogModal({ isOpen, onClose, title, onStart, onComplete, wsPath = '/api/logs/ws' }: Props) {
   const [status, setStatus] = useState<Status>('idle')
   const [logs, setLogs] = useState<string[]>([])
   const wsRef = useRef<WebSocket | null>(null)
@@ -39,7 +40,7 @@ export default function DeployLogModal({ isOpen, onClose, title, onStart, onComp
     setStatus('connecting')
     setLogs([])
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${wsProto}//${window.location.host}/api/logs/ws`)
+    const ws = new WebSocket(`${wsProto}//${window.location.host}${wsPath}`)
     wsRef.current = ws
 
     ws.onopen = () => {
@@ -72,7 +73,7 @@ export default function DeployLogModal({ isOpen, onClose, title, onStart, onComp
     return () => {
       ws.close()
     }
-  }, [isOpen])
+  }, [isOpen, wsPath])
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' })

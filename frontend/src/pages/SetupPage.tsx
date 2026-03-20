@@ -355,6 +355,7 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
         onComplete={() => setInstallComplete(true)}
         title="Installing Local Services"
         onStart={() => localApi.install(skipCaddy ? '' : domain, skipCaddy)}
+        wsPath="/api/local/logs/ws"
         autoStart
       />
     </div>

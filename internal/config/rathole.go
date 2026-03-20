@@ -55,11 +55,13 @@ func GenerateMachineSSHClientConfig(vpsHost string, machine *db.Machine) string 
 	return fmt.Sprintf(`[client]
 remote_addr = "%s:2333"
 
+# gopher-machine-start: %s
 [client.services.machine-%s-ssh]
 type = "tcp"
 token = "%s"
 local_addr = "0.0.0.0:22"
-`, vpsHost, machine.ID, machine.RatholeSSHToken)
+# gopher-machine-end: %s
+`, vpsHost, machine.ID, machine.ID, machine.RatholeSSHToken, machine.ID)
 }
 
 // GenerateRatholeServerConfig generates a complete rathole server config from scratch

@@ -116,21 +116,34 @@ func (s *LocalSetupService) doInstall(domain string, skipCaddy bool, logWriter i
 		fmt.Fprintf(logWriter, "Step 2: Rathole already installed at %s ✓\n", ratholeExePath)
 	}
 
-	// Step 3: Caddyfile — merge if existing, create fresh if not
+	// Step 3: Caddyfile — import-based layout + managed conf.d entries
 	if skipCaddy {
 		fmt.Fprintln(logWriter, "Step 3: Skipping Caddyfile configuration")
 	} else {
-		fmt.Fprintln(logWriter, "Step 3: Configuring /etc/caddy/Caddyfile...")
-		if existingCaddy, readErr := os.ReadFile("/etc/caddy/Caddyfile"); readErr == nil {
-			fmt.Fprintln(logWriter, "  Existing Caddyfile found, merging dashboard block...")
-			merged := mergeCaddyfile(string(existingCaddy), domain)
-			if err := writeLocalFile("/etc/caddy/Caddyfile", merged); err != nil {
-				return fmt.Errorf("failed to write Caddyfile: %w", err)
+		fmt.Fprintln(logWriter, "Step 3: Configuring import-based /etc/caddy/Caddyfile and /etc/caddy/conf.d...")
+		existingCaddy := ""
+		if data, readErr := os.ReadFile(caddyConfigPath); readErr == nil {
+			existingCaddy = string(data)
+		}
+		managedCaddy := buildManagedCaddyfile(existingCaddy)
+		managedHosts := []string{fmt.Sprintf("router.%s", domain)}
+		if tunnels, tunErr := db.GetTunnels(); tunErr == nil {
+			for _, tunnel := range tunnels {
+				if tunnel.Subdomain != "" {
+					managedHosts = append(managedHosts, fmt.Sprintf("%s.%s", tunnel.Subdomain, domain))
+				}
 			}
-		} else {
-			if err := writeLocalFile("/etc/caddy/Caddyfile", buildLocalCaddyfile(domain)); err != nil {
-				return fmt.Errorf("failed to write Caddyfile: %w", err)
-			}
+		}
+		managedCaddy = removeHostsFromCustomSection(managedCaddy, managedHosts)
+
+		if err := sudoMkdir(caddyManagedDir); err != nil {
+			return fmt.Errorf("failed to create %s: %w", caddyManagedDir, err)
+		}
+		if err := writeLocalFile(caddyConfigPath, managedCaddy); err != nil {
+			return fmt.Errorf("failed to write %s: %w", caddyConfigPath, err)
+		}
+		if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(domain)); err != nil {
+			return fmt.Errorf("failed to write router Caddy file: %w", err)
 		}
 	}
 

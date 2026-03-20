@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/smalex-z/gopher/internal/api/dto"
@@ -11,15 +12,69 @@ import (
 )
 
 type TunnelService struct {
-	local *LocalSetupService
+	local localOps
 }
 
-func NewTunnelService(local *LocalSetupService) *TunnelService {
+func NewTunnelService(local localOps) *TunnelService {
 	return &TunnelService{local: local}
 }
 
+const (
+	machineSSHTunnelPrefix = "machine-"
+	machineSSHTunnelSuffix = "-ssh"
+)
+
+func machineSSHTunnelID(machineID string) string {
+	return machineSSHTunnelPrefix + machineID + machineSSHTunnelSuffix
+}
+
+func parseMachineSSHTunnelID(id string) (string, bool) {
+	if !strings.HasPrefix(id, machineSSHTunnelPrefix) || !strings.HasSuffix(id, machineSSHTunnelSuffix) {
+		return "", false
+	}
+	machineID := strings.TrimSuffix(strings.TrimPrefix(id, machineSSHTunnelPrefix), machineSSHTunnelSuffix)
+	if machineID == "" {
+		return "", false
+	}
+	return machineID, true
+}
+
+func machineTunnelStatus(status string) string {
+	if status == "connected" {
+		return "active"
+	}
+	return status
+}
+
 func (s *TunnelService) List() ([]db.Tunnel, error) {
-	return db.GetTunnels()
+	tunnels, err := db.GetTunnels()
+	if err != nil {
+		return nil, err
+	}
+	machines, err := db.GetMachines()
+	if err != nil {
+		return nil, err
+	}
+	for _, machine := range machines {
+		if machine.TunnelPort == 0 {
+			continue
+		}
+		tunnels = append(tunnels, db.Tunnel{
+			ID:          machineSSHTunnelID(machine.ID),
+			MachineID:   machine.ID,
+			Name:        machine.Name + " SSH",
+			Subdomain:   "",
+			LocalPort:   22,
+			RatholePort: machine.TunnelPort,
+			Protocol:    "tcp",
+			Status:      machineTunnelStatus(machine.Status),
+			Managed:     true,
+			Kind:        "machine-ssh",
+			CreatedAt:   machine.CreatedAt,
+			UpdatedAt:   machine.UpdatedAt,
+		})
+	}
+	return tunnels, nil
 }
 
 func (s *TunnelService) ListByMachine(machineID string) ([]db.Tunnel, error) {
@@ -38,6 +93,9 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 	settings, err := db.GetSettings()
 	if err != nil {
 		return nil, err
+	}
+	if req.LocalPort == 22 {
+		return nil, &apperrors.ValidationError{Field: "local_port", Message: "port 22 is reserved for machine SSH tunnels"}
 	}
 	if req.Subdomain != "" && settings.Domain == "" {
 		return nil, &apperrors.ValidationError{Field: "subdomain", Message: "URL routing is disabled; leave subdomain empty"}
@@ -100,7 +158,7 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 
 	// Push configs to server + client (non-fatal: tunnel is saved even if this fails)
 	machine, machErr := db.GetMachine(req.MachineID)
-	if machErr == nil {
+	if machErr == nil && s.local != nil {
 		if cfgErr := s.local.AddServiceTunnel(tunnel, machine); cfgErr != nil {
 			// Annotate the tunnel with the error but don't fail the creation
 			tunnel.Status = fmt.Sprintf("config-error: %v", cfgErr)
@@ -115,6 +173,9 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 	tunnel, err := db.GetTunnel(id)
 	if err != nil {
 		return nil, err
+	}
+	if req.LocalPort == 22 {
+		return nil, &apperrors.ValidationError{Field: "local_port", Message: "port 22 is reserved for machine SSH tunnels"}
 	}
 	settings, err := db.GetSettings()
 	if err != nil {
@@ -149,13 +210,34 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 }
 
 func (s *TunnelService) Delete(id string) error {
+	if _, isMachineSSHTunnel := parseMachineSSHTunnelID(id); isMachineSSHTunnel {
+		return &apperrors.ValidationError{Field: "id", Message: "cannot delete machine SSH tunnel directly; delete the machine instead"}
+	}
+
 	tunnel, err := db.GetTunnel(id)
 	if err != nil {
 		return err
 	}
-	machine, machErr := db.GetMachine(tunnel.MachineID)
-	if machErr == nil {
-		s.local.RemoveServiceTunnel(tunnel, machine)
+	if tunnel.LocalPort == 22 {
+		return &apperrors.ValidationError{Field: "local_port", Message: "port 22 tunnel cannot be deleted directly; delete the machine instead"}
 	}
-	return db.DeleteTunnel(id)
+
+	machine, machErr := db.GetMachine(tunnel.MachineID)
+	if machErr == nil && s.local != nil {
+		_ = s.local.RemoveServiceTunnelClient(tunnel, machine)
+	}
+
+	if err := db.DeleteTunnel(id); err != nil {
+		return err
+	}
+
+	if s.local != nil {
+		if err := s.local.ReconcileServerConfig(); err != nil {
+			return err
+		}
+		if err := s.local.RemoveServiceTunnelCaddy(tunnel); err != nil {
+			return err
+		}
+	}
+	return nil
 }

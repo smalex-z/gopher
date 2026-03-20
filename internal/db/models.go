@@ -41,6 +41,8 @@ type Tunnel struct {
 	RatholeToken string    `json:"rathole_token"`
 	Protocol     string    `json:"protocol"`
 	Status       string    `json:"status"`
+	Managed      bool      `json:"managed,omitempty" gorm:"-"`
+	Kind         string    `json:"kind,omitempty" gorm:"-"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

@@ -2,23 +2,78 @@ package service
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
-func buildLocalCaddyfile(domain string) string {
-	return fmt.Sprintf(`{
-    email admin@%s
+const (
+	caddyConfigPath      = "/etc/caddy/Caddyfile"
+	caddyManagedDir      = "/etc/caddy/conf.d"
+	caddyCustomBeginMark = "# ===== BEGIN CUSTOM CONFIGURATION ====="
+	caddyCustomEndMark   = "# ===== END CUSTOM CONFIGURATION ====="
+)
+
+func managedRouterCaddyPath() string {
+	return caddyManagedDir + "/gopher-router.caddy"
 }
 
-router.%s {
-    reverse_proxy localhost:8080
+func managedTunnelCaddyPath(tunnelID string) string {
+	return fmt.Sprintf("%s/gopher-tunnel-%s.caddy", caddyManagedDir, tunnelID)
 }
 
-# ===== BEGIN CUSTOM CONFIGURATION =====
-# Everything below this line will NOT be overwritten on local setup.
-# Add any custom Caddy directives or site blocks here.
-# ===== END CUSTOM CONFIGURATION =====
-`, domain, domain)
+func buildRouterCaddyBlock(domain string) string {
+	return fmt.Sprintf("router.%s {\n    reverse_proxy localhost:8080\n}\n", domain)
+}
+
+func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int) string {
+	return fmt.Sprintf("%s.%s {\n    reverse_proxy localhost:%d\n}\n", subdomain, domain, ratholePort)
+}
+
+func extractCaddyCustomBody(content string) string {
+	bIdx := strings.Index(content, caddyCustomBeginMark)
+	if bIdx == -1 {
+		return ""
+	}
+	below := content[bIdx+len(caddyCustomBeginMark):]
+	eIdx := strings.Index(below, caddyCustomEndMark)
+	if eIdx == -1 {
+		return strings.TrimSpace(below)
+	}
+	return strings.TrimSpace(below[:eIdx])
+}
+
+func buildManagedCaddyfile(existing string) string {
+	customBody := extractCaddyCustomBody(existing)
+	if customBody == "" && strings.TrimSpace(existing) != "" {
+		customBody = strings.TrimSpace(existing)
+	}
+
+	var out strings.Builder
+	out.WriteString("# Gopher managed Caddyfile\n")
+	out.WriteString("# Global options (uncomment and set email to enable HTTPS):\n")
+	out.WriteString("# {\n")
+	out.WriteString("#     email you@example.com\n")
+	out.WriteString("# }\n\n")
+	out.WriteString("import /etc/caddy/conf.d/*.caddy\n\n")
+	out.WriteString(caddyCustomBeginMark + "\n")
+	out.WriteString("# Everything below this line will NOT be overwritten.\n")
+	out.WriteString("# Add your own Caddy site blocks here.\n")
+	if customBody != "" {
+		out.WriteString(customBody + "\n")
+	}
+	out.WriteString(caddyCustomEndMark + "\n")
+	return out.String()
+}
+
+func ensureManagedCaddyLayout() error {
+	if err := sudoMkdir(caddyManagedDir); err != nil {
+		return err
+	}
+	existing := ""
+	if data, err := os.ReadFile(caddyConfigPath); err == nil {
+		existing = string(data)
+	}
+	return writeLocalFile(caddyConfigPath, buildManagedCaddyfile(existing))
 }
 
 // removeCaddyBlock removes a top-level site block that starts with "host {".
@@ -52,82 +107,36 @@ func removeCaddyBlock(content, host string) string {
 	return strings.Join(result, "\n")
 }
 
-// removeExtraGlobalBlocks keeps only the first Caddy global options block.
-func removeExtraGlobalBlocks(content string) string {
-	lines := strings.Split(content, "\n")
-	result := make([]string, 0, len(lines))
-
-	globalSeen := false
-	skip := false
-	depth := 0
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if !skip && trimmed == "{" {
-			if globalSeen {
-				skip = true
-				depth = 1
-				continue
-			}
-			globalSeen = true
-			result = append(result, line)
-			continue
-		}
-
-		if skip {
-			for _, ch := range line {
-				if ch == '{' {
-					depth++
-				} else if ch == '}' {
-					depth--
-				}
-			}
-			if depth <= 0 {
-				skip = false
-			}
-			continue
-		}
-
-		result = append(result, line)
+func removeHostsFromCustomSection(content string, hosts []string) string {
+	bIdx := strings.Index(content, caddyCustomBeginMark)
+	if bIdx == -1 {
+		return content
+	}
+	below := content[bIdx+len(caddyCustomBeginMark):]
+	eIdx := strings.Index(below, caddyCustomEndMark)
+	if eIdx == -1 {
+		return content
 	}
 
-	return strings.Join(result, "\n")
-}
-
-// mergeCaddyfile builds a new Caddyfile that places Gopher's managed
-// dashboard block above the custom section.
-//
-// If the file already has custom-section markers (a previous Gopher run):
-//   - Content above BEGIN is Gopher's managed zone — update dashboard block there.
-//   - Content between BEGIN/END is the user's zone — leave it untouched.
-//
-// If the file has NO markers yet (first time Gopher touches it):
-//   - Treat ALL existing content as user config → wrap it in the custom section.
-//   - Place Gopher's dashboard block ABOVE the custom section.
-func mergeCaddyfile(existing, domain string) string {
-	const beginMarker = "# ===== BEGIN CUSTOM CONFIGURATION ====="
-	const endMarker = "# ===== END CUSTOM CONFIGURATION ====="
-	dashboardBlock := fmt.Sprintf("router.%s {\n    reverse_proxy localhost:8080\n}\n", domain)
-
-	cleanedExisting := removeExtraGlobalBlocks(existing)
-
-	if idx := strings.Index(cleanedExisting, beginMarker); idx != -1 {
-		// Markers already present: managed zone is everything before BEGIN.
-		managedZone := strings.TrimSpace(cleanedExisting[:idx])
-		managedZone = strings.TrimSpace(removeCaddyBlock(managedZone, fmt.Sprintf("router.%s", domain)))
-		customSection := cleanedExisting[idx:] // Preserve from BEGIN to end verbatim.
-		if managedZone == "" {
-			return dashboardBlock + "\n" + customSection
+	customBody := below[:eIdx]
+	for _, host := range hosts {
+		if host == "" {
+			continue
 		}
-		return managedZone + "\n\n" + dashboardBlock + "\n" + customSection
+		customBody = removeCaddyBlock(customBody, host)
 	}
+	customBody = strings.TrimSpace(customBody)
 
-	// No markers yet: move all existing content into the custom section.
-	trimmed := strings.TrimRight(cleanedExisting, "\n")
-	return dashboardBlock + "\n" +
-		beginMarker + "\n" +
-		"# Everything below this line will NOT be overwritten.\n" +
-		"# Add your own Caddy site blocks here.\n" +
-		trimmed + "\n" +
-		endMarker + "\n"
+	var rebuilt strings.Builder
+	rebuilt.WriteString(content[:bIdx+len(caddyCustomBeginMark)])
+	rebuilt.WriteString("\n")
+	rebuilt.WriteString("# Everything below this line will NOT be overwritten.\n")
+	rebuilt.WriteString("# Add your own Caddy site blocks here.\n")
+	if customBody != "" {
+		rebuilt.WriteString(customBody)
+		rebuilt.WriteString("\n")
+	}
+	rebuilt.WriteString(caddyCustomEndMark)
+	rebuilt.WriteString(below[eIdx+len(caddyCustomEndMark):])
+	return rebuilt.String()
 }

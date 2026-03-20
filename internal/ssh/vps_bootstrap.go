@@ -1,9 +1,9 @@
 package ssh
 
 import (
-_ "embed"
-"fmt"
-"io"
+	_ "embed"
+	"fmt"
+	"io"
 )
 
 //go:embed templates/docker-install.sh
@@ -67,41 +67,41 @@ default_token = "changeme"
 `
 
 func BootstrapVPS(client *SSHClient, logWriter io.Writer) error {
-fmt.Fprintln(logWriter, "=== Starting VPS Bootstrap ===")
+	fmt.Fprintln(logWriter, "=== Starting VPS Bootstrap ===")
 
-fmt.Fprintln(logWriter, "Step 1: Installing Docker...")
-if err := client.UploadFile([]byte(dockerInstallScript), "/tmp/docker-install.sh"); err != nil {
-return fmt.Errorf("failed to upload docker install script: %w", err)
-}
-if err := ExecuteWithOutput(client, "chmod +x /tmp/docker-install.sh && /tmp/docker-install.sh", logWriter); err != nil {
-return fmt.Errorf("failed to install docker: %w", err)
-}
+	fmt.Fprintln(logWriter, "Step 1: Installing Docker...")
+	if err := client.UploadFile([]byte(dockerInstallScript), "/tmp/docker-install.sh"); err != nil {
+		return fmt.Errorf("failed to upload docker install script: %w", err)
+	}
+	if err := ExecuteWithOutput(client, "chmod +x /tmp/docker-install.sh && /tmp/docker-install.sh", logWriter); err != nil {
+		return fmt.Errorf("failed to install docker: %w", err)
+	}
 
-fmt.Fprintln(logWriter, "Step 2: Creating /opt/gopher directory...")
-if err := ExecuteWithOutput(client, "mkdir -p /opt/gopher", logWriter); err != nil {
-return fmt.Errorf("failed to create directory: %w", err)
-}
+	fmt.Fprintln(logWriter, "Step 2: Creating /opt/gopher directory...")
+	if err := ExecuteWithOutput(client, "mkdir -p /opt/gopher", logWriter); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
 
-fmt.Fprintln(logWriter, "Step 3: Uploading docker-compose.yml...")
-if err := client.UploadFile([]byte(dockerComposeContent), "/opt/gopher/docker-compose.yml"); err != nil {
-return fmt.Errorf("failed to upload docker-compose.yml: %w", err)
-}
+	fmt.Fprintln(logWriter, "Step 3: Uploading docker-compose.yml...")
+	if err := client.UploadFile([]byte(dockerComposeContent), "/opt/gopher/docker-compose.yml"); err != nil {
+		return fmt.Errorf("failed to upload docker-compose.yml: %w", err)
+	}
 
-fmt.Fprintln(logWriter, "Step 4: Uploading initial Caddyfile...")
-if err := client.UploadFile([]byte(initialCaddyfile), "/opt/gopher/Caddyfile"); err != nil {
-return fmt.Errorf("failed to upload Caddyfile: %w", err)
-}
+	fmt.Fprintln(logWriter, "Step 4: Uploading initial Caddyfile...")
+	if err := client.UploadFile([]byte(initialCaddyfile), "/opt/gopher/Caddyfile"); err != nil {
+		return fmt.Errorf("failed to upload Caddyfile: %w", err)
+	}
 
-fmt.Fprintln(logWriter, "Step 5: Uploading initial rathole config...")
-if err := client.UploadFile([]byte(initialRatholeConfig), "/opt/gopher/rathole-server.toml"); err != nil {
-return fmt.Errorf("failed to upload rathole config: %w", err)
-}
+	fmt.Fprintln(logWriter, "Step 5: Uploading initial rathole config...")
+	if err := client.UploadFile([]byte(initialRatholeConfig), "/opt/gopher/rathole-server.toml"); err != nil {
+		return fmt.Errorf("failed to upload rathole config: %w", err)
+	}
 
-fmt.Fprintln(logWriter, "Step 6: Starting services...")
-if err := ExecuteWithOutput(client, "cd /opt/gopher && docker compose up -d", logWriter); err != nil {
-return fmt.Errorf("failed to start services: %w", err)
-}
+	fmt.Fprintln(logWriter, "Step 6: Starting services...")
+	if err := ExecuteWithOutput(client, "cd /opt/gopher && docker compose up -d", logWriter); err != nil {
+		return fmt.Errorf("failed to start services: %w", err)
+	}
 
-fmt.Fprintln(logWriter, "=== VPS Bootstrap Complete ===")
-return nil
+	fmt.Fprintln(logWriter, "=== VPS Bootstrap Complete ===")
+	return nil
 }

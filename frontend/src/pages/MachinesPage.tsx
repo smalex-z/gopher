@@ -31,6 +31,7 @@ export default function MachinesPage() {
     mutationFn: (id: string) => machinesApi.delete(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['machines'] })
+      qc.invalidateQueries({ queryKey: ['tunnels'] })
       toast.success('Machine deleted.')
     },
     onError: (e: Error) => toast.error(e.message),
@@ -63,7 +64,7 @@ export default function MachinesPage() {
   }
 
   const handleDelete = (id: string) => {
-    if (window.confirm('Are you sure you want to delete this machine?')) {
+    if (window.confirm('Delete this machine and all of its tunnels? This also uninstalls rathole and removes client.toml on that machine.')) {
       deleteMutation.mutate(id)
     }
   }

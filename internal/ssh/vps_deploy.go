@@ -44,16 +44,16 @@ func DeployVPS(client *SSHClient, caddyfile, ratholeConfig string, logWriter io.
 		return fmt.Errorf("failed to upload rathole config: %w", err)
 	}
 
-fmt.Fprintln(logWriter, "Restarting Caddy...")
-if err := ExecuteWithOutput(client, "cd /opt/gopher && docker compose restart caddy", logWriter); err != nil {
-return fmt.Errorf("failed to restart caddy: %w", err)
-}
+	fmt.Fprintln(logWriter, "Restarting Caddy...")
+	if err := ExecuteWithOutput(client, "cd /opt/gopher && docker compose restart caddy", logWriter); err != nil {
+		return fmt.Errorf("failed to restart caddy: %w", err)
+	}
 
-fmt.Fprintln(logWriter, "Restarting rathole server...")
-if err := ExecuteWithOutput(client, "cd /opt/gopher && docker compose restart rathole", logWriter); err != nil {
-return fmt.Errorf("failed to restart rathole: %w", err)
-}
+	fmt.Fprintln(logWriter, "Restarting rathole server...")
+	if err := ExecuteWithOutput(client, "cd /opt/gopher && docker compose restart rathole", logWriter); err != nil {
+		return fmt.Errorf("failed to restart rathole: %w", err)
+	}
 
-fmt.Fprintln(logWriter, "=== VPS Deployment Complete ===")
-return nil
+	fmt.Fprintln(logWriter, "=== VPS Deployment Complete ===")
+	return nil
 }

@@ -35,6 +35,8 @@ export interface Tunnel {
   rathole_port: number
   protocol: string
   status: string
+  managed?: boolean
+  kind?: string
   created_at: string
   updated_at: string
 }

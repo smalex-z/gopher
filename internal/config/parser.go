@@ -8,9 +8,9 @@ import (
 
 // ParseResult contains extracted config entries and any errors found
 type ParseResult struct {
-	Machines    map[string]*GopherEntry
-	Tunnels     map[string]*GopherEntry
-	Errors      []string
+	Machines     map[string]*GopherEntry
+	Tunnels      map[string]*GopherEntry
+	Errors       []string
 	DuplicateIDs []string
 }
 

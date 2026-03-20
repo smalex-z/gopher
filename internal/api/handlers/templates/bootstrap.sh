@@ -123,6 +123,27 @@ echo "  rathole binary: $RATHOLE_BIN"
 
 # ── Write rathole client config ───────────────────────────────────────────────
 echo "Writing rathole client config..."
+
+EXISTING_CLIENT_CONFIG=""
+if [ -f /etc/rathole/client.toml ]; then
+  EXISTING_CLIENT_CONFIG="/etc/rathole/client.toml"
+elif [ -f "$HOME/.config/rathole/client.toml" ]; then
+  EXISTING_CLIENT_CONFIG="$HOME/.config/rathole/client.toml"
+fi
+
+if [ -n "$EXISTING_CLIENT_CONFIG" ]; then
+  echo "WARNING: detected existing rathole client config at $EXISTING_CLIENT_CONFIG"
+  printf "Continue and overwrite? [y/N]: " >/dev/tty
+  read -r OVERWRITE_CONFIRM </dev/tty
+  case "$OVERWRITE_CONFIRM" in
+    [yY]|[yY][eE][sS]) ;;
+    *)
+      echo "Aborted by user"
+      exit 1
+      ;;
+  esac
+fi
+
 if [ "$HAS_SUDO" = true ]; then
   sudo mkdir -p /etc/rathole
   sudo chown "$SSH_USER" /etc/rathole

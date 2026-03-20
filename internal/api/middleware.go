@@ -14,48 +14,48 @@ import (
 )
 
 func CORSMiddleware() func(http.Handler) http.Handler {
-return cors.Handler(cors.Options{
-AllowedOrigins:   []string{"*"},
-AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-ExposedHeaders:   []string{"Link"},
-AllowCredentials: false,
-MaxAge:           300,
-})
+	return cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"*"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
+		ExposedHeaders:   []string{"Link"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	})
 }
 
 func LoggingMiddleware(next http.Handler) http.Handler {
-return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-start := time.Now()
-rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
-next.ServeHTTP(rw, r)
-log.Printf("%s %s %d %v", r.Method, r.URL.Path, rw.status, time.Since(start))
-})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rw, r)
+		log.Printf("%s %s %d %v", r.Method, r.URL.Path, rw.status, time.Since(start))
+	})
 }
 
 func RecoveryMiddleware(next http.Handler) http.Handler {
-return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-defer func() {
-if rvr := recover(); rvr != nil {
-log.Printf("panic: %v\n%s", rvr, debug.Stack())
-response.InternalError(w, "internal server error")
-}
-}()
-next.ServeHTTP(w, r)
-})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rvr := recover(); rvr != nil {
+				log.Printf("panic: %v\n%s", rvr, debug.Stack())
+				response.InternalError(w, "internal server error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func AuthMiddleware(authSvc *service.AuthService) func(http.Handler) http.Handler {
-return func(next http.Handler) http.Handler {
-return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-cookie, err := r.Cookie("gopher_session")
-if err != nil || !authSvc.ValidateSession(cookie.Value) {
-response.Error(w, http.StatusUnauthorized, "unauthorized")
-return
-}
-next.ServeHTTP(w, r)
-})
-}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cookie, err := r.Cookie("gopher_session")
+			if err != nil || !authSvc.ValidateSession(cookie.Value) {
+				response.Error(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 type responseWriter struct {
