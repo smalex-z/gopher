@@ -6,18 +6,15 @@ import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
 import { vpsApi } from '../api/vps'
 import StatusBadge from '../components/StatusBadge'
-import DeployLogModal from '../components/DeployLogModal'
 import { toast } from '../lib/toast'
 import type { Machine, Tunnel } from '../types'
 
 interface BootstrapModal { isOpen: boolean; command: string; token: string; expiresAt: string }
-interface DeployModalState { isOpen: boolean; machineId: string; machineName: string }
 
 export default function MachinesPage() {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const [bootstrapModal, setBootstrapModal] = useState<BootstrapModal>({ isOpen: false, command: '', token: '', expiresAt: '' })
-  const [deployModal, setDeployModal] = useState<DeployModalState>({ isOpen: false, machineId: '', machineName: '' })
   const [copied, setCopied] = useState(false)
   const [tokenLoading, setTokenLoading] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -150,12 +147,6 @@ export default function MachinesPage() {
                             <Plus size={11} /> Tunnel
                           </button>
                           <button
-                            onClick={() => setDeployModal({ isOpen: true, machineId: m.id, machineName: m.name })}
-                            className="px-2 py-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded hover:bg-blue-100"
-                          >
-                            Deploy
-                          </button>
-                          <button
                             onClick={() => handleDelete(m.id)}
                             className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100"
                           >
@@ -271,12 +262,6 @@ export default function MachinesPage() {
         </div>
       )}
 
-      <DeployLogModal
-        isOpen={deployModal.isOpen}
-        onClose={() => setDeployModal(d => ({ ...d, isOpen: false }))}
-        title={`Deploy Client to ${deployModal.machineName}`}
-        onStart={() => machinesApi.deploy(deployModal.machineId)}
-      />
     </div>
   )
 }

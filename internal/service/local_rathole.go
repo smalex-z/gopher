@@ -172,16 +172,17 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 
 	// Read existing client.toml
 	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
-	if err != nil || strings.TrimSpace(existing) == "" {
-		ratholeHost := strings.TrimSpace(settings.Domain)
-		if ratholeHost == "" {
-			return fmt.Errorf("no existing client.toml and no domain configured; bootstrap the machine again with a reachable server host")
-		}
-		// Build from scratch
-		existing = fmt.Sprintf("[client]\nremote_addr = \"%s:2333\"\n", ratholeHost)
+	if err != nil {
+		existing = ""
 	}
-	cleaned := removeClientManagedSection(existing, "tunnel", tunnel.ID)
-	updated := strings.TrimRight(cleaned, "\n") + "\n\n" + strings.TrimSpace(buildClientTunnelSection(tunnel)) + "\n"
+	machineTunnels, err := db.GetTunnelsByMachine(machine.ID)
+	if err != nil {
+		return fmt.Errorf("failed to load machine tunnels: %w", err)
+	}
+	updated, err := mergeClientManagedConfig(existing, machine, machineTunnels, settings.Domain)
+	if err != nil {
+		return err
+	}
 
 	// Determine the absolute config path on the remote machine.
 	// SFTP does not expand shell variables, so resolve the home dir explicitly.
@@ -298,21 +299,6 @@ func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
 	}
 	defer sshClient.Close()
 
-	// Stop and disable rathole-client (system service and user-level service).
-	_, _ = sshClient.Execute(
-		"pkill -x rathole 2>/dev/null; " +
-			"sudo -n systemctl stop rathole-client 2>/dev/null; " +
-			"sudo -n systemctl disable rathole-client 2>/dev/null; " +
-			"systemctl --user stop rathole-client 2>/dev/null; " +
-			"systemctl --user disable rathole-client 2>/dev/null; true")
-
-	// Remove service unit files and trigger daemon reload.
-	_, _ = sshClient.Execute(
-		"sudo -n rm -f /etc/systemd/system/rathole-client.service 2>/dev/null; " +
-			"rm -f ~/.config/systemd/user/rathole-client.service 2>/dev/null; " +
-			"sudo -n systemctl daemon-reload 2>/dev/null; " +
-			"systemctl --user daemon-reload 2>/dev/null; true")
-
 	// Resolve the home directory (SFTP can't expand $HOME).
 	homeDir, _ := sshClient.Execute("echo $HOME")
 	homeDir = strings.TrimSpace(homeDir)
@@ -320,11 +306,6 @@ func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
 	if !strings.HasPrefix(homeDir, "/") || strings.ContainsAny(homeDir, ";|&$`\\\"'") {
 		homeDir = "/home/" + machine.Username
 	}
-
-	// Remove client.toml from all known locations.
-	_, _ = sshClient.Execute(
-		"sudo -n rm -f /etc/rathole/client.toml 2>/dev/null; " +
-			"rm -f " + homeDir + "/.config/rathole/client.toml 2>/dev/null; true")
 
 	// Remove the VPS public key from authorized_keys.
 	if settings.SSHPublicKey != "" {
@@ -335,7 +316,45 @@ func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
 		}
 	}
 
+	// Run uninstall asynchronously on the client so it can complete even after
+	// rathole is stopped and this SSH-over-tunnel session drops.
+	const remoteScriptPath = "/tmp/.gopher-remove-rathole.sh"
+	script := buildMachineClientCleanupScript(homeDir, remoteScriptPath)
+	if err := sshClient.UploadFile([]byte(script), remoteScriptPath); err != nil {
+		return fmt.Errorf("failed to upload remote cleanup script: %w", err)
+	}
+	_, _ = sshClient.Execute("chmod +x " + remoteScriptPath)
+	_, err = sshClient.Execute("nohup sh " + remoteScriptPath + " >/tmp/.gopher-remove-rathole.log 2>&1 < /dev/null &")
+	if err != nil {
+		return fmt.Errorf("failed to start remote cleanup script: %w", err)
+	}
+
 	return nil
+}
+
+func buildMachineClientCleanupScript(homeDir, scriptPath string) string {
+	return fmt.Sprintf(`#!/bin/sh
+set -e
+HOME_DIR=%q
+
+sudo -n systemctl stop rathole-client 2>/dev/null || true
+sudo -n systemctl disable rathole-client 2>/dev/null || true
+systemctl --user stop rathole-client 2>/dev/null || true
+systemctl --user disable rathole-client 2>/dev/null || true
+
+sudo -n rm -f /etc/systemd/system/rathole-client.service 2>/dev/null || true
+rm -f "$HOME_DIR/.config/systemd/user/rathole-client.service" 2>/dev/null || true
+sudo -n systemctl daemon-reload 2>/dev/null || true
+systemctl --user daemon-reload 2>/dev/null || true
+
+sudo -n rm -f /etc/rathole/client.toml 2>/dev/null || true
+rm -f "$HOME_DIR/.config/rathole/client.toml" 2>/dev/null || true
+
+sudo -n rm -f /usr/local/bin/rathole 2>/dev/null || true
+rm -f "$HOME_DIR/.local/bin/rathole" 2>/dev/null || true
+
+rm -f %q 2>/dev/null || true
+`, homeDir, scriptPath)
 }
 
 // removeSSHPublicKey removes a public key line from an authorized_keys document.
@@ -377,6 +396,125 @@ token = "%s"
 local_addr = "localhost:%d"
 # gopher-tunnel-end: %s
 `, tunnel.ID, tunnel.ID, token, tunnel.LocalPort, tunnel.ID)
+}
+
+func buildClientMachineSection(machine *db.Machine) string {
+	if machine == nil || machine.ID == "" || machine.RatholeSSHToken == "" {
+		return ""
+	}
+	return fmt.Sprintf(`# gopher-machine-start: %s
+[client.services.machine-%s-ssh]
+type = "tcp"
+token = "%s"
+local_addr = "0.0.0.0:22"
+# gopher-machine-end: %s
+`, machine.ID, machine.ID, machine.RatholeSSHToken, machine.ID)
+}
+
+func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db.Tunnel, ratholeHost string) (string, error) {
+	base := strings.TrimSpace(existing)
+	if base == "" {
+		ratholeHost = strings.TrimSpace(ratholeHost)
+		if ratholeHost == "" {
+			return "", fmt.Errorf("no existing client.toml and no domain configured; bootstrap the machine again with a reachable server host")
+		}
+		base = fmt.Sprintf("[client]\nremote_addr = \"%s:2333\"\n", ratholeHost)
+	}
+
+	machineSection := strings.TrimSpace(buildClientMachineSection(machine))
+	if machineSection == "" {
+		return "", fmt.Errorf("machine is missing SSH tunnel token; bootstrap the machine again")
+	}
+
+	cleaned := stripClientManagedSections(base)
+	updated := strings.TrimRight(cleaned, "\n")
+
+	sections := []string{machineSection}
+	for i := range tunnels {
+		if tunnels[i].MachineID != "" && machine != nil && tunnels[i].MachineID != machine.ID {
+			continue
+		}
+		sections = append(sections, strings.TrimSpace(buildClientTunnelSection(&tunnels[i])))
+	}
+
+	for _, section := range sections {
+		if section == "" {
+			continue
+		}
+		if strings.TrimSpace(updated) == "" {
+			updated = section
+		} else {
+			updated += "\n\n" + section
+		}
+	}
+
+	if !strings.HasSuffix(updated, "\n") {
+		updated += "\n"
+	}
+	return updated, nil
+}
+
+func stripClientManagedSections(content string) string {
+	stripped := stripClientManagedMarkerBlocks(content)
+	stripped = removeTomlSectionsWithPrefix(stripped, "client.services.tunnel-")
+	stripped = removeTomlSectionsWithPrefix(stripped, "client.services.machine-")
+	return stripped
+}
+
+func stripClientManagedMarkerBlocks(content string) string {
+	lines := strings.Split(content, "\n")
+	result := make([]string, 0, len(lines))
+	skip := ""
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if skip == "" {
+			if strings.HasPrefix(trimmed, "# gopher-machine-start:") {
+				skip = "machine"
+				continue
+			}
+			if strings.HasPrefix(trimmed, "# gopher-tunnel-start:") {
+				skip = "tunnel"
+				continue
+			}
+			result = append(result, line)
+			continue
+		}
+
+		if skip == "machine" && strings.HasPrefix(trimmed, "# gopher-machine-end:") {
+			skip = ""
+			continue
+		}
+		if skip == "tunnel" && strings.HasPrefix(trimmed, "# gopher-tunnel-end:") {
+			skip = ""
+			continue
+		}
+	}
+
+	return strings.Join(result, "\n")
+}
+
+func removeTomlSectionsWithPrefix(content, sectionPrefix string) string {
+	lines := strings.Split(content, "\n")
+	result := make([]string, 0, len(lines))
+	skip := false
+	headerPrefix := "[" + sectionPrefix
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, headerPrefix) && strings.HasSuffix(trimmed, "]") {
+			skip = true
+			continue
+		}
+		if skip && strings.HasPrefix(trimmed, "[") {
+			skip = false
+		}
+		if !skip {
+			result = append(result, line)
+		}
+	}
+
+	return strings.Join(result, "\n")
 }
 
 func removeClientManagedSection(content, entryType, id string) string {

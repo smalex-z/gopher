@@ -153,13 +153,6 @@ func (s *DeployService) DeployClient(machine *db.Machine) error {
 		return err
 	}
 
-	clientConfig, err := config.GenerateClientConfig(settings.Domain, tunnels)
-	if err != nil {
-		fmt.Fprintf(w, "ERROR: Failed to generate client config: %v\n", err)
-		s.Hub.Broadcast("\x00DONE")
-		return err
-	}
-
 	var client *sshpkg.SSHClient
 	if machine.TunnelPort > 0 && settings.SSHPrivateKey != "" {
 		fmt.Fprintln(w, "Connecting to machine via tunnel...")
@@ -176,6 +169,14 @@ func (s *DeployService) DeployClient(machine *db.Machine) error {
 		return err
 	}
 	defer client.Close()
+
+	existingConfig, _ := client.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
+	clientConfig, err := mergeClientManagedConfig(existingConfig, machine, tunnels, settings.Domain)
+	if err != nil {
+		fmt.Fprintf(w, "ERROR: Failed to generate client config: %v\n", err)
+		s.Hub.Broadcast("\x00DONE")
+		return err
+	}
 
 	err = sshpkg.DeployClient(client, machine.ID, machine.Username, clientConfig, w)
 	s.Hub.Broadcast("\x00DONE")

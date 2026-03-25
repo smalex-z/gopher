@@ -122,10 +122,13 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 	}, nil
 }
 
-// awaitSSHHealth polls localhost:tunnelPort for up to 60 s, then marks the
-// machine status as "connected" or "failed".
+const bootstrapSSHHealthTimeout = 4 * time.Minute
+
+// awaitSSHHealth polls localhost:tunnelPort for initial bootstrap SSH readiness.
+// Some machines take longer than a minute on first bootstraps (package installs,
+// systemd startup), so timeout keeps status as "pending" instead of hard-failing.
 func (s *BootstrapService) awaitSSHHealth(machine *db.Machine, privateKey string) {
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(bootstrapSSHHealthTimeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(5 * time.Second)
 		c, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, privateKey)
@@ -139,7 +142,9 @@ func (s *BootstrapService) awaitSSHHealth(machine *db.Machine, privateKey string
 		_ = db.UpdateMachine(machine)
 		return
 	}
-	machine.Status = "failed"
+	// Keep machine in pending state; monitor loop can flip to connected once it
+	// observes successful SSH after slower bootstrap completions.
+	machine.Status = "pending"
 	_ = db.UpdateMachine(machine)
 }
 

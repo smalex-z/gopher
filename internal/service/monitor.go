@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/smalex-z/gopher/internal/db"
+	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
 type MonitorService struct{}
@@ -46,8 +47,20 @@ func (s *MonitorService) checkMachines() {
 }
 
 func (s *MonitorService) checkMachine(machine db.Machine) {
+	settings, err := db.GetSettings()
+	if err != nil || settings.SSHPrivateKey == "" || machine.TunnelPort == 0 || machine.Username == "" {
+		return
+	}
+
+	client, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
+	if err != nil {
+		return
+	}
+	_ = client.Close()
+
 	now := time.Now()
 	machine.LastSeen = &now
+	machine.Status = "connected"
 	if err := db.UpdateMachine(&machine); err != nil {
 		log.Printf("monitor: failed to update machine %s: %v", machine.ID, err)
 	}

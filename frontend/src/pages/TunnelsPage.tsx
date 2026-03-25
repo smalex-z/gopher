@@ -165,11 +165,13 @@ export default function TunnelsPage() {
                     <td className="px-4 py-3"><StatusBadge status={t.status} /></td>
                     <td className="px-4 py-3">
                       <div className="flex gap-2">
-                        <button onClick={() => testTunnel(t.id)} className="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50">Test</button>
                         {isProtectedTunnel ? (
                           <span className="px-2 py-1 text-xs bg-gray-50 text-gray-500 border border-gray-200 rounded">Managed</span>
                         ) : (
-                          <button onClick={() => handleDelete(t.id)} className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100">Delete</button>
+                          <>
+                            <button onClick={() => testTunnel(t.id)} className="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50">Test</button>
+                            <button onClick={() => handleDelete(t.id)} className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100">Delete</button>
+                          </>
                         )}
                       </div>
                     </td>
