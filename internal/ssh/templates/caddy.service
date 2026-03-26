@@ -1,0 +1,20 @@
+[Unit]
+Description=Caddy HTTP and HTTPS server
+Documentation=https://caddyserver.com/docs/
+After=network-online.target
+Wants=network-online.target systemd-networkd-wait-online.service
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ProtectSystem=full
+ProtectHome=yes
+NoNewPrivileges=yes
+ExecStart=/usr/bin/caddy run --config /opt/gopher/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /opt/gopher/Caddyfile
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

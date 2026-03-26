@@ -19,6 +19,7 @@ func runUninstall(args []string) error {
 	fs.StringVar(&cfg.installDir, "install-dir", defaultInstallDir, "installation directory")
 	fs.StringVar(&cfg.dataDir, "data-dir", defaultDataDir, "data directory")
 	fs.StringVar(&cfg.serviceName, "service-name", defaultServiceName, "systemd service name")
+	skipPrompts := fs.Bool("skip-prompts", false, "skip all confirmation prompts and remove everything")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -36,21 +37,30 @@ func runUninstall(args []string) error {
 		runCommandBestEffort(systemctlPath, "disable", cfg.serviceName)
 	}
 
-	resetCaddy, err := promptYesNo("Reset Caddyfile to remove Gopher-managed changes? [y/N]: ")
-	if err != nil {
-		return fmt.Errorf("failed reading Caddy reset confirmation: %w", err)
-	}
-	removeCaddy, err := promptYesNo("Remove Caddy completely (service, package, config)? [y/N]: ")
-	if err != nil {
-		return fmt.Errorf("failed reading Caddy removal confirmation: %w", err)
-	}
-	resetRathole, err := promptYesNo("Reset rathole server config to remove Gopher-managed changes? [y/N]: ")
-	if err != nil {
-		return fmt.Errorf("failed reading rathole reset confirmation: %w", err)
-	}
-	removeRathole, err := promptYesNo("Remove rathole completely (service, binary, config)? [y/N]: ")
-	if err != nil {
-		return fmt.Errorf("failed reading rathole removal confirmation: %w", err)
+	// Determine what to remove
+	resetCaddy := *skipPrompts
+	removeCaddy := *skipPrompts
+	resetRathole := *skipPrompts
+	removeRathole := *skipPrompts
+
+	if !*skipPrompts {
+		var err error
+		resetCaddy, err = promptYesNo("Reset Caddyfile to remove Gopher-managed changes? [y/N]: ")
+		if err != nil {
+			return fmt.Errorf("failed reading Caddy reset confirmation: %w", err)
+		}
+		removeCaddy, err = promptYesNo("Remove Caddy completely (service, package, config)? [y/N]: ")
+		if err != nil {
+			return fmt.Errorf("failed reading Caddy removal confirmation: %w", err)
+		}
+		resetRathole, err = promptYesNo("Reset rathole server config to remove Gopher-managed changes? [y/N]: ")
+		if err != nil {
+			return fmt.Errorf("failed reading rathole reset confirmation: %w", err)
+		}
+		removeRathole, err = promptYesNo("Remove rathole completely (service, binary, config)? [y/N]: ")
+		if err != nil {
+			return fmt.Errorf("failed reading rathole removal confirmation: %w", err)
+		}
 	}
 
 	caddySummary := "Caddy left unchanged"
@@ -115,9 +125,13 @@ func runUninstall(args []string) error {
 
 	userSummary := fmt.Sprintf("System user not found: %s", cfg.user)
 	if systemUserExists(cfg.user) {
-		removeUser, err := promptYesNo(fmt.Sprintf("Remove system user %q? [y/N]: ", cfg.user))
-		if err != nil {
-			return fmt.Errorf("failed reading user removal confirmation: %w", err)
+		removeUser := *skipPrompts
+		if !*skipPrompts {
+			var err error
+			removeUser, err = promptYesNo(fmt.Sprintf("Remove system user %q? [y/N]: ", cfg.user))
+			if err != nil {
+				return fmt.Errorf("failed reading user removal confirmation: %w", err)
+			}
 		}
 		if removeUser {
 			if err := removeSystemUser(cfg.user); err != nil {

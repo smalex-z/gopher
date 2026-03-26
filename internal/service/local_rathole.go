@@ -121,7 +121,7 @@ func stripGopherServiceSections(content string) string {
 
 // AddServiceTunnel adds a user-defined service tunnel to the server's
 // /etc/rathole/server.toml and SSHes into the machine to update its
-// /etc/rathole/client.toml. If subdomain is set it also writes a managed
+// /etc/rathole/client.toml (owned by the SSH user). If subdomain is set it also writes a managed
 // Caddy site file under /etc/caddy/conf.d.
 func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Machine) error {
 	settings, err := db.GetSettings()
@@ -170,8 +170,10 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	}
 	defer sshClient.Close()
 
-	// Read existing client.toml
-	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
+	configPath := "/etc/rathole/client.toml"
+
+	// Read existing client.toml from the system-wide path.
+	existing, err := sshClient.Execute("sudo cat " + configPath + " 2>/dev/null")
 	if err != nil {
 		existing = ""
 	}
@@ -184,36 +186,22 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		return err
 	}
 
-	// Determine the absolute config path on the remote machine.
-	// SFTP does not expand shell variables, so resolve the home dir explicitly.
-	configPath := "/etc/rathole/client.toml"
-	if _, err2 := sshClient.Execute("test -f /etc/rathole/client.toml"); err2 != nil {
-		homeDir, _ := sshClient.Execute("echo $HOME")
-		homeDir = strings.TrimSpace(homeDir)
-		if homeDir == "" {
-			homeDir = "/home/" + machine.Username
-		}
-		configPath = homeDir + "/.config/rathole/client.toml"
-		_, _ = sshClient.Execute("mkdir -p " + homeDir + "/.config/rathole")
-	}
+	// Ensure the config directory exists with proper permissions.
+	_, _ = sshClient.Execute("sudo mkdir -p /etc/rathole")
 
-	// Write config directly via SFTP — works when the SSH user owns /etc/rathole/
-	// (bootstrap runs chown for sudo-capable machines). UploadFileSudo handles legacy
-	// machines where the file ended up root-owned by falling back to a sudo mv.
-	if err := sshClient.UploadFileSudo([]byte(updated), configPath, machine.Username); err != nil {
-		return fmt.Errorf("failed to write client.toml on machine: %w", err)
+	if err := sshClient.UploadFile([]byte(updated), "/tmp/rathole-client.toml"); err != nil {
+		return fmt.Errorf("failed to write rathole config: %w", err)
 	}
+	_, _ = sshClient.Execute("sudo mv /tmp/rathole-client.toml " + configPath)
+	_, _ = sshClient.Execute("sudo chown " + machine.Username + " " + configPath)
 
-	// Restart rathole-client. Bootstrap now runs the service as the SSH user,
-	// so pkill is sufficient (systemd Restart=always brings it back).
-	// sudo -n is attempted as fallback for older installs with NOPASSWD configured.
-	_, _ = sshClient.Execute("pkill -x rathole 2>/dev/null; sudo -n systemctl restart rathole-client 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true")
+	_, _ = sshClient.Execute("sudo systemctl restart rathole-client 2>/dev/null || true")
 
 	return nil
 }
 
 // RemoveServiceTunnelClient removes only the tunnel's section from the
-// client machine's /etc/rathole/client.toml (or user-level fallback).
+// client machine's /etc/rathole/client.toml.
 func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine *db.Machine) error {
 	if tunnel == nil || machine == nil {
 		return nil
@@ -229,27 +217,20 @@ func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine
 	}
 	defer sshClient.Close()
 
-	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
+	configPath := "/etc/rathole/client.toml"
+
+	existing, err := sshClient.Execute("sudo cat " + configPath + " 2>/dev/null")
 	if err != nil {
 		return nil
 	}
 	updated := removeClientManagedSection(existing, "tunnel", tunnel.ID)
 
-	// Resolve absolute config path (SFTP cannot expand $HOME).
-	confPath := "/etc/rathole/client.toml"
-	if _, err2 := sshClient.Execute("test -f /etc/rathole/client.toml"); err2 != nil {
-		homeDir, _ := sshClient.Execute("echo $HOME")
-		homeDir = strings.TrimSpace(homeDir)
-		if homeDir == "" {
-			homeDir = "/home/" + machine.Username
-		}
-		confPath = homeDir + "/.config/rathole/client.toml"
-	}
-
-	if err := sshClient.UploadFileSudo([]byte(updated), confPath, machine.Username); err != nil {
+	if err := sshClient.UploadFile([]byte(updated), "/tmp/rathole-client.toml"); err != nil {
 		return err
 	}
-	_, _ = sshClient.Execute("pkill -x rathole 2>/dev/null; sudo -n systemctl restart rathole-client 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true")
+	_, _ = sshClient.Execute("sudo mv /tmp/rathole-client.toml " + configPath)
+	_, _ = sshClient.Execute("sudo chown " + machine.Username + " " + configPath)
+	_, _ = sshClient.Execute("sudo systemctl restart rathole-client 2>/dev/null || true")
 	return nil
 }
 
@@ -335,26 +316,17 @@ func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
 func buildMachineClientCleanupScript(homeDir, scriptPath string) string {
 	return fmt.Sprintf(`#!/bin/sh
 set -e
-HOME_DIR=%q
 
-sudo -n systemctl stop rathole-client 2>/dev/null || true
-sudo -n systemctl disable rathole-client 2>/dev/null || true
-systemctl --user stop rathole-client 2>/dev/null || true
-systemctl --user disable rathole-client 2>/dev/null || true
+sudo systemctl stop rathole-client 2>/dev/null || true
+sudo systemctl disable rathole-client 2>/dev/null || true
+sudo rm -f /etc/systemd/system/rathole-client.service 2>/dev/null || true
+sudo systemctl daemon-reload 2>/dev/null || true
 
-sudo -n rm -f /etc/systemd/system/rathole-client.service 2>/dev/null || true
-rm -f "$HOME_DIR/.config/systemd/user/rathole-client.service" 2>/dev/null || true
-sudo -n systemctl daemon-reload 2>/dev/null || true
-systemctl --user daemon-reload 2>/dev/null || true
+sudo rm -f /etc/rathole/client.toml 2>/dev/null || true
 
-sudo -n rm -f /etc/rathole/client.toml 2>/dev/null || true
-rm -f "$HOME_DIR/.config/rathole/client.toml" 2>/dev/null || true
-
-sudo -n rm -f /usr/local/bin/rathole 2>/dev/null || true
-rm -f "$HOME_DIR/.local/bin/rathole" 2>/dev/null || true
-
+sudo rm -f /usr/local/bin/rathole 2>/dev/null || true
 rm -f %q 2>/dev/null || true
-`, homeDir, scriptPath)
+`, scriptPath)
 }
 
 // removeSSHPublicKey removes a public key line from an authorized_keys document.

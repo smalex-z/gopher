@@ -6,99 +6,85 @@ import (
 	"io"
 )
 
-//go:embed templates/docker-install.sh
-var dockerInstallScript string
+//go:embed templates/caddy-install.sh
+var caddyInstallScript string
 
-const dockerComposeContent = `version: '3.8'
-services:
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
-      - caddy_data:/data
-      - caddy_config:/config
-    networks:
-      - tunnel_net
+//go:embed templates/rathole-install.sh
+var ratholeInstallScript string
 
-  rathole:
-    image: rapiz1/rathole:latest
-    restart: unless-stopped
-    ports:
-      - "2333:2333"
-    volumes:
-      - ./rathole-server.toml:/app/config.toml
-    command: ["--server", "/app/config.toml"]
-    networks:
-      - tunnel_net
+//go:embed templates/Caddyfile.initial
+var initialCaddyfileTemplate string
 
-volumes:
-  caddy_data:
-  caddy_config:
+//go:embed templates/rathole-server.toml.initial
+var initialRatholeConfigTemplate string
 
-networks:
-  tunnel_net:
-    driver: bridge
-`
+//go:embed templates/caddy.service
+var caddyServiceTemplate string
 
-const initialCaddyfile = `{
-    email admin@example.com
-}
-
-# ===== BEGIN CUSTOM CONFIGURATION =====
-# Everything below this line will NOT be overwritten on deploy.
-# Add any custom Caddy directives or site blocks here.
-# ===== END CUSTOM CONFIGURATION =====
-`
-
-const initialRatholeConfig = `[server]
-bind_addr = "0.0.0.0:2333"
-
-[server.default_token]
-default_token = "changeme"
-
-# ===== BEGIN CUSTOM CONFIGURATION =====
-# Everything below this line will NOT be overwritten on deploy.
-# Add any custom rathole service entries here.
-# ===== END CUSTOM CONFIGURATION =====
-`
+//go:embed templates/rathole-server-vps.service
+var ratholeServerServiceTemplate string
 
 func BootstrapVPS(client *SSHClient, logWriter io.Writer) error {
 	fmt.Fprintln(logWriter, "=== Starting VPS Bootstrap ===")
 
-	fmt.Fprintln(logWriter, "Step 1: Installing Docker...")
-	if err := client.UploadFile([]byte(dockerInstallScript), "/tmp/docker-install.sh"); err != nil {
-		return fmt.Errorf("failed to upload docker install script: %w", err)
+	fmt.Fprintln(logWriter, "Step 1: Installing Caddy...")
+	if err := client.UploadFile([]byte(caddyInstallScript), "/tmp/caddy-install.sh"); err != nil {
+		return fmt.Errorf("failed to upload caddy install script: %w", err)
 	}
-	if err := ExecuteWithOutput(client, "chmod +x /tmp/docker-install.sh && /tmp/docker-install.sh", logWriter); err != nil {
-		return fmt.Errorf("failed to install docker: %w", err)
+	if err := ExecuteWithOutput(client, "chmod +x /tmp/caddy-install.sh && /tmp/caddy-install.sh", logWriter); err != nil {
+		return fmt.Errorf("failed to install caddy: %w", err)
 	}
 
-	fmt.Fprintln(logWriter, "Step 2: Creating /opt/gopher directory...")
-	if err := ExecuteWithOutput(client, "mkdir -p /opt/gopher", logWriter); err != nil {
+	fmt.Fprintln(logWriter, "Step 2: Installing Rathole...")
+	if err := client.UploadFile([]byte(ratholeInstallScript), "/tmp/rathole-install.sh"); err != nil {
+		return fmt.Errorf("failed to upload rathole install script: %w", err)
+	}
+	if err := ExecuteWithOutput(client, "chmod +x /tmp/rathole-install.sh && /tmp/rathole-install.sh", logWriter); err != nil {
+		return fmt.Errorf("failed to install rathole: %w", err)
+	}
+
+	fmt.Fprintln(logWriter, "Step 3: Creating /opt/gopher directory...")
+	if err := ExecuteWithOutput(client, "sudo mkdir -p /opt/gopher", logWriter); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	fmt.Fprintln(logWriter, "Step 3: Uploading docker-compose.yml...")
-	if err := client.UploadFile([]byte(dockerComposeContent), "/opt/gopher/docker-compose.yml"); err != nil {
-		return fmt.Errorf("failed to upload docker-compose.yml: %w", err)
-	}
-
 	fmt.Fprintln(logWriter, "Step 4: Uploading initial Caddyfile...")
-	if err := client.UploadFile([]byte(initialCaddyfile), "/opt/gopher/Caddyfile"); err != nil {
+	if err := client.UploadFile([]byte(initialCaddyfileTemplate), "/tmp/Caddyfile"); err != nil {
 		return fmt.Errorf("failed to upload Caddyfile: %w", err)
+	}
+	if err := ExecuteWithOutput(client, "sudo mv /tmp/Caddyfile /opt/gopher/Caddyfile && sudo chown caddy:caddy /opt/gopher/Caddyfile", logWriter); err != nil {
+		return fmt.Errorf("failed to move Caddyfile: %w", err)
 	}
 
 	fmt.Fprintln(logWriter, "Step 5: Uploading initial rathole config...")
-	if err := client.UploadFile([]byte(initialRatholeConfig), "/opt/gopher/rathole-server.toml"); err != nil {
+	if err := client.UploadFile([]byte(initialRatholeConfigTemplate), "/tmp/rathole-server.toml"); err != nil {
 		return fmt.Errorf("failed to upload rathole config: %w", err)
 	}
+	if err := ExecuteWithOutput(client, "sudo mv /tmp/rathole-server.toml /opt/gopher/rathole-server.toml && sudo chmod 644 /opt/gopher/rathole-server.toml", logWriter); err != nil {
+		return fmt.Errorf("failed to move rathole config: %w", err)
+	}
 
-	fmt.Fprintln(logWriter, "Step 6: Starting services...")
-	if err := ExecuteWithOutput(client, "cd /opt/gopher && docker compose up -d", logWriter); err != nil {
+	fmt.Fprintln(logWriter, "Step 6: Installing systemd services...")
+	if err := client.UploadFile([]byte(caddyServiceTemplate), "/tmp/caddy.service"); err != nil {
+		return fmt.Errorf("failed to upload caddy service: %w", err)
+	}
+	if err := ExecuteWithOutput(client, "sudo mv /tmp/caddy.service /etc/systemd/system/caddy.service", logWriter); err != nil {
+		return fmt.Errorf("failed to move caddy service: %w", err)
+	}
+
+	if err := client.UploadFile([]byte(ratholeServerServiceTemplate), "/tmp/rathole-server.service"); err != nil {
+		return fmt.Errorf("failed to upload rathole service: %w", err)
+	}
+	if err := ExecuteWithOutput(client, "sudo mv /tmp/rathole-server.service /etc/systemd/system/rathole-server.service", logWriter); err != nil {
+		return fmt.Errorf("failed to move rathole service: %w", err)
+	}
+
+	fmt.Fprintln(logWriter, "Step 7: Starting services...")
+	if err := ExecuteWithOutput(client, "sudo systemctl daemon-reload && sudo systemctl enable caddy && sudo systemctl enable rathole-server", logWriter); err != nil {
+		return fmt.Errorf("failed to enable services: %w", err)
+	}
+
+	if err := ExecuteWithOutput(client, "sudo systemctl start caddy && sudo systemctl start rathole-server", logWriter); err != nil {
 		return fmt.Errorf("failed to start services: %w", err)
 	}
 

@@ -36,6 +36,13 @@ func runInstall(args []string) error {
 		return err
 	}
 
+	// Before anything else, set up passwordless sudo for current user
+	// This configures limited sudo access so subsequent commands don't need password prompts
+	if err := ensurePasswordlessSudoForCurrentUser(); err != nil {
+		fmt.Printf("Warning: could not configure passwordless sudo: %v\n", err)
+		fmt.Println("Install will continue but may prompt for password for sudo operations")
+	}
+
 	if os.Geteuid() != 0 {
 		return runWithSudo("install", args)
 	}
@@ -235,6 +242,33 @@ WantedBy=multi-user.target
 `, user, binaryPath, dbPath)
 }
 
-func buildSudoers(user, _, _, _, _ string) string {
-	return fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: ALL\n", user)
+func buildSudoers(user, systemctlPath, teePath, mkdirPath, pkillPath string) string {
+	var lines []string
+	lines = append(lines, "# Gopher server - limited sudo access")
+	
+	if systemctlPath != "" {
+		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, systemctlPath))
+	}
+	if teePath != "" {
+		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, teePath))
+	}
+	if mkdirPath != "" {
+		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, mkdirPath))
+	}
+	if pkillPath != "" {
+		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, pkillPath))
+	}
+	
+	// Also allow common file operations needed for config management
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/mv, /usr/bin/mv", user))
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/rm, /usr/bin/rm", user))
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/chown, /bin/chown", user))
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/chmod, /usr/bin/chmod", user))
+	
+	// Allow apt operations for local service installation
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/apt-get, /bin/apt-get", user))
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash", user))
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl", user))
+	
+	return strings.Join(lines, "\n") + "\n"
 }

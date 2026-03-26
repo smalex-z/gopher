@@ -32,25 +32,31 @@ func DeployVPS(client *SSHClient, caddyfile, ratholeConfig string, logWriter io.
 	if existing, err := client.ReadFile("/opt/gopher/Caddyfile"); err == nil {
 		caddyfile = preserveCustomSection(caddyfile, string(existing))
 	}
-	if err := client.UploadFile([]byte(caddyfile), "/opt/gopher/Caddyfile"); err != nil {
+	if err := client.UploadFile([]byte(caddyfile), "/tmp/Caddyfile"); err != nil {
 		return fmt.Errorf("failed to upload Caddyfile: %w", err)
+	}
+	if err := ExecuteWithOutput(client, "sudo mv /tmp/Caddyfile /opt/gopher/Caddyfile && sudo chown caddy:caddy /opt/gopher/Caddyfile", logWriter); err != nil {
+		return fmt.Errorf("failed to move Caddyfile: %w", err)
 	}
 
 	fmt.Fprintln(logWriter, "Uploading rathole server config...")
 	if existing, err := client.ReadFile("/opt/gopher/rathole-server.toml"); err == nil {
 		ratholeConfig = preserveCustomSection(ratholeConfig, string(existing))
 	}
-	if err := client.UploadFile([]byte(ratholeConfig), "/opt/gopher/rathole-server.toml"); err != nil {
+	if err := client.UploadFile([]byte(ratholeConfig), "/tmp/rathole-server.toml"); err != nil {
 		return fmt.Errorf("failed to upload rathole config: %w", err)
+	}
+	if err := ExecuteWithOutput(client, "sudo mv /tmp/rathole-server.toml /opt/gopher/rathole-server.toml", logWriter); err != nil {
+		return fmt.Errorf("failed to move rathole config: %w", err)
 	}
 
 	fmt.Fprintln(logWriter, "Restarting Caddy...")
-	if err := ExecuteWithOutput(client, "cd /opt/gopher && docker compose restart caddy", logWriter); err != nil {
+	if err := ExecuteWithOutput(client, "sudo systemctl reload caddy || sudo systemctl restart caddy", logWriter); err != nil {
 		return fmt.Errorf("failed to restart caddy: %w", err)
 	}
 
 	fmt.Fprintln(logWriter, "Restarting rathole server...")
-	if err := ExecuteWithOutput(client, "cd /opt/gopher && docker compose restart rathole", logWriter); err != nil {
+	if err := ExecuteWithOutput(client, "sudo systemctl restart rathole-server", logWriter); err != nil {
 		return fmt.Errorf("failed to restart rathole: %w", err)
 	}
 

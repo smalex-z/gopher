@@ -113,11 +113,11 @@ func (s *VPSService) Status() (map[string]interface{}, error) {
 	}
 	defer client.Close()
 
-	output, err := client.Execute("docker ps --format '{{.Names}}: {{.Status}}'")
+	output, err := client.Execute("sudo systemctl status caddy rathole-server --no-pager")
 	if err != nil {
 		return map[string]interface{}{
 			"connected": true,
-			"docker":    "error: " + err.Error(),
+			"services":  "error: " + err.Error(),
 		}, nil
 	}
 

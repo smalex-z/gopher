@@ -1,12 +1,15 @@
 [Unit]
-Description=Rathole Client Tunnel
+Description=Rathole Tunnel Client
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/rathole /etc/rathole/client.toml
+User={{.Username}}
+ExecStart={{.RatholeBin}} /etc/rathole/client.toml
 Restart=always
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

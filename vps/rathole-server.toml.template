@@ -1,6 +1,0 @@
-[server]
-bind_addr = "0.0.0.0:2333"
-
-[server.services.{SERVICE_NAME}]
-token = "{TOKEN}"
-bind_addr = "0.0.0.0:{REMOTE_PORT}"

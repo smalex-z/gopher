@@ -219,10 +219,8 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       {/* Permission warning */}
       {status && !status.has_install_permission && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
-          <strong>Permission required:</strong> Gopher needs root access to write to{' '}
-          <code>/etc/caddy/</code>, <code>/etc/systemd/system/</code>, and run{' '}
-          <code>systemctl</code>. Run <code>./gopher install</code> once to configure passwordless
-          sudo and service permissions for local setup.
+          <strong>Permission required:</strong> Run <code>./gopher install</code> from the terminal to initialize. 
+          It will prompt for your password to set up systemd services and Caddy configuration.
         </div>
       )}
 

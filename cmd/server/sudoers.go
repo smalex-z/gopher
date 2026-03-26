@@ -53,10 +53,21 @@ func ensurePasswordlessSudoForCurrentUser() error {
 	return nil
 }
 
-// buildBootstrapSudoers generates a full passwordless sudo rule for the user.
-// This ensures local setup operations can run without additional prompts.
+// buildBootstrapSudoers generates limited passwordless sudo rules for machine bootstrap.
+// Allows only the commands necessary for managing rathole-client and Caddy services.
 func buildBootstrapSudoers(username string) string {
-	return fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: ALL\n", username)
+	return fmt.Sprintf(`# Gopher rathole bootstrap - limited sudo access
+%s ALL=(ALL:ALL) NOPASSWD: /bin/mkdir, /usr/bin/mkdir
+%s ALL=(ALL:ALL) NOPASSWD: /bin/systemctl, /usr/bin/systemctl
+%s ALL=(ALL:ALL) NOPASSWD: /bin/mv, /usr/bin/mv
+%s ALL=(ALL:ALL) NOPASSWD: /bin/rm, /usr/bin/rm
+%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/chown, /bin/chown
+%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/tee, /bin/tee
+%s ALL=(ALL:ALL) NOPASSWD: /bin/chmod, /usr/bin/chmod
+%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/apt-get, /bin/apt-get
+%s ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash
+%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl
+`, username, username, username, username, username, username, username, username, username, username)
 }
 
 func runWithSudo(subcommand string, args []string) error {

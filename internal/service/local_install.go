@@ -1,65 +1,47 @@
 package service
 
 import (
+	_ "embed"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/smalex-z/gopher/internal/db"
 )
 
+//go:embed templates/rathole-server.service
+var ratholeServerServiceTemplate string
+
+//go:embed templates/rathole-server-initial.toml
+var ratholeServerInitialConfig string
+
 func buildRatholeServiceUnit(binaryPath string) string {
-	return fmt.Sprintf(`[Unit]
-Description=Rathole Server Tunnel
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=%s /etc/rathole/server.toml
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-`, binaryPath)
+	unit := ratholeServerServiceTemplate
+	unit = strings.ReplaceAll(unit, "{{.BinaryPath}}", binaryPath)
+	return unit
 }
 
-const localInitialRatholeServerConfig = `[server]
-bind_addr = "0.0.0.0:2333"
-
-[server.services.placeholder]
-token = "placeholder"
-bind_addr = "0.0.0.0:52000"
-
-# ===== BEGIN CUSTOM CONFIGURATION =====
-# Add your own rathole service entries here. Gopher will not modify this section.
-# ===== END CUSTOM CONFIGURATION =====
-`
-
 // hasInstallPermission returns true if local setup can run with current
-// privileges. Root always passes. For non-root users, full passwordless sudo
-// is required so all privileged operations (apt-get, systemctl, writing to
-// system paths) can be executed via sudo.
+// privileges. Root always passes. For non-root users, sudo must be available
+// (password prompt is acceptable during install).
 func hasInstallPermission() bool {
 	if os.Getuid() == 0 {
 		return true
 	}
-
-	if !isCommandAvailable("sudo") {
-		return false
-	}
-	return exec.Command("sudo", "-n", "true").Run() == nil // #nosec G204
+	// Sudo doesn't need to be passwordless for install — elevation will prompt
+	return isCommandAvailable("sudo")
 }
 
-// privilegedCmdPrefix returns a "sudo" prefix slice when not running as root,
-// or nil when already root, so it can be prepended to privileged command args.
+// privilegedCmdPrefix returns a "sudo -n" prefix slice when not running as root,
+// or nil when already root. The -n flag enforces non-interactive mode so sudo
+// won't prompt for passwords and will use the passwordless sudo entry instead.
 func privilegedCmdPrefix() []string {
 	if os.Getuid() == 0 {
 		return nil
 	}
-	return []string{"sudo"}
+	return []string{"sudo", "-n"}
 }
 
 // Install runs the full local setup in a background goroutine, streaming logs
@@ -104,17 +86,16 @@ func (s *LocalSetupService) doInstall(domain string, skipCaddy bool, logWriter i
 		}
 	}
 
-	// Step 2: Rathole
+	// Step 2: Rathole — always ensure fresh binary and config
+	fmt.Fprintln(logWriter, "Step 2: Ensuring rathole binary...")
+	if err := installLocalRathole(logWriter); err != nil {
+		return fmt.Errorf("failed to install rathole: %w", err)
+	}
 	ratholeExePath := findCommandPath("rathole")
 	if ratholeExePath == "" {
-		fmt.Fprintln(logWriter, "Step 2: Downloading rathole binary...")
-		if err := installLocalRathole(logWriter); err != nil {
-			return fmt.Errorf("failed to install rathole: %w", err)
-		}
-		ratholeExePath = "/usr/local/bin/rathole"
-	} else {
-		fmt.Fprintf(logWriter, "Step 2: Rathole already installed at %s ✓\n", ratholeExePath)
+		return fmt.Errorf("rathole binary not found after installation")
 	}
+	fmt.Fprintf(logWriter, "  Rathole ready at %s ✓\n", ratholeExePath)
 
 	// Step 3: Caddyfile — import-based layout + managed conf.d entries
 	if skipCaddy {
@@ -159,7 +140,7 @@ func (s *LocalSetupService) doInstall(domain string, skipCaddy bool, logWriter i
 				return fmt.Errorf("failed to write rathole config: %w", err)
 			}
 		} else {
-			if err := writeLocalFile("/etc/rathole/server.toml", localInitialRatholeServerConfig); err != nil {
+			if err := writeLocalFile("/etc/rathole/server.toml", ratholeServerInitialConfig); err != nil {
 				return fmt.Errorf("failed to write rathole config: %w", err)
 			}
 		}

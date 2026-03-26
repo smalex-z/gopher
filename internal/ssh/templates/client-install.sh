@@ -21,8 +21,8 @@ echo "Downloading rathole from $RATHOLE_URL ..."
 rm -rf /tmp/rathole-dl && mkdir -p /tmp/rathole-dl
 curl -fsSL "$RATHOLE_URL" -o /tmp/rathole-dl/rathole.zip
 unzip -q /tmp/rathole-dl/rathole.zip -d /tmp/rathole-dl/
-mv /tmp/rathole-dl/rathole /usr/local/bin/rathole
-chmod +x /usr/local/bin/rathole
+mkdir -p "$HOME/.local/bin"
+mv /tmp/rathole-dl/rathole "$HOME/.local/bin/rathole"
+chmod +x "$HOME/.local/bin/rathole"
 rm -rf /tmp/rathole-dl
-mkdir -p /etc/rathole
 echo "rathole installed successfully."

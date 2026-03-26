@@ -1,0 +1,12 @@
+[Unit]
+Description=Rathole Server Tunnel
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={{.BinaryPath}} /etc/rathole/server.toml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

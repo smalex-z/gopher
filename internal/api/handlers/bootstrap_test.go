@@ -9,7 +9,7 @@ func TestGenerateBootstrapScript_WarnsBeforeOverwrite(t *testing.T) {
 	script := generateBootstrapScript("https://router.example.com")
 
 	checks := []string{
-		"existing rathole client config",
+		"existing rathole",
 		"Continue and overwrite? [y/N]:",
 		"Aborted by user",
 	}

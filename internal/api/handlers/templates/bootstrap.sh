@@ -23,15 +23,31 @@ while [ -z "$MACHINE_NAME" ]; do
   printf "Machine name cannot be empty. Try again: " >/dev/tty
   read -r MACHINE_NAME </dev/tty
 done
-printf "SSH username on this machine (default: %s): " "$USER" >/dev/tty
-read -r SSH_USER </dev/tty
-SSH_USER="${SSH_USER:-$USER}"
+SSH_USER="$USER"
+echo "SSH user: $SSH_USER"
 
-# ── Check for passwordless sudo ───────────────────────────────────────────────
-HAS_SUDO=false
-if sudo -n true 2>/dev/null; then
-  HAS_SUDO=true
-fi
+handle_sudo_failure() {
+  echo ""
+  echo "ERROR: Failed to install system-wide service (sudo may have been cancelled)."
+  echo ""
+  echo "Option 1: Re-run bootstrap with sudo access:"
+  echo "  sudo bash"
+  echo "  # then run: curl -s {{.HostURL}}/static/bootstrap.sh | bash -s -- $TOKEN"
+  echo ""
+  echo "Option 2: Run rathole manually in the foreground (for testing):"
+  echo "  $RATHOLE_BIN /etc/rathole/client.toml"
+  echo ""
+  echo "Option 3: Run rathole in background with nohup:"
+  echo "  nohup $RATHOLE_BIN /etc/rathole/client.toml >/dev/null 2>&1 &"
+  echo ""
+  echo "Option 4: Run rathole in tmux (persistent session):"
+  echo "  tmux new-session -d -s rathole \"$RATHOLE_BIN /etc/rathole/client.toml\""
+  echo ""
+  echo "Option 5: Add to crontab for auto-restart on reboot:"
+  echo "  (crontab -l 2>/dev/null; echo \"@reboot $RATHOLE_BIN /etc/rathole/client.toml\") | crontab -"
+  echo ""
+  exit 1
+}
 
 # ── Register with control plane ───────────────────────────────────────────────
 echo ""
@@ -105,16 +121,9 @@ if ! command -v rathole &>/dev/null && [ ! -f "$HOME/.local/bin/rathole" ]; then
   fi
   unzip -q /tmp/rathole-dl/rathole.zip -d /tmp/rathole-dl/ || { echo "ERROR: unzip failed"; exit 1; }
 
-  if [ "$HAS_SUDO" = true ]; then
-    sudo cp /tmp/rathole-dl/rathole /usr/local/bin/rathole
-    sudo chmod +x /usr/local/bin/rathole
-    RATHOLE_BIN=/usr/local/bin/rathole
-  else
-    mkdir -p "$HOME/.local/bin"
-    cp /tmp/rathole-dl/rathole "$HOME/.local/bin/rathole"
-    chmod +x "$HOME/.local/bin/rathole"
-    RATHOLE_BIN="$HOME/.local/bin/rathole"
-  fi
+  sudo cp /tmp/rathole-dl/rathole /usr/local/bin/rathole
+  sudo chmod +x /usr/local/bin/rathole
+  RATHOLE_BIN=/usr/local/bin/rathole
   rm -rf /tmp/rathole-dl
 else
   RATHOLE_BIN=$(command -v rathole 2>/dev/null || echo "$HOME/.local/bin/rathole")
@@ -124,15 +133,8 @@ echo "  rathole binary: $RATHOLE_BIN"
 # ── Write rathole client config ───────────────────────────────────────────────
 echo "Writing rathole client config..."
 
-EXISTING_CLIENT_CONFIG=""
-if [ -f /etc/rathole/client.toml ]; then
-  EXISTING_CLIENT_CONFIG="/etc/rathole/client.toml"
-elif [ -f "$HOME/.config/rathole/client.toml" ]; then
-  EXISTING_CLIENT_CONFIG="$HOME/.config/rathole/client.toml"
-fi
-
-if [ -n "$EXISTING_CLIENT_CONFIG" ]; then
-  echo "WARNING: detected existing rathole client config at $EXISTING_CLIENT_CONFIG"
+if [ -f "/etc/rathole/client.toml" ]; then
+  echo "WARNING: existing rathole config detected at /etc/rathole/client.toml"
   printf "Continue and overwrite? [y/N]: " >/dev/tty
   read -r OVERWRITE_CONFIRM </dev/tty
   case "$OVERWRITE_CONFIRM" in
@@ -144,67 +146,37 @@ if [ -n "$EXISTING_CLIENT_CONFIG" ]; then
   esac
 fi
 
-if [ "$HAS_SUDO" = true ]; then
-  sudo mkdir -p /etc/rathole
-  sudo chown "$SSH_USER" /etc/rathole
-  echo "$RATHOLE_CONFIG" > /etc/rathole/client.toml
-  sudo chown "$SSH_USER" /etc/rathole/client.toml
-  CONFIG_PATH=/etc/rathole/client.toml
-else
-  mkdir -p "$HOME/.config/rathole"
-  echo "$RATHOLE_CONFIG" > "$HOME/.config/rathole/client.toml"
-  CONFIG_PATH="$HOME/.config/rathole/client.toml"
-fi
+sudo mkdir -p /etc/rathole || handle_sudo_failure
+echo "$RATHOLE_CONFIG" | sudo tee /etc/rathole/client.toml >/dev/null || handle_sudo_failure
+sudo chown "$SSH_USER" /etc/rathole/client.toml || handle_sudo_failure
 
-# ── Install systemd service ───────────────────────────────────────────────────
-echo "Installing systemd service..."
-if [ "$HAS_SUDO" = true ]; then
-  sudo tee /etc/systemd/system/rathole-client.service >/dev/null <<EOF
+# ── Install system-wide service ──────────────────────────────────────────────
+echo "Installing system rathole-client service..."
+sudo tee /etc/systemd/system/rathole-client.service >/dev/null <<EOF || handle_sudo_failure
 [Unit]
 Description=Rathole Tunnel Client
-After=network-online.target
-Wants=network-online.target
+After=network.target
 
 [Service]
 Type=simple
 User=$SSH_USER
-ExecStart=$RATHOLE_BIN $CONFIG_PATH
+ExecStart=$RATHOLE_BIN /etc/rathole/client.toml
 Restart=always
-RestartSec=10
+RestartSec=5
 StandardOutput=journal
 StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  sudo systemctl daemon-reload
-  sudo systemctl enable rathole-client
-  sudo systemctl restart rathole-client
-  echo "  Service installed (system, running as $SSH_USER). Check: systemctl status rathole-client"
-else
-  mkdir -p "$HOME/.config/systemd/user"
-  cat > "$HOME/.config/systemd/user/rathole-client.service" <<EOF
-[Unit]
-Description=Rathole Tunnel Client
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStart=$RATHOLE_BIN $CONFIG_PATH
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-EOF
-  systemctl --user daemon-reload
-  systemctl --user enable rathole-client
-  systemctl --user restart rathole-client
-  loginctl enable-linger "$USER" 2>/dev/null || true
-  echo "  Service installed (user). Check: systemctl --user status rathole-client"
-fi
+sudo systemctl daemon-reload || handle_sudo_failure
+sudo systemctl enable rathole-client || handle_sudo_failure
+sudo systemctl restart rathole-client || handle_sudo_failure
+echo "  Service installed (system). Check: sudo systemctl status rathole-client"
 
 echo ""
 echo "=== Bootstrap complete! ==="
-echo "Machine '$MACHINE_NAME' registered. Tunnel port: $TUNNEL_PORT"
-echo "The server will SSH back as '$SSH_USER' through the tunnel to verify connectivity."
+echo "Machine '$MACHINE_NAME' registered as '$SSH_USER'. Tunnel port: $TUNNEL_PORT"
+echo "Rathole config: /etc/rathole/client.toml"
+echo "Service: sudo systemctl status rathole-client"
+echo "The server will SSH back through the tunnel to verify connectivity."

@@ -120,13 +120,19 @@ func sudoMkdir(path string) error {
 	return exec.Command("sudo", "mkdir", "-p", path).Run() // #nosec G204
 }
 
-// runLocalCmd executes a command, streaming stdout+stderr to logWriter.
+// runLocalCmd executes a command, streaming stdout+stderr to logWriter and connecting
+// stdin so sudo password prompts work correctly.
+// For sudo commands, we connect to the real terminal directly to allow password prompts.
 // Args are all hardcoded constants — no user input reaches this function.
 func runLocalCmd(logWriter io.Writer, name string, args ...string) error {
 	cmd := exec.Command(name, args...) // #nosec G204
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
-	return cmd.Run()
+	
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // findCommandPath returns the absolute path to a binary, checking both $PATH
