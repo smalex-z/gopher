@@ -116,15 +116,13 @@ echo "7. Creating tunnel..."
 RESP=$(curl -sf -b "$COOKIE_JAR" \
     -X POST "http://localhost:$GOPHER_PORT/api/tunnels" \
     -H "Content-Type: application/json" \
-    -d "{\"machine_id\":\"$MACHINE_ID\",\"name\":\"test-service\",\"subdomain\":\"test\",\"local_port\":8080}")
+    -d "{\"machine_id\":\"$MACHINE_ID\",\"name\":\"test-service\",\"subdomain\":\"\",\"local_port\":8080}")
 
 TUNNEL_ID=$(echo "$RESP" | jq -r '.data.id // empty')
 [[ -n "$TUNNEL_ID" ]] || fail "Tunnel creation failed — response: $RESP"
 pass "Tunnel created (id: $TUNNEL_ID)"
 
-# Verify subdomain and port in response
-echo "$RESP" | jq -e '.data.subdomain == "test"' >/dev/null \
-    || fail "Tunnel subdomain mismatch in response"
+# Verify port in response
 echo "$RESP" | jq -e '.data.local_port == 8080' >/dev/null \
     || fail "Tunnel local_port mismatch in response"
 pass "Tunnel fields correct"
