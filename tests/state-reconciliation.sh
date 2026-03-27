@@ -59,10 +59,6 @@ curl -sf -c "$COOKIE_JAR" \
     -d '{"password":"gopher-test-pass"}' >/dev/null
 pass "Auth configured"
 
-# ── Setup: Set dummy domain for subdomain testing ───────────────────────────────
-sqlite3 "$GOPHER_DB" "UPDATE settings SET domain='example.test' LIMIT 1" || \
-    sqlite3 "$GOPHER_DB" "INSERT INTO settings (domain) VALUES ('example.test')"
-
 # ── Create Two Machines ────────────────────────────────────────────────────────
 echo ""
 echo "2. Creating two machines..."
@@ -87,21 +83,21 @@ echo "3. Creating 3 tunnels (2 on m1, 1 on m2)..."
 RESP=$(curl -sf -b "$COOKIE_JAR" \
     -X POST "http://localhost:$GOPHER_PORT/api/tunnels" \
     -H "Content-Type: application/json" \
-    -d "{\"machine_id\":\"$M1\",\"subdomain\":\"app1\",\"local_port\":8080}")
+    -d "{\"machine_id\":\"$M1\",\"name\":\"tunnel-1\",\"subdomain\":\"\",\"local_port\":8080}")
 T1=$(echo "$RESP" | jq -r '.data.id // empty')
 [[ -n "$T1" ]] || fail "Tunnel 1 creation failed"
 
 RESP=$(curl -sf -b "$COOKIE_JAR" \
     -X POST "http://localhost:$GOPHER_PORT/api/tunnels" \
     -H "Content-Type: application/json" \
-    -d "{\"machine_id\":\"$M1\",\"subdomain\":\"app2\",\"local_port\":8081}")
+    -d "{\"machine_id\":\"$M1\",\"name\":\"tunnel-2\",\"subdomain\":\"\",\"local_port\":8081}")
 T2=$(echo "$RESP" | jq -r '.data.id // empty')
 [[ -n "$T2" ]] || fail "Tunnel 2 creation failed"
 
 RESP=$(curl -sf -b "$COOKIE_JAR" \
     -X POST "http://localhost:$GOPHER_PORT/api/tunnels" \
     -H "Content-Type: application/json" \
-    -d "{\"machine_id\":\"$M2\",\"subdomain\":\"app3\",\"local_port\":8080}")
+    -d "{\"machine_id\":\"$M2\",\"name\":\"tunnel-3\",\"subdomain\":\"\",\"local_port\":8082}")
 T3=$(echo "$RESP" | jq -r '.data.id // empty')
 [[ -n "$T3" ]] || fail "Tunnel 3 creation failed"
 
