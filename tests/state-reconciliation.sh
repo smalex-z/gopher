@@ -59,6 +59,10 @@ curl -sf -c "$COOKIE_JAR" \
     -d '{"password":"gopher-test-pass"}' >/dev/null
 pass "Auth configured"
 
+# ── Setup: Set dummy domain for subdomain testing ───────────────────────────────
+sqlite3 "$GOPHER_DB" "UPDATE settings SET domain='example.test' LIMIT 1" || \
+    sqlite3 "$GOPHER_DB" "INSERT INTO settings (domain) VALUES ('example.test')"
+
 # ── Create Two Machines ────────────────────────────────────────────────────────
 echo ""
 echo "2. Creating two machines..."
