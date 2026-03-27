@@ -139,9 +139,11 @@ pass "DB state correct (machines: $MACHINE_COUNT, tunnels: $TUNNEL_COUNT)"
 # ── 9. Delete Tunnel ───────────────────────────────────────────────────────────
 echo ""
 echo "9. Deleting tunnel..."
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -b "$COOKIE_JAR" \
+DELETE_RESP=$(curl -s -b "$COOKIE_JAR" -w "\n%{http_code}" \
     -X DELETE "http://localhost:$GOPHER_PORT/api/tunnels/$TUNNEL_ID")
-[[ "$HTTP_CODE" == "204" ]] || fail "Tunnel DELETE returned HTTP $HTTP_CODE (expected 204)"
+HTTP_CODE=$(echo "$DELETE_RESP" | tail -1)
+BODY=$(echo "$DELETE_RESP" | head -n -1)
+[[ "$HTTP_CODE" == "204" ]] || fail "Tunnel DELETE returned HTTP $HTTP_CODE (expected 204) — response: $BODY"
 
 TUNNEL_COUNT=$(sqlite3 "$GOPHER_DB" "SELECT COUNT(*) FROM tunnels;")
 [[ "$TUNNEL_COUNT" -eq 0 ]] || fail "Tunnel still in DB after delete (count: $TUNNEL_COUNT)"
