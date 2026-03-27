@@ -231,13 +231,13 @@ func (s *TunnelService) Delete(id string) error {
 		return err
 	}
 
-	// Clean up local service config (non-fatal: best-effort)
 	if s.local != nil {
-		// Attempt to reconcile server config. This may fail if the system is not yet set up
-		// or if we're in a test environment without system files. This is not fatal.
-		_ = s.local.ReconcileServerConfig()
-		// Attempt to remove Caddy configuration. Also non-fatal.
-		_ = s.local.RemoveServiceTunnelCaddy(tunnel)
+		if err := s.local.ReconcileServerConfig(); err != nil {
+			return err
+		}
+		if err := s.local.RemoveServiceTunnelCaddy(tunnel); err != nil {
+			return err
+		}
 	}
 	return nil
 }
