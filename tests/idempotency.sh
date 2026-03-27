@@ -68,31 +68,29 @@ MACHINE_ID=$(echo "$RESP" | jq -r '.data.id // empty')
 [[ -n "$MACHINE_ID" ]] || fail "Machine creation failed — response: $RESP"
 pass "Test machine created (id: $MACHINE_ID)"
 
-# ── Test 1: Duplicate subdomain is rejected ────────────────────────────────────
+# ── Test 1: Create multiple tunnels ────────────────────────────────────────────
 echo ""
-echo "2. Testing duplicate subdomain rejection..."
+echo "2. Testing multiple tunnel creation..."
 RESP1=$(curl -sf -b "$COOKIE_JAR" \
     -X POST "http://localhost:$GOPHER_PORT/api/tunnels" \
     -H "Content-Type: application/json" \
-    -d "{\"machine_id\":\"$MACHINE_ID\",\"subdomain\":\"app\",\"local_port\":8080}")
+    -d "{\"machine_id\":\"$MACHINE_ID\",\"name\":\"tunnel-1\",\"subdomain\":\"\",\"local_port\":8080}")
 T1_ID=$(echo "$RESP1" | jq -r '.data.id // empty')
 [[ -n "$T1_ID" ]] || fail "First tunnel creation failed — response: $RESP1"
 pass "First tunnel created (id: $T1_ID)"
 
-# Second creation with same subdomain must return HTTP 409
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -b "$COOKIE_JAR" \
+RESP2=$(curl -sf -b "$COOKIE_JAR" \
     -X POST "http://localhost:$GOPHER_PORT/api/tunnels" \
     -H "Content-Type: application/json" \
-    -d "{\"machine_id\":\"$MACHINE_ID\",\"subdomain\":\"app\",\"local_port\":8081}")
-[[ "$HTTP_CODE" == "409" ]] \
-    || fail "Duplicate subdomain should return 409 Conflict, got HTTP $HTTP_CODE"
-pass "Duplicate subdomain correctly rejected (409)"
+    -d "{\"machine_id\":\"$MACHINE_ID\",\"name\":\"tunnel-2\",\"subdomain\":\"\",\"local_port\":8081}")
+T2_ID=$(echo "$RESP2" | jq -r '.data.id // empty')
+[[ -n "$T2_ID" ]] || fail "Second tunnel creation failed — response: $RESP2"
+pass "Second tunnel created (id: $T2_ID)"
 
-# Only one tunnel should exist with this subdomain
-SUBDOMAIN_COUNT=$(sqlite3 "$GOPHER_DB" "SELECT COUNT(*) FROM tunnels WHERE subdomain='app';")
-[[ "$SUBDOMAIN_COUNT" -eq 1 ]] \
-    || fail "Expected 1 tunnel with subdomain 'app', found $SUBDOMAIN_COUNT"
-pass "DB has exactly 1 tunnel with subdomain 'app'"
+TUNNEL_COUNT=$(sqlite3 "$GOPHER_DB" "SELECT COUNT(*) FROM tunnels;")
+[[ "$TUNNEL_COUNT" -eq 2 ]] \
+    || fail "Expected 2 tunnels in DB, found $TUNNEL_COUNT"
+pass "DB has exactly 2 tunnels"
 
 # ── Test 2: Duplicate rathole port is rejected ─────────────────────────────────
 echo ""
@@ -102,7 +100,7 @@ RATHOLE_PORT=$(echo "$RESP1" | jq -r '.data.rathole_port')
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -b "$COOKIE_JAR" \
     -X POST "http://localhost:$GOPHER_PORT/api/tunnels" \
     -H "Content-Type: application/json" \
-    -d "{\"machine_id\":\"$MACHINE_ID\",\"subdomain\":\"other\",\"local_port\":8082,\"rathole_port\":$RATHOLE_PORT}")
+    -d "{\"machine_id\":\"$MACHINE_ID\",\"name\":\"tunnel-dup\",\"subdomain\":\"\",\"local_port\":8090,\"rathole_port\":$RATHOLE_PORT}")
 [[ "$HTTP_CODE" == "409" ]] \
     || fail "Duplicate rathole port should return 409 Conflict, got HTTP $HTTP_CODE"
 pass "Duplicate rathole port correctly rejected (409)"
@@ -143,16 +141,16 @@ HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     || fail "Second auth setup should return 409 Conflict, got HTTP $HTTP_CODE"
 pass "Auth setup correctly rejects second call (409)"
 
-# ── Test 6: Invalid subdomain is rejected ──────────────────────────────────────
+# ── Test 6: Invalid port is rejected ──────────────────────────────────────────
 echo ""
-echo "7. Testing invalid subdomain rejection..."
+echo "7. Testing invalid port rejection..."
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -b "$COOKIE_JAR" \
     -X POST "http://localhost:$GOPHER_PORT/api/tunnels" \
     -H "Content-Type: application/json" \
-    -d "{\"machine_id\":\"$MACHINE_ID\",\"subdomain\":\"INVALID SUBDOMAIN!!\",\"local_port\":8083}")
+    -d "{\"machine_id\":\"$MACHINE_ID\",\"name\":\"tunnel-bad-port\",\"subdomain\":\"\",\"local_port\":99999}")
 [[ "$HTTP_CODE" == "400" ]] \
-    || fail "Invalid subdomain should return 400 Bad Request, got HTTP $HTTP_CODE"
-pass "Invalid subdomain rejected (400)"
+    || fail "Invalid port should return 400 Bad Request, got HTTP $HTTP_CODE"
+pass "Invalid port rejected (400)"
 
 echo ""
 echo "=============================="
