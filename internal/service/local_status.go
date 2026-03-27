@@ -100,7 +100,11 @@ func writeLocalFile(path, content string) error {
 			return nil
 		}
 	}
-	// Fall back to sudo tee (requires passwordless sudo or NOPASSWD in sudoers).
+	// Fall back to sudo: ensure directory exists, then write with tee.
+	dir := filepath.Dir(path)
+	if err := exec.Command("sudo", "mkdir", "-p", dir).Run(); err != nil { // #nosec G204
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
 	cmd := exec.Command("sudo", "tee", path) // #nosec G204
 	cmd.Stdin = strings.NewReader(content)
 	cmd.Stdout = io.Discard
