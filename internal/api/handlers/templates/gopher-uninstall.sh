@@ -19,14 +19,15 @@ remove_section() {
 
   [ -f "$_file" ] || return 0
 
-  _tmp=$(mktemp)
+  # Use a distinct variable name to avoid shadowing the caller's $_tmp.
+  _rs_tmp=$(mktemp)
   awk -v s="$_start" -v e="$_end" '
     $0 == s { skip=1; next }
     $0 == e { skip=0; next }
     !skip   { print }
-  ' "$_file" > "$_tmp"
-  cat "$_tmp" > "$_file" 2>/dev/null || sudo mv "$_tmp" "$_file" 2>/dev/null || true
-  rm -f "$_tmp" 2>/dev/null || true
+  ' "$_file" > "$_rs_tmp"
+  cat "$_rs_tmp" > "$_file" 2>/dev/null || sudo mv "$_rs_tmp" "$_file" 2>/dev/null || true
+  rm -f "$_rs_tmp" 2>/dev/null || true
 }
 
 CMD="${1:-}"
@@ -89,7 +90,10 @@ if [ -f "$VPS_KEY_FILE" ]; then
     if [ -n "$KEY_BLOB" ] && [ -f "$AK" ]; then
       _tmp=$(mktemp)
       grep -v "$KEY_BLOB" "$AK" > "$_tmp" 2>/dev/null || true
-      mv "$_tmp" "$AK" 2>/dev/null || true
+      # Use cat redirect to preserve the original file's ownership/permissions.
+      # mv would change ownership to root when run via sudo.
+      cat "$_tmp" > "$AK" 2>/dev/null || mv "$_tmp" "$AK" 2>/dev/null || true
+      rm -f "$_tmp" 2>/dev/null || true
       echo "Removed VPS SSH key from authorized_keys"
     fi
   fi

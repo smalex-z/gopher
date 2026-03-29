@@ -166,10 +166,12 @@ if [ -s /tmp/gopher-uninstall.sh ]; then
   sudo chmod +x /usr/local/bin/gopher-uninstall
   echo "  Installed to /usr/local/bin/gopher-uninstall"
 
-  # Grant the current user passwordless sudo for only this script so the
-  # gopher server can trigger it non-interactively over SSH.
+  # Grant the current user passwordless sudo for commands the gopher server
+  # needs to trigger non-interactively over SSH.
   SUDOERS_FILE="/etc/sudoers.d/gopher"
-  echo "$SSH_USER ALL=(ALL) NOPASSWD: /usr/local/bin/gopher-uninstall" | sudo tee "$SUDOERS_FILE" >/dev/null
+  printf '%s\n' \
+    "$SSH_USER ALL=(ALL) NOPASSWD: /usr/local/bin/gopher-uninstall" \
+    "$SSH_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart rathole-client" | sudo tee "$SUDOERS_FILE" >/dev/null
   sudo chmod 0440 "$SUDOERS_FILE"
   echo "  Sudoers rule written to $SUDOERS_FILE"
 else
