@@ -201,7 +201,8 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 }
 
 // RemoveServiceTunnelClient removes only the tunnel's section from the
-// client machine's /etc/rathole/client.toml.
+// client machine's /etc/rathole/client.toml by calling the installed
+// gopher-uninstall script on the client.
 func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine *db.Machine) error {
 	if tunnel == nil || machine == nil {
 		return nil
@@ -217,20 +218,7 @@ func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine
 	}
 	defer sshClient.Close()
 
-	configPath := "/etc/rathole/client.toml"
-
-	existing, err := sshClient.Execute("sudo cat " + configPath + " 2>/dev/null")
-	if err != nil {
-		return nil
-	}
-	updated := removeClientManagedSection(existing, "tunnel", tunnel.ID)
-
-	if err := sshClient.UploadFile([]byte(updated), "/tmp/rathole-client.toml"); err != nil {
-		return err
-	}
-	_, _ = sshClient.Execute("sudo mv /tmp/rathole-client.toml " + configPath)
-	_, _ = sshClient.Execute("sudo chown " + machine.Username + " " + configPath)
-	_, _ = sshClient.Execute("sudo systemctl restart rathole-client 2>/dev/null || true")
+	_, _ = sshClient.Execute("sudo /usr/local/bin/gopher-uninstall --remove-tunnel " + tunnel.ID + " 2>/dev/null || true")
 	return nil
 }
 
@@ -261,8 +249,12 @@ func (s *LocalSetupService) RemoveServiceTunnel(tunnel *db.Tunnel, machine *db.M
 }
 
 // RemoveMachineClient SSHes into a client machine via its reverse tunnel and
-// removes all gopher-managed configuration: the rathole-client service,
-// client.toml, and the VPS public key from ~/.ssh/authorized_keys.
+// calls the installed gopher-uninstall script to remove all gopher-managed
+// configuration: rathole service, client.toml, rathole binary, and the VPS
+// SSH key from authorized_keys.
+//
+// The script is launched asynchronously via nohup so it can complete even
+// after the SSH tunnel drops when rathole is stopped.
 //
 // Errors are best-effort — callers should proceed with DB cleanup even on failure.
 func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
@@ -280,53 +272,14 @@ func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
 	}
 	defer sshClient.Close()
 
-	// Resolve the home directory (SFTP can't expand $HOME).
-	homeDir, _ := sshClient.Execute("echo $HOME")
-	homeDir = strings.TrimSpace(homeDir)
-	// Sanitize: reject values that look like shell injection attempts.
-	if !strings.HasPrefix(homeDir, "/") || strings.ContainsAny(homeDir, ";|&$`\\\"'") {
-		homeDir = "/home/" + machine.Username
-	}
-
-	// Remove the VPS public key from authorized_keys.
-	if settings.SSHPublicKey != "" {
-		akContent, readErr := sshClient.Execute("cat " + homeDir + "/.ssh/authorized_keys 2>/dev/null")
-		if readErr == nil {
-			filtered := removeSSHPublicKey(akContent, settings.SSHPublicKey)
-			_ = sshClient.UploadFile([]byte(filtered), homeDir+"/.ssh/authorized_keys")
-		}
-	}
-
-	// Run uninstall asynchronously on the client so it can complete even after
-	// rathole is stopped and this SSH-over-tunnel session drops.
-	const remoteScriptPath = "/tmp/.gopher-remove-rathole.sh"
-	script := buildMachineClientCleanupScript(homeDir, remoteScriptPath)
-	if err := sshClient.UploadFile([]byte(script), remoteScriptPath); err != nil {
-		return fmt.Errorf("failed to upload remote cleanup script: %w", err)
-	}
-	_, _ = sshClient.Execute("chmod +x " + remoteScriptPath)
-	_, err = sshClient.Execute("nohup sh " + remoteScriptPath + " >/tmp/.gopher-remove-rathole.log 2>&1 < /dev/null &")
+	// Launch the uninstall script in the background so it survives the tunnel
+	// dropping when rathole is stopped mid-cleanup.
+	_, err = sshClient.Execute("nohup sudo /usr/local/bin/gopher-uninstall >/tmp/.gopher-uninstall.log 2>&1 < /dev/null &")
 	if err != nil {
-		return fmt.Errorf("failed to start remote cleanup script: %w", err)
+		return fmt.Errorf("failed to start gopher-uninstall on remote machine: %w", err)
 	}
 
 	return nil
-}
-
-func buildMachineClientCleanupScript(homeDir, scriptPath string) string {
-	return fmt.Sprintf(`#!/bin/sh
-set -e
-
-sudo systemctl stop rathole-client 2>/dev/null || true
-sudo systemctl disable rathole-client 2>/dev/null || true
-sudo rm -f /etc/systemd/system/rathole-client.service 2>/dev/null || true
-sudo systemctl daemon-reload 2>/dev/null || true
-
-sudo rm -f /etc/rathole/client.toml 2>/dev/null || true
-
-sudo rm -f /usr/local/bin/rathole 2>/dev/null || true
-rm -f %q 2>/dev/null || true
-`, scriptPath)
 }
 
 // removeSSHPublicKey removes a public key line from an authorized_keys document.

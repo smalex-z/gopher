@@ -150,6 +150,33 @@ sudo mkdir -p /etc/rathole || handle_sudo_failure
 echo "$RATHOLE_CONFIG" | sudo tee /etc/rathole/client.toml >/dev/null || handle_sudo_failure
 sudo chown "$SSH_USER" /etc/rathole/client.toml || handle_sudo_failure
 
+# Save VPS public key so the uninstall script can remove it from authorized_keys
+# even without a live connection to the server.
+echo "$VPS_PUBLIC_KEY" | sudo tee /etc/rathole/vps_key.pub >/dev/null || true
+
+# ── Install gopher-uninstall script ──────────────────────────────────────────
+echo "Installing gopher-uninstall script..."
+if command -v wget &>/dev/null; then
+  wget -q "{{.HostURL}}/static/gopher-uninstall.sh" -O /tmp/gopher-uninstall.sh || true
+else
+  curl -fsSL "{{.HostURL}}/static/gopher-uninstall.sh" -o /tmp/gopher-uninstall.sh || true
+fi
+if [ -s /tmp/gopher-uninstall.sh ]; then
+  sudo mv /tmp/gopher-uninstall.sh /usr/local/bin/gopher-uninstall
+  sudo chmod +x /usr/local/bin/gopher-uninstall
+  echo "  Installed to /usr/local/bin/gopher-uninstall"
+
+  # Grant the current user passwordless sudo for only this script so the
+  # gopher server can trigger it non-interactively over SSH.
+  SUDOERS_FILE="/etc/sudoers.d/gopher"
+  echo "$SSH_USER ALL=(ALL) NOPASSWD: /usr/local/bin/gopher-uninstall" | sudo tee "$SUDOERS_FILE" >/dev/null
+  sudo chmod 0440 "$SUDOERS_FILE"
+  echo "  Sudoers rule written to $SUDOERS_FILE"
+else
+  echo "  WARNING: could not download gopher-uninstall script (server may be unreachable)"
+  rm -f /tmp/gopher-uninstall.sh
+fi
+
 # ── Install system-wide service ──────────────────────────────────────────────
 echo "Installing system rathole-client service..."
 sudo tee /etc/systemd/system/rathole-client.service >/dev/null <<EOF || handle_sudo_failure
