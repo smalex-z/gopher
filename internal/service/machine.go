@@ -78,36 +78,32 @@ func (s *MachineService) Delete(id string) error {
 		return err
 	}
 
-	// Delete each machine tunnel with the same sequence as individual tunnel delete:
-	// 1) remove client config over SSH (best-effort), 2) remove DB tunnel,
-	// 3) reconcile server config, 4) remove managed Caddy route.
+	// SSH into the client machine first — while the rathole back-channel is
+	// still fully active — and trigger the uninstall script. Doing this before
+	// any ReconcileServerConfig calls avoids a race where rathole restarts mid-
+	// delete and the SSH tunnel is momentarily unavailable.
+	if s.local != nil {
+		_ = s.local.RemoveMachineClient(machine)
+	}
+
+	// Delete each tunnel from DB, then do a single reconcile + Caddy cleanup.
 	for i := range tunnels {
 		tunnel := &tunnels[i]
-		if s.local != nil {
-			_ = s.local.RemoveServiceTunnelClient(tunnel, machine)
-		}
 		if err := db.DeleteTunnel(tunnel.ID); err != nil {
 			return err
 		}
 		if s.local != nil {
-			if err := s.local.ReconcileServerConfig(); err != nil {
-				return err
-			}
 			if err := s.local.RemoveServiceTunnelCaddy(tunnel); err != nil {
 				return err
 			}
 		}
 	}
 
-	// Best-effort: SSH into the client machine and remove all gopher configs.
-	if s.local != nil {
-		_ = s.local.RemoveMachineClient(machine)
-	}
-
 	if err := db.DeleteMachine(id); err != nil {
 		return err
 	}
-	// Reconcile server.toml now that machine + tunnels are gone from DB.
+
+	// Single reconcile after all DB deletions — avoids multiple rathole restarts.
 	if s.local != nil {
 		if err := s.local.ReconcileServerConfig(); err != nil {
 			return err

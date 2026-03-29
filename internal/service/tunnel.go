@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -159,11 +160,17 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 	// Push configs to server + client (non-fatal: tunnel is saved even if this fails)
 	machine, machErr := db.GetMachine(req.MachineID)
 	if machErr == nil && s.local != nil {
+		log.Printf("tunnel create: pushing config for tunnel %s to machine %s (port %d)", tunnel.ID, machine.ID, machine.TunnelPort)
 		if cfgErr := s.local.AddServiceTunnel(tunnel, machine); cfgErr != nil {
+			log.Printf("tunnel create: config push failed for tunnel %s: %v", tunnel.ID, cfgErr)
 			// Annotate the tunnel with the error but don't fail the creation
 			tunnel.Status = fmt.Sprintf("config-error: %v", cfgErr)
 			_ = db.UpdateTunnel(tunnel)
+		} else {
+			log.Printf("tunnel create: config push succeeded for tunnel %s", tunnel.ID)
 		}
+	} else if machErr != nil {
+		log.Printf("tunnel create: could not load machine %s: %v — skipping config push", req.MachineID, machErr)
 	}
 
 	return tunnel, nil

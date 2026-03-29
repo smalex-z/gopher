@@ -16,6 +16,9 @@ import (
 //go:embed templates/bootstrap.sh
 var bootstrapScriptTmpl string
 
+//go:embed templates/gopher-uninstall.sh
+var gopherUninstallScript string
+
 type BootstrapHandler struct {
 	svc *service.BootstrapService
 }
@@ -90,6 +93,13 @@ func (h *BootstrapHandler) ServeScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, script)
+}
+
+// GET /static/gopher-uninstall.sh - serve the client uninstall script
+func (h *BootstrapHandler) ServeUninstallScript(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/x-shellscript")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, gopherUninstallScript)
 }
 
 func generateBootstrapScript(hostURL string) string {

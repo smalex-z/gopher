@@ -199,25 +199,18 @@ func TestMachineDelete_DeletesTunnelsThenMachineClientThenMachine(t *testing.T) 
 		t.Fatal("expected t2 to be deleted")
 	}
 
-	removeMachineIdx := -1
-	clientCalls := 0
-	for i, call := range fake.calls {
+	// RemoveMachineClient must be called first — before any rathole reconciles —
+	// so the SSH back-channel is still up when we trigger the uninstall script.
+	if len(fake.calls) == 0 || fake.calls[0] != "machine:remove-client:m1" {
+		t.Fatalf("expected machine:remove-client:m1 as first call, got %v", fake.calls)
+	}
+
+	// Per-tunnel RemoveServiceTunnelClient is NOT called during machine delete;
+	// gopher-uninstall handles full cleanup. Only caddy entries and a single
+	// server reconcile should follow.
+	for _, call := range fake.calls[1:] {
 		if strings.HasPrefix(call, "client:") {
-			clientCalls++
-		}
-		if call == "machine:remove-client:m1" {
-			removeMachineIdx = i
-		}
-	}
-	if clientCalls != 2 {
-		t.Fatalf("expected client cleanup for each tunnel, got %d calls (%v)", clientCalls, fake.calls)
-	}
-	if removeMachineIdx == -1 {
-		t.Fatalf("expected machine client removal call, got %v", fake.calls)
-	}
-	for i, call := range fake.calls {
-		if strings.HasPrefix(call, "client:") && i > removeMachineIdx {
-			t.Fatalf("machine client removal should happen after tunnel cleanup, calls=%v", fake.calls)
+			t.Fatalf("unexpected per-tunnel client cleanup call during machine delete: %v", fake.calls)
 		}
 	}
 }

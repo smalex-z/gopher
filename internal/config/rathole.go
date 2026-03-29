@@ -112,11 +112,6 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel) str
 		buf.WriteString("bind_addr = \"0.0.0.0:52000\"\n")
 	}
 
-	// Always append custom section markers so preserveCustomSection can splice
-	// user edits back in during VPS deploy.
-	buf.WriteString("\n# ===== BEGIN CUSTOM CONFIGURATION =====\n")
-	buf.WriteString("# ===== END CUSTOM CONFIGURATION =====\n")
-
 	return buf.String()
 }
 
