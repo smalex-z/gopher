@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { vpsApi } from '../api/vps'
 import { machinesApi } from '../api/machines'
 import { tunnelsApi } from '../api/tunnels'
 import StatusBadge from '../components/StatusBadge'
@@ -9,30 +8,13 @@ import type { Machine, Tunnel } from '../types'
 interface MachineStatus { ok: boolean; message: string }
 
 export default function StatusPage() {
-  const [vpsStatus, setVpsStatus] = useState<{ ok: boolean; message: string } | null>(null)
-  const [vpsChecking, setVpsChecking] = useState(false)
   const [machineStatuses, setMachineStatuses] = useState<Record<string, MachineStatus>>({})
 
-  const { data: vpsData, refetch: refetchVps } = useQuery({ queryKey: ['vps'], queryFn: () => vpsApi.get(), retry: false })
   const { data: machinesData, refetch: refetchMachines } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list(), refetchInterval: 30000 })
   const { data: tunnelsData, refetch: refetchTunnels } = useQuery({ queryKey: ['tunnels'], queryFn: () => tunnelsApi.list(), refetchInterval: 30000 })
 
-  const vps = vpsData?.data
   const machines: Machine[] = machinesData?.data ?? []
   const tunnels: Tunnel[] = tunnelsData?.data ?? []
-
-  const checkVpsStatus = async () => {
-    setVpsChecking(true)
-    setVpsStatus(null)
-    try {
-      await vpsApi.status()
-      setVpsStatus({ ok: true, message: 'VPS is reachable' })
-    } catch (err) {
-      setVpsStatus({ ok: false, message: err instanceof Error ? err.message : 'Unreachable' })
-    } finally {
-      setVpsChecking(false)
-    }
-  }
 
   const checkMachineStatus = async (id: string) => {
     try {
@@ -44,7 +26,6 @@ export default function StatusPage() {
   }
 
   const refreshAll = () => {
-    refetchVps()
     refetchMachines()
     refetchTunnels()
   }
@@ -64,40 +45,6 @@ export default function StatusPage() {
         <button onClick={refreshAll} className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium">
           ↺ Refresh All
         </button>
-      </div>
-
-      {/* VPS Status */}
-      <div className="bg-white rounded-xl shadow-sm border p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-gray-900">VPS</h2>
-        </div>
-        {vps ? (
-          <div className="flex flex-wrap items-center gap-4">
-            <div>
-              <div className="text-sm text-gray-500">Host</div>
-              <div className="font-medium">{vps.host}:{vps.port}</div>
-            </div>
-            <div>
-              <div className="text-sm text-gray-500">Domain</div>
-              <div className="font-medium">{vps.domain}</div>
-            </div>
-            <div>
-              <div className="text-sm text-gray-500">Status</div>
-              {vpsStatus ? (
-                <span className={`text-sm ${vpsStatus.ok ? 'text-green-600' : 'text-red-600'}`}>
-                  {vpsStatus.ok ? '✅' : '❌'} {vpsStatus.message}
-                </span>
-              ) : (
-                <StatusBadge status="connected" />
-              )}
-            </div>
-            <button onClick={checkVpsStatus} disabled={vpsChecking} className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm disabled:opacity-50 ml-auto">
-              {vpsChecking ? 'Checking...' : 'Check Status'}
-            </button>
-          </div>
-        ) : (
-          <p className="text-gray-400 text-sm">No VPS configured.</p>
-        )}
       </div>
 
       {/* Machines */}

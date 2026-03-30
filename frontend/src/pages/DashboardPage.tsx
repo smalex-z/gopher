@@ -345,22 +345,6 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Architecture flow */}
-      <div className="bg-white rounded-xl shadow-sm border p-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">How It Works</h2>
-        <div className="flex flex-wrap items-center gap-2 justify-center py-2">
-          <div className="bg-purple-100 text-purple-800 font-medium px-4 py-2 rounded-lg text-sm">🌐 Internet</div>
-          <span className="text-gray-400 font-bold">→</span>
-          <div className="bg-blue-100 text-blue-800 font-medium px-4 py-2 rounded-lg text-sm">🖥 Caddy on VPS</div>
-          <span className="text-gray-400 font-bold">→</span>
-          <div className="bg-orange-100 text-orange-800 font-medium px-4 py-2 rounded-lg text-sm">🔗 Rathole Tunnel</div>
-          <span className="text-gray-400 font-bold">→</span>
-          <div className="bg-green-100 text-green-800 font-medium px-4 py-2 rounded-lg text-sm">💻 Your Machine</div>
-          <span className="text-gray-400 font-bold">→</span>
-          <div className="bg-teal-100 text-teal-800 font-medium px-4 py-2 rounded-lg text-sm">🚀 Local Service</div>
-        </div>
-      </div>
-
       {/* Recent activity */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-white rounded-xl shadow-sm border p-6">

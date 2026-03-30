@@ -2,7 +2,6 @@ package service
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -29,7 +28,7 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	const endMarker = "# ===== END CUSTOM CONFIGURATION ====="
 
 	existing, err := os.ReadFile(configPath)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil {
 		return fmt.Errorf("failed to read %s: %w", configPath, err)
 	}
 
@@ -122,7 +121,7 @@ func stripGopherServiceSections(content string) string {
 
 // AddServiceTunnel adds a user-defined service tunnel to the server's
 // /etc/rathole/server.toml and SSHes into the machine to update its
-// /etc/rathole/client.toml (owned by the SSH user). If subdomain is set it also writes a managed
+// /etc/rathole/client.toml. If subdomain is set it also writes a managed
 // Caddy site file under /etc/caddy/conf.d.
 func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Machine) error {
 	settings, err := db.GetSettings()
@@ -131,15 +130,12 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	}
 
 	// --- 1. Update server.toml (full reconcile ensures consistency) ---
-	log.Printf("AddServiceTunnel: reconciling server.toml for tunnel %s", tunnel.ID)
 	if err := s.ReconcileServerConfig(); err != nil {
 		return fmt.Errorf("failed to update server.toml: %w", err)
 	}
-	log.Printf("AddServiceTunnel: server.toml updated")
 
 	// --- 2. Update managed Caddy entry if subdomain is set ---
 	if tunnel.Subdomain != "" && settings.Domain != "" {
-		log.Printf("AddServiceTunnel: writing Caddy entry for subdomain %s.%s", tunnel.Subdomain, settings.Domain)
 		if err := ensureManagedCaddyLayout(); err != nil {
 			return fmt.Errorf("failed to prepare Caddy managed layout: %w", err)
 		}
@@ -152,19 +148,16 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 			return fmt.Errorf("failed to write tunnel Caddy file %s: %w", managedPath, err)
 		}
 		_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
-		log.Printf("AddServiceTunnel: Caddy entry written and reloaded")
 	}
 
 	// --- 3. SSH into client and update client.toml ---
 	if settings.SSHPrivateKey == "" {
 		return fmt.Errorf("no server SSH key available; machine may need to be re-bootstrapped")
 	}
-	log.Printf("AddServiceTunnel: dialing machine %s via SSH tunnel on port %d (user: %s)", machine.ID, machine.TunnelPort, machine.Username)
 	var sshClient *sshpkg.SSHClient
 	var sshDialErr error
 	for attempt := 0; attempt < 6; attempt++ {
 		if attempt > 0 {
-			log.Printf("AddServiceTunnel: SSH dial attempt %d/6 failed (%v), retrying in 5s...", attempt, sshDialErr)
 			time.Sleep(5 * time.Second)
 		}
 		sshClient, sshDialErr = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
@@ -173,20 +166,13 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		}
 	}
 	if sshDialErr != nil {
-		log.Printf("AddServiceTunnel: all SSH dial attempts failed for machine %s (port %d): %v", machine.ID, machine.TunnelPort, sshDialErr)
 		return fmt.Errorf("failed to SSH into machine via tunnel (port %d) after retries: %w", machine.TunnelPort, sshDialErr)
 	}
-	log.Printf("AddServiceTunnel: SSH connection established to machine %s", machine.ID)
 	defer sshClient.Close()
 
-	configPath := "/etc/rathole/client.toml"
-
-	// Read existing client.toml — the file is owned by the SSH user after bootstrap,
-	// so no sudo is required.
-	log.Printf("AddServiceTunnel: reading existing %s from machine %s", configPath, machine.ID)
-	existing, err := sshClient.Execute("cat " + configPath + " 2>/dev/null")
+	// Read existing client.toml
+	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
 	if err != nil {
-		log.Printf("AddServiceTunnel: could not read %s (assuming empty): %v", configPath, err)
 		existing = ""
 	}
 	machineTunnels, err := db.GetTunnelsByMachine(machine.ID)
@@ -198,59 +184,72 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		return err
 	}
 
-	log.Printf("AddServiceTunnel: uploading new client.toml to machine %s (%d tunnels)", machine.ID, len(machineTunnels))
-	if err := sshClient.UploadFile([]byte(updated), "/tmp/rathole-client.toml"); err != nil {
-		log.Printf("AddServiceTunnel: upload failed: %v", err)
-		return fmt.Errorf("failed to write rathole config: %w", err)
-	}
-	// cp overwrites the existing file in-place; the file is owned by the SSH user so
-	// no sudo is needed. mv would require write permission on the /etc/rathole dir
-	// (owned by root), so we use cp instead.
-	if out, err := sshClient.Execute("cp /tmp/rathole-client.toml " + configPath); err != nil {
-		log.Printf("AddServiceTunnel: cp failed (out=%q): %v", out, err)
-		return fmt.Errorf("failed to install rathole config: %w", err)
-	}
-
-	// systemctl restart requires sudo; bootstrap adds a NOPASSWD sudoers rule for
-	// this command. Fall back silently for machines bootstrapped before that rule
-	// was added — the service will pick up the new config on next restart.
-	if out, err := sshClient.Execute("sudo systemctl restart rathole-client 2>/dev/null || true"); err != nil {
-		log.Printf("AddServiceTunnel: rathole-client restart failed (out=%q): %v", out, err)
-	} else {
-		log.Printf("AddServiceTunnel: rathole-client restarted on machine %s", machine.ID)
+	// Determine the absolute config path on the remote machine.
+	// SFTP does not expand shell variables, so resolve the home dir explicitly.
+	configPath := "/etc/rathole/client.toml"
+	if _, err2 := sshClient.Execute("test -f /etc/rathole/client.toml"); err2 != nil {
+		homeDir, _ := sshClient.Execute("echo $HOME")
+		homeDir = strings.TrimSpace(homeDir)
+		if homeDir == "" {
+			homeDir = "/home/" + machine.Username
+		}
+		configPath = homeDir + "/.config/rathole/client.toml"
+		_, _ = sshClient.Execute("mkdir -p " + homeDir + "/.config/rathole")
 	}
 
-	log.Printf("AddServiceTunnel: client.toml successfully updated on machine %s", machine.ID)
+	// Write config directly via SFTP — works when the SSH user owns /etc/rathole/
+	// (bootstrap runs chown for sudo-capable machines). UploadFileSudo handles legacy
+	// machines where the file ended up root-owned by falling back to a sudo mv.
+	if err := sshClient.UploadFileSudo([]byte(updated), configPath, machine.Username); err != nil {
+		return fmt.Errorf("failed to write client.toml on machine: %w", err)
+	}
+
+	// Restart rathole-client. Bootstrap now runs the service as the SSH user,
+	// so pkill is sufficient (systemd Restart=always brings it back).
+	// sudo -n is attempted as fallback for older installs with NOPASSWD configured.
+	_, _ = sshClient.Execute("pkill -x rathole 2>/dev/null; sudo -n systemctl restart rathole-client 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true")
+
 	return nil
 }
 
 // RemoveServiceTunnelClient removes only the tunnel's section from the
-// client machine's /etc/rathole/client.toml by calling the installed
-// gopher-uninstall script on the client.
+// client machine's /etc/rathole/client.toml (or user-level fallback).
 func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine *db.Machine) error {
 	if tunnel == nil || machine == nil {
 		return nil
 	}
 	settings, err := db.GetSettings()
 	if err != nil || settings.SSHPrivateKey == "" {
-		log.Printf("RemoveServiceTunnelClient: no SSH key, skipping client update for tunnel %s", tunnel.ID)
 		return nil
 	}
 
-	log.Printf("RemoveServiceTunnelClient: SSHing into machine %s (port %d) to remove tunnel %s", machine.ID, machine.TunnelPort, tunnel.ID)
 	sshClient, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
 	if err != nil {
-		log.Printf("RemoveServiceTunnelClient: SSH failed for machine %s (port %d): %v", machine.ID, machine.TunnelPort, err)
 		return err
 	}
 	defer sshClient.Close()
 
-	out, err := sshClient.Execute("sudo /usr/local/bin/gopher-uninstall --remove-tunnel " + tunnel.ID + " 2>/dev/null || true")
+	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
 	if err != nil {
-		log.Printf("RemoveServiceTunnelClient: gopher-uninstall failed for tunnel %s (out=%q): %v", tunnel.ID, out, err)
-	} else {
-		log.Printf("RemoveServiceTunnelClient: tunnel %s removed from client (out=%q)", tunnel.ID, out)
+		return nil
 	}
+	updated := removeClientManagedSection(existing, "tunnel", tunnel.ID)
+
+	// Resolve absolute config path (SFTP cannot expand $HOME).
+	confPath := "/etc/rathole/client.toml"
+	if _, err2 := sshClient.Execute("test -f /etc/rathole/client.toml"); err2 != nil {
+		homeDir, _ := sshClient.Execute("echo $HOME")
+		homeDir = strings.TrimSpace(homeDir)
+		if homeDir == "" {
+			homeDir = "/home/" + machine.Username
+		}
+		confPath = homeDir + "/.config/rathole/client.toml"
+	}
+
+	if err := sshClient.UploadFileSudo([]byte(updated), confPath, machine.Username); err != nil {
+		return err
+	}
+	_, _ = sshClient.Execute("pkill -x rathole 2>/dev/null; sudo -n systemctl restart rathole-client 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true")
 	return nil
 }
 
@@ -281,43 +280,81 @@ func (s *LocalSetupService) RemoveServiceTunnel(tunnel *db.Tunnel, machine *db.M
 }
 
 // RemoveMachineClient SSHes into a client machine via its reverse tunnel and
-// calls the installed gopher-uninstall script to remove all gopher-managed
-// configuration: rathole service, client.toml, rathole binary, and the VPS
-// SSH key from authorized_keys.
-//
-// The script is launched asynchronously via nohup so it can complete even
-// after the SSH tunnel drops when rathole is stopped.
+// removes all gopher-managed configuration: the rathole-client service,
+// client.toml, and the VPS public key from ~/.ssh/authorized_keys.
 //
 // Errors are best-effort — callers should proceed with DB cleanup even on failure.
 func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
 	settings, err := db.GetSettings()
 	if err != nil || settings.SSHPrivateKey == "" {
-		log.Printf("RemoveMachineClient: no SSH key available for machine %s", machine.ID)
 		return fmt.Errorf("no server SSH key available")
 	}
 	if machine.TunnelPort == 0 {
-		log.Printf("RemoveMachineClient: machine %s has no tunnel port, skipping uninstall", machine.ID)
 		return fmt.Errorf("machine has no tunnel port")
 	}
 
-	log.Printf("RemoveMachineClient: SSHing into machine %s (port %d, user %s)", machine.ID, machine.TunnelPort, machine.Username)
 	sshClient, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
 	if err != nil {
-		log.Printf("RemoveMachineClient: SSH failed for machine %s (port %d): %v", machine.ID, machine.TunnelPort, err)
 		return fmt.Errorf("failed to SSH into machine via tunnel (port %d): %w", machine.TunnelPort, err)
 	}
 	defer sshClient.Close()
 
-	log.Printf("RemoveMachineClient: launching gopher-uninstall on machine %s", machine.ID)
-	// Launch the uninstall script in the background so it survives the tunnel
-	// dropping when rathole is stopped mid-cleanup.
-	_, err = sshClient.Execute("nohup sudo /usr/local/bin/gopher-uninstall >/tmp/.gopher-uninstall.log 2>&1 < /dev/null &")
-	if err != nil {
-		log.Printf("RemoveMachineClient: failed to launch gopher-uninstall on machine %s: %v", machine.ID, err)
-		return fmt.Errorf("failed to start gopher-uninstall on remote machine: %w", err)
+	// Resolve the home directory (SFTP can't expand $HOME).
+	homeDir, _ := sshClient.Execute("echo $HOME")
+	homeDir = strings.TrimSpace(homeDir)
+	// Sanitize: reject values that look like shell injection attempts.
+	if !strings.HasPrefix(homeDir, "/") || strings.ContainsAny(homeDir, ";|&$`\\\"'") {
+		homeDir = "/home/" + machine.Username
 	}
-	log.Printf("RemoveMachineClient: gopher-uninstall launched on machine %s", machine.ID)
+
+	// Remove the VPS public key from authorized_keys.
+	if settings.SSHPublicKey != "" {
+		akContent, readErr := sshClient.Execute("cat " + homeDir + "/.ssh/authorized_keys 2>/dev/null")
+		if readErr == nil {
+			filtered := removeSSHPublicKey(akContent, settings.SSHPublicKey)
+			_ = sshClient.UploadFile([]byte(filtered), homeDir+"/.ssh/authorized_keys")
+		}
+	}
+
+	// Run uninstall asynchronously on the client so it can complete even after
+	// rathole is stopped and this SSH-over-tunnel session drops.
+	const remoteScriptPath = "/tmp/.gopher-remove-rathole.sh"
+	script := buildMachineClientCleanupScript(homeDir, remoteScriptPath)
+	if err := sshClient.UploadFile([]byte(script), remoteScriptPath); err != nil {
+		return fmt.Errorf("failed to upload remote cleanup script: %w", err)
+	}
+	_, _ = sshClient.Execute("chmod +x " + remoteScriptPath)
+	_, err = sshClient.Execute("nohup sh " + remoteScriptPath + " >/tmp/.gopher-remove-rathole.log 2>&1 < /dev/null &")
+	if err != nil {
+		return fmt.Errorf("failed to start remote cleanup script: %w", err)
+	}
+
 	return nil
+}
+
+func buildMachineClientCleanupScript(homeDir, scriptPath string) string {
+	return fmt.Sprintf(`#!/bin/sh
+set -e
+HOME_DIR=%q
+
+sudo -n systemctl stop rathole-client 2>/dev/null || true
+sudo -n systemctl disable rathole-client 2>/dev/null || true
+systemctl --user stop rathole-client 2>/dev/null || true
+systemctl --user disable rathole-client 2>/dev/null || true
+
+sudo -n rm -f /etc/systemd/system/rathole-client.service 2>/dev/null || true
+rm -f "$HOME_DIR/.config/systemd/user/rathole-client.service" 2>/dev/null || true
+sudo -n systemctl daemon-reload 2>/dev/null || true
+systemctl --user daemon-reload 2>/dev/null || true
+
+sudo -n rm -f /etc/rathole/client.toml 2>/dev/null || true
+rm -f "$HOME_DIR/.config/rathole/client.toml" 2>/dev/null || true
+
+sudo -n rm -f /usr/local/bin/rathole 2>/dev/null || true
+rm -f "$HOME_DIR/.local/bin/rathole" 2>/dev/null || true
+
+rm -f %q 2>/dev/null || true
+`, homeDir, scriptPath)
 }
 
 // removeSSHPublicKey removes a public key line from an authorized_keys document.
