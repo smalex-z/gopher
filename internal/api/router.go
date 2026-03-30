@@ -17,6 +17,7 @@ func NewRouter(
 	bootstrapSvc *service.BootstrapService,
 	authSvc *service.AuthService,
 	localSvc *service.LocalSetupService,
+	updateSvc *service.UpdateService,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -33,6 +34,7 @@ func NewRouter(
 	authH := handlers.NewAuthHandler(authSvc)
 	localH := handlers.NewLocalHandler(localSvc)
 	debugH := handlers.NewDebugHandler()
+	updateH := handlers.NewUpdateHandler(updateSvc)
 
 	// Public: bootstrap script download and machine self-registration
 	r.Get("/static/bootstrap.sh", bootstrapH.ServeScript)
@@ -103,6 +105,11 @@ func NewRouter(
 			r.Route("/debug", func(r chi.Router) {
 				r.Get("/caddyfile", debugH.GetCaddyfile)
 				r.Get("/rathole-server", debugH.GetRatholeServerConfig)
+			})
+
+			r.Route("/update", func(r chi.Router) {
+				r.Get("/check", updateH.Check)
+				r.Post("/apply", updateH.Apply)
 			})
 		})
 	})

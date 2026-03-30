@@ -56,10 +56,11 @@ func runServer(args []string) {
 	tunnelSvc := service.NewTunnelService(localSvc)
 	authSvc := service.NewAuthService()
 	bootstrapSvc := service.NewBootstrapService(localSvc)
+	updateSvc := service.NewUpdateService()
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
 
-	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc)
+	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc)
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", router)

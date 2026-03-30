@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (example: v0.1.0-alpha.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure tag exists (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch --tags --force
+          git rev-parse "refs/tags/${TAG}" >/dev/null
+
+      - name: Checkout release tag (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        run: git checkout "tags/${TAG}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Build linux binaries
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 go build -ldflags "-X github.com/smalex-z/gopher/internal/build.Version=${TAG}" -o dist/gopher-linux-amd64 ./cmd/server/...
+          GOOS=linux GOARCH=arm64 go build -ldflags "-X github.com/smalex-z/gopher/internal/build.Version=${TAG}" -o dist/gopher-linux-arm64 ./cmd/server/...
+          sha256sum dist/gopher-linux-amd64 dist/gopher-linux-arm64 > dist/SHA256SUMS.txt
+
+      - name: Determine prerelease flag
+        id: release_meta
+        run: |
+          if [[ "${TAG}" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          prerelease: ${{ steps.release_meta.outputs.prerelease }}
+          files: |
+            dist/gopher-linux-amd64
+            dist/gopher-linux-arm64
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          generate_release_notes: true
