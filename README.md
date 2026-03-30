@@ -203,13 +203,16 @@ gopher/
 | **Self-hosted** | ✅ | ❌ | ❌ | N/A |
 | **Vendor lock-in** | ❌ | ✅ | ✅ | ❌ |
 | **Protocol support** | HTTP/TCP/UDP | HTTP/TCP | HTTP only** | All |
+| **File size limit** | None (VPS disk) | Varies | ⚠️ 100-500 MB | None |
+| **Bandwidth limit** | VPS limit (1-10 TB) | Plan based | ⚠️ Undefined | ISP only |
+| **Request timeout** | Unlimited | Varies | ⚠️ 100s free | Unlimited |
 | **Works behind NAT** | ✅ | ✅ | ✅ | ❌ |
 | **Automatic HTTPS** | ✅ | ✅ | ✅ | ❌ |
 | **Traffic privacy** | ✅ You control | ❌ ngrok sees all | ❌ CF sees all | ✅ |
-| **Custom middleware** | ✅ Full Caddy | ❌ | ⚠️ CF Workers | N/A |
+| **Use case** | Self-hosted services | Development/demos | Simple websites | Home network |
 
-*Cloudflare Tunnel: Free for HTTP/HTTPS; TCP requires Cloudflare Access (paid)  
-**Non-HTTP protocols require Cloudflare Access subscription
+*Free with limitations  
+**Non-HTTP protocols require Cloudflare Access (paid)
 
 ## Contributing
 
