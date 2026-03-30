@@ -28,7 +28,7 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	const endMarker = "# ===== END CUSTOM CONFIGURATION ====="
 
 	existing, err := os.ReadFile(configPath)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to read %s: %w", configPath, err)
 	}
 
