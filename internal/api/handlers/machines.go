@@ -97,6 +97,23 @@ func (h *MachineHandler) Deploy(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, map[string]string{"status": "deploy started"})
 }
 
+// PUT /api/machines/{id}/ssh-key — push a new SSH key to the machine and update its record
+func (h *MachineHandler) ReassignSSHKey(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		SSHKeyID string `json:"ssh_key_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SSHKeyID == "" {
+		response.BadRequest(w, "ssh_key_id is required")
+		return
+	}
+	if err := h.svc.ReassignSSHKey(id, body.SSHKeyID); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"message": "SSH key updated"})
+}
+
 func (h *MachineHandler) Status(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	status, err := h.svc.Status(id)

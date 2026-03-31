@@ -1,4 +1,5 @@
 import client from './client'
+import type { SSHKey, ApiResponse } from '../types'
 
 export interface LocalServiceStatus {
   caddy_installed: boolean
@@ -25,9 +26,16 @@ export const localApi = {
   skip: (domain?: string) => client.post('/local/skip', { domain }).then(r => r.data),
   checkDNS: (domain: string) =>
     client.get<{ data: DNSCheckResult }>(`/local/check-dns?domain=${encodeURIComponent(domain)}`).then(r => r.data.data),
-  downloadSSHKey: () => client.get('/local/ssh-key', { responseType: 'blob' }).then(r => r.data as Blob),
-  generateSSHKey: () =>
-    client.post<{ data: { public_key: string } }>('/local/generate-ssh-key').then(r => r.data.data.public_key),
-  uploadSSHKey: (privateKey: string, publicKey: string) =>
-    client.put<{ data: { public_key: string } }>('/local/ssh-key', { private_key: privateKey, public_key: publicKey }).then(r => r.data.data),
+  listSSHKeys: () =>
+    client.get<ApiResponse<SSHKey[]>>('/local/ssh-keys').then(r => r.data),
+  generateSSHKey: (name: string, setDefault: boolean) =>
+    client.post<ApiResponse<SSHKey>>('/local/ssh-keys/generate', { name, set_default: setDefault }).then(r => r.data),
+  uploadSSHKey: (name: string, privateKey: string, publicKey: string, setDefault: boolean) =>
+    client.post<ApiResponse<SSHKey>>('/local/ssh-keys/upload', { name, private_key: privateKey, public_key: publicKey, set_default: setDefault }).then(r => r.data),
+  deleteSSHKey: (id: string) =>
+    client.delete(`/local/ssh-keys/${id}`).then(r => r.data),
+  setDefaultSSHKey: (id: string) =>
+    client.put(`/local/ssh-keys/${id}/default`).then(r => r.data),
+  downloadSSHKey: (id: string) =>
+    client.get(`/local/ssh-keys/${id}/download`, { responseType: 'blob' }).then(r => r.data as Blob),
 }

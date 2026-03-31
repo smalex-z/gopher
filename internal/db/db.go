@@ -4,6 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -29,7 +30,7 @@ func Initialize(dsn string) error {
 		return fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
 
-	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &AppSettings{}); err != nil {
+	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &AppSettings{}, &SSHKey{}); err != nil {
 		return fmt.Errorf("failed to auto-migrate: %w", err)
 	}
 
@@ -37,6 +38,48 @@ func Initialize(dsn string) error {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 
+	if err := migrateSSHKeysFromSettings(); err != nil {
+		log.Printf("WARN: SSH key migration: %v", err)
+	}
+
+	return nil
+}
+
+// migrateSSHKeysFromSettings copies any SSH keypair stored in app_settings into
+// the new ssh_keys table and assigns it to all existing machines.
+func migrateSSHKeysFromSettings() error {
+	count, err := CountSSHKeys()
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil // already migrated
+	}
+
+	// Read raw values directly from the DB column to avoid depending on the struct field.
+	var row struct {
+		PubKey  string `gorm:"column:ssh_public_key"`
+		PrivKey string `gorm:"column:ssh_private_key"`
+	}
+	if err := DB.Raw("SELECT ssh_public_key, ssh_private_key FROM app_settings WHERE id = 'singleton' LIMIT 1").Scan(&row).Error; err != nil || row.PubKey == "" {
+		return nil // nothing to migrate
+	}
+
+	key := &SSHKey{
+		ID:         "migrated-default",
+		Name:       "Default",
+		PublicKey:  row.PubKey,
+		PrivateKey: row.PrivKey,
+		IsDefault:  true,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	if err := DB.Create(key).Error; err != nil {
+		return fmt.Errorf("create ssh_key: %w", err)
+	}
+	// Assign to all existing machines.
+	_ = DB.Model(&Machine{}).Where("ssh_key_id = '' OR ssh_key_id IS NULL").Update("ssh_key_id", key.ID).Error
+	log.Printf("Migrated SSH key from app_settings to ssh_keys table")
 	return nil
 }
 

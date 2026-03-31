@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	chi "github.com/go-chi/chi/v5"
 	"github.com/smalex-z/gopher/internal/api/response"
+	"github.com/smalex-z/gopher/internal/db"
 	"github.com/smalex-z/gopher/internal/service"
 )
 
@@ -73,47 +75,97 @@ func (h *LocalHandler) Reconcile(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, map[string]string{"message": "server config reconciled"})
 }
 
-// POST /api/local/generate-ssh-key — generate a new RSA keypair and store it
-func (h *LocalHandler) GenerateSSHKey(w http.ResponseWriter, r *http.Request) {
-	pubKey, err := h.svc.GenerateSSHKey()
+type sshKeyWithStats struct {
+	db.SSHKey
+	MachineCount int64 `json:"machine_count"`
+}
+
+// GET /api/local/ssh-keys — list all key records with machine counts (no private keys)
+func (h *LocalHandler) ListSSHKeys(w http.ResponseWriter, r *http.Request) {
+	keys, err := h.svc.ListSSHKeys()
 	if err != nil {
 		response.InternalError(w, err.Error())
 		return
 	}
-	response.Success(w, map[string]string{"public_key": strings.TrimSpace(pubKey)})
+	result := make([]sshKeyWithStats, len(keys))
+	for i, k := range keys {
+		count, _ := db.CountMachinesUsingKey(k.ID)
+		result[i] = sshKeyWithStats{SSHKey: k, MachineCount: count}
+	}
+	response.Success(w, result)
 }
 
-// PUT /api/local/ssh-key — validate and store an uploaded key pair
+// POST /api/local/ssh-keys/generate — generate a new key pair
+func (h *LocalHandler) GenerateSSHKey(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name       string `json:"name"`
+		SetDefault bool   `json:"set_default"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.Name == "" {
+		req.Name = "Unnamed key"
+	}
+	key, err := h.svc.GenerateSSHKey(req.Name, req.SetDefault)
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, key)
+}
+
+// POST /api/local/ssh-keys/upload — store an uploaded key pair
 func (h *LocalHandler) UploadSSHKey(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	var req struct {
+		Name       string `json:"name"`
 		PrivateKey string `json:"private_key"`
 		PublicKey  string `json:"public_key"`
+		SetDefault bool   `json:"set_default"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.BadRequest(w, "invalid request body")
 		return
 	}
-	if body.PrivateKey == "" || body.PublicKey == "" {
+	if req.PrivateKey == "" || req.PublicKey == "" {
 		response.BadRequest(w, "private_key and public_key are required")
 		return
 	}
-	if err := h.svc.SetSSHKey(body.PrivateKey, body.PublicKey); err != nil {
+	if req.Name == "" {
+		req.Name = "Uploaded key"
+	}
+	key, err := h.svc.AddSSHKey(req.Name, req.PrivateKey, req.PublicKey, req.SetDefault)
+	if err != nil {
 		response.BadRequest(w, err.Error())
 		return
 	}
-	pubKey := strings.TrimSpace(body.PublicKey)
-	response.Success(w, map[string]string{"message": "SSH key pair saved", "public_key": pubKey})
+	response.Success(w, key)
 }
 
-// GET /api/local/ssh-key — download the VPS SSH private key
-func (h *LocalHandler) DownloadSSHKey(w http.ResponseWriter, r *http.Request) {
-	key, err := h.svc.GetSSHPrivateKey()
-	if err != nil {
-		response.InternalError(w, err.Error())
+// DELETE /api/local/ssh-keys/{id} — delete a key
+func (h *LocalHandler) DeleteSSHKey(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.svc.DeleteSSHKey(id); err != nil {
+		response.BadRequest(w, err.Error())
 		return
 	}
-	if key == "" {
-		response.NotFound(w, "no SSH key generated yet; bootstrap at least one machine first")
+	response.Success(w, map[string]string{"message": "key deleted"})
+}
+
+// PUT /api/local/ssh-keys/{id}/default — set as default
+func (h *LocalHandler) SetDefaultSSHKey(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.svc.SetDefaultSSHKey(id); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"message": "default key updated"})
+}
+
+// GET /api/local/ssh-keys/{id}/download — download private key
+func (h *LocalHandler) DownloadSSHKey(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	key, err := h.svc.DownloadSSHKey(id)
+	if err != nil {
+		response.NotFound(w, "key not found")
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")

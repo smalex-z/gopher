@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/smalex-z/gopher/internal/db"
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
@@ -37,7 +38,7 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &LocalServiceStatus{
+	status := &LocalServiceStatus{
 		CaddyInstalled:       isCommandAvailable("caddy"),
 		CaddyActive:          systemctlStatus("caddy"),
 		RatholeInstalled:     isCommandAvailable("rathole"),
@@ -45,49 +46,85 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 		Domain:               settings.Domain,
 		LocalSetupDone:       settings.LocalSetupDone,
 		HasInstallPermission: hasInstallPermission(),
-		SSHPublicKey:         settings.SSHPublicKey,
-	}, nil
-}
-
-// GetSSHPrivateKey returns the server's SSH private key from DB.
-func (s *LocalSetupService) GetSSHPrivateKey() (string, error) {
-	settings, err := db.GetSettings()
-	if err != nil {
-		return "", err
 	}
-	return settings.SSHPrivateKey, nil
+	if key, kerr := db.GetDefaultSSHKey(); kerr == nil {
+		status.SSHPublicKey = key.PublicKey
+	}
+	return status, nil
 }
 
-// GenerateSSHKey creates a new RSA 4096-bit keypair, stores it in settings, and returns the public key.
-func (s *LocalSetupService) GenerateSSHKey() (string, error) {
+// ListSSHKeys returns all stored SSH key records (private keys excluded).
+func (s *LocalSetupService) ListSSHKeys() ([]db.SSHKey, error) {
+	return db.GetSSHKeys()
+}
+
+// GenerateSSHKey generates a new RSA 4096-bit key pair, stores it, and optionally sets it as default.
+func (s *LocalSetupService) GenerateSSHKey(name string, setDefault bool) (*db.SSHKey, error) {
 	privKey, pubKey, err := sshpkg.GenerateRSAKeypair()
 	if err != nil {
-		return "", fmt.Errorf("failed to generate SSH keypair: %w", err)
+		return nil, fmt.Errorf("failed to generate SSH keypair: %w", err)
 	}
-	settings, err := db.GetSettings()
-	if err != nil {
-		return "", err
-	}
-	settings.SSHPublicKey = pubKey
-	settings.SSHPrivateKey = privKey
-	if err := db.SaveSettings(settings); err != nil {
-		return "", err
-	}
-	return pubKey, nil
+	return s.storeSSHKey(name, privKey, pubKey, setDefault)
 }
 
-// SetSSHKey validates that privateKey and publicKey form a matching pair, then stores them.
-func (s *LocalSetupService) SetSSHKey(privateKey, publicKey string) error {
+// AddSSHKey validates an uploaded key pair and stores it.
+func (s *LocalSetupService) AddSSHKey(name, privateKey, publicKey string, setDefault bool) (*db.SSHKey, error) {
 	if err := sshpkg.ValidateKeyPair(privateKey, publicKey); err != nil {
-		return err
+		return nil, err
 	}
-	settings, err := db.GetSettings()
+	return s.storeSSHKey(name, privateKey, publicKey, setDefault)
+}
+
+func (s *LocalSetupService) storeSSHKey(name, privKey, pubKey string, setDefault bool) (*db.SSHKey, error) {
+	key := &db.SSHKey{
+		ID:         shortToken(),
+		Name:       name,
+		PublicKey:  pubKey,
+		PrivateKey: privKey,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	if err := db.CreateSSHKey(key); err != nil {
+		return nil, err
+	}
+	// First key ever, or explicitly requested — set as default.
+	count, _ := db.CountSSHKeys()
+	if setDefault || count == 1 {
+		if err := db.SetDefaultSSHKey(key.ID); err != nil {
+			return nil, err
+		}
+		key.IsDefault = true
+	}
+	return key, nil
+}
+
+// DeleteSSHKey refuses if machines still reference the key.
+func (s *LocalSetupService) DeleteSSHKey(id string) error {
+	n, err := db.CountMachinesUsingKey(id)
 	if err != nil {
 		return err
 	}
-	settings.SSHPublicKey = publicKey
-	settings.SSHPrivateKey = privateKey
-	return db.SaveSettings(settings)
+	if n > 0 {
+		return fmt.Errorf("%d machine(s) still use this key; reassign them first", n)
+	}
+	return db.DeleteSSHKeyByID(id)
+}
+
+// SetDefaultSSHKey marks the given key as the default for new bootstraps.
+func (s *LocalSetupService) SetDefaultSSHKey(id string) error {
+	if _, err := db.GetSSHKey(id); err != nil {
+		return err
+	}
+	return db.SetDefaultSSHKey(id)
+}
+
+// DownloadSSHKey returns the private key PEM for the given key ID.
+func (s *LocalSetupService) DownloadSSHKey(id string) (string, error) {
+	key, err := db.GetSSHKey(id)
+	if err != nil {
+		return "", err
+	}
+	return key.PrivateKey, nil
 }
 
 // writeLocalFile writes content to path. If the direct write fails due to

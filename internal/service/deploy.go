@@ -153,10 +153,15 @@ func (s *DeployService) DeployClient(machine *db.Machine) error {
 		return err
 	}
 
+	var sshKey *db.SSHKey
+	if machine.TunnelPort > 0 {
+		sshKey, _ = db.GetSSHKeyForMachine(machine)
+	}
+
 	var client *sshpkg.SSHClient
-	if machine.TunnelPort > 0 && settings.SSHPrivateKey != "" {
+	if machine.TunnelPort > 0 && sshKey != nil {
 		fmt.Fprintln(w, "Connecting to machine via tunnel...")
-		client, err = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
+		client, err = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 	} else if machine.Host != "" {
 		fmt.Fprintln(w, "Connecting directly to machine...")
 		client, err = sshpkg.NewClient(machine.Host, machine.Port, machine.Username, machine.PrivateKey)

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/smalex-z/gopher/internal/api/dto"
@@ -128,15 +129,18 @@ func (s *MachineService) Status(id string) (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	settings, _ := db.GetSettings()
-
 	var client *sshpkg.SSHClient
-	if settings != nil && machine.TunnelPort > 0 && settings.SSHPrivateKey != "" {
-		client, err = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
-	} else if machine.Host != "" {
-		client, err = sshpkg.NewClient(machine.Host, machine.Port, machine.Username, machine.PrivateKey)
-	} else {
-		return map[string]interface{}{"id": id, "connected": false, "error": "no ssh access method"}, nil
+	if machine.TunnelPort > 0 {
+		if sshKey, kerr := db.GetSSHKeyForMachine(machine); kerr == nil {
+			client, err = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
+		}
+	}
+	if client == nil {
+		if machine.Host != "" {
+			client, err = sshpkg.NewClient(machine.Host, machine.Port, machine.Username, machine.PrivateKey)
+		} else {
+			return map[string]interface{}{"id": id, "connected": false, "error": "no ssh access method"}, nil
+		}
 	}
 	if err != nil {
 		return map[string]interface{}{
@@ -158,4 +162,45 @@ func (s *MachineService) Status(id string) (map[string]interface{}, error) {
 		"connected":      true,
 		"rathole_status": status,
 	}, nil
+}
+
+// ReassignSSHKey installs newKeyID's public key on the machine (via its current
+// key) and updates the machine record. The old key is left in authorized_keys so
+// access is never lost if something goes wrong.
+func (s *MachineService) ReassignSSHKey(machineID, newKeyID string) error {
+	machine, err := db.GetMachine(machineID)
+	if err != nil {
+		return err
+	}
+	newKey, err := db.GetSSHKey(newKeyID)
+	if err != nil {
+		return err
+	}
+
+	// Connect using the current key.
+	currentKey, err := db.GetSSHKeyForMachine(machine)
+	if err != nil {
+		return fmt.Errorf("cannot determine current SSH key: %w", err)
+	}
+	if machine.TunnelPort == 0 {
+		return fmt.Errorf("machine has no active tunnel — cannot push key")
+	}
+	client, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, currentKey.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("failed to connect to machine: %w", err)
+	}
+	defer client.Close()
+
+	// Append the new public key (idempotent).
+	appendCmd := fmt.Sprintf(
+		`grep -qF %q ~/.ssh/authorized_keys 2>/dev/null || echo %q >> ~/.ssh/authorized_keys`,
+		newKey.PublicKey, newKey.PublicKey,
+	)
+	if _, err := client.Execute(appendCmd); err != nil {
+		return fmt.Errorf("failed to install new key on machine: %w", err)
+	}
+
+	machine.SSHKeyID = newKeyID
+	machine.UpdatedAt = time.Now()
+	return db.UpdateMachine(machine)
 }

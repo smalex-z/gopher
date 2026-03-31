@@ -151,7 +151,8 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	}
 
 	// --- 3. SSH into client and update client.toml ---
-	if settings.SSHPrivateKey == "" {
+	sshKey, sshKeyErr := db.GetSSHKeyForMachine(machine)
+	if sshKeyErr != nil {
 		return fmt.Errorf("no server SSH key available; machine may need to be re-bootstrapped")
 	}
 	var sshClient *sshpkg.SSHClient
@@ -160,7 +161,7 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		if attempt > 0 {
 			time.Sleep(5 * time.Second)
 		}
-		sshClient, sshDialErr = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
+		sshClient, sshDialErr = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 		if sshDialErr == nil {
 			break
 		}
@@ -218,12 +219,11 @@ func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine
 	if tunnel == nil || machine == nil {
 		return nil
 	}
-	settings, err := db.GetSettings()
-	if err != nil || settings.SSHPrivateKey == "" {
+	sshKey, err := db.GetSSHKeyForMachine(machine)
+	if err != nil {
 		return nil
 	}
-
-	sshClient, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
+	sshClient, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 	if err != nil {
 		return err
 	}
@@ -285,15 +285,15 @@ func (s *LocalSetupService) RemoveServiceTunnel(tunnel *db.Tunnel, machine *db.M
 //
 // Errors are best-effort — callers should proceed with DB cleanup even on failure.
 func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
-	settings, err := db.GetSettings()
-	if err != nil || settings.SSHPrivateKey == "" {
+	sshKey, err := db.GetSSHKeyForMachine(machine)
+	if err != nil {
 		return fmt.Errorf("no server SSH key available")
 	}
 	if machine.TunnelPort == 0 {
 		return fmt.Errorf("machine has no tunnel port")
 	}
 
-	sshClient, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
+	sshClient, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 	if err != nil {
 		return fmt.Errorf("failed to SSH into machine via tunnel (port %d): %w", machine.TunnelPort, err)
 	}
@@ -308,10 +308,10 @@ func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
 	}
 
 	// Remove the VPS public key from authorized_keys.
-	if settings.SSHPublicKey != "" {
+	if sshKey.PublicKey != "" {
 		akContent, readErr := sshClient.Execute("cat " + homeDir + "/.ssh/authorized_keys 2>/dev/null")
 		if readErr == nil {
-			filtered := removeSSHPublicKey(akContent, settings.SSHPublicKey)
+			filtered := removeSSHPublicKey(akContent, sshKey.PublicKey)
 			_ = sshClient.UploadFile([]byte(filtered), homeDir+"/.ssh/authorized_keys")
 		}
 	}

@@ -21,15 +21,16 @@ func NewBootstrapService(local *LocalSetupService) *BootstrapService {
 }
 
 // GenerateToken creates a one-time bootstrap token valid for 1 hour.
-// tunnelPort optionally pre-assigns the SSH tunnel port for the machine;
-// pass 0 to auto-allocate from the next available port.
-func (s *BootstrapService) GenerateToken(tunnelPort int) (*db.BootstrapToken, error) {
+// tunnelPort optionally pre-assigns the SSH tunnel port (0 = auto-allocate).
+// sshKeyID optionally pins the SSH key to install on the machine (empty = use default).
+func (s *BootstrapService) GenerateToken(tunnelPort int, sshKeyID string) (*db.BootstrapToken, error) {
 	bt := &db.BootstrapToken{
 		ID:         shortToken(),
 		Token:      shortToken(),
 		ExpiresAt:  time.Now().Add(time.Hour),
 		CreatedAt:  time.Now(),
 		TunnelPort: tunnelPort,
+		SSHKeyID:   sshKeyID,
 	}
 	if err := db.CreateBootstrapToken(bt); err != nil {
 		return nil, err
@@ -59,20 +60,33 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		return nil, fmt.Errorf("invalid or expired token")
 	}
 
-	// Ensure the server has an SSH keypair for connecting back to machines.
-	settings, err := db.GetSettings()
-	if err != nil {
-		return nil, fmt.Errorf("settings unavailable: %w", err)
+	// Retrieve the SSH key to use: token-pinned key → default → auto-generate.
+	var sshKey *db.SSHKey
+	if bt.SSHKeyID != "" {
+		sshKey, err = db.GetSSHKey(bt.SSHKeyID)
+		if err != nil {
+			return nil, fmt.Errorf("specified SSH key not found: %w", err)
+		}
+	} else {
+		sshKey, err = db.GetDefaultSSHKey()
 	}
-	if settings.SSHPublicKey == "" {
+	if err != nil {
+		// No key yet (user skipped setup step 3) — auto-generate one.
 		privKey, pubKey, kerr := sshpkg.GenerateRSAKeypair()
 		if kerr != nil {
 			return nil, fmt.Errorf("failed to generate SSH keypair: %w", kerr)
 		}
-		settings.SSHPublicKey = pubKey
-		settings.SSHPrivateKey = privKey
-		if err := db.SaveSettings(settings); err != nil {
-			return nil, fmt.Errorf("failed to save SSH keypair: %w", err)
+		sshKey = &db.SSHKey{
+			ID:         shortToken(),
+			Name:       "Auto-generated",
+			PublicKey:  pubKey,
+			PrivateKey: privKey,
+			IsDefault:  true,
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+		}
+		if kerr := db.CreateSSHKey(sshKey); kerr != nil {
+			return nil, fmt.Errorf("failed to save SSH keypair: %w", kerr)
 		}
 	}
 
@@ -94,6 +108,7 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		Username:        req.Username,
 		TunnelPort:      tunnelPort,
 		RatholeSSHToken: ratholeToken,
+		SSHKeyID:        sshKey.ID,
 		Status:          "pending",
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
@@ -119,12 +134,12 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 	ratholeConfig := config.GenerateMachineSSHClientConfig(ratholeHost, machine)
 
 	// Async: wait for tunnel then verify SSH connectivity.
-	go s.awaitSSHHealth(machine, settings.SSHPrivateKey)
+	go s.awaitSSHHealth(machine, sshKey.PrivateKey)
 
 	return &BootstrapResponse{
 		TunnelPort:    tunnelPort,
 		RatholeToken:  ratholeToken,
-		VPSPublicKey:  settings.SSHPublicKey,
+		VPSPublicKey:  sshKey.PublicKey,
 		RatholeConfig: ratholeConfig,
 		VPSHost:       ratholeHost,
 	}, nil

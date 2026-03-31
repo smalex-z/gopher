@@ -19,6 +19,7 @@ export interface Machine {
   private_key?: string
   tunnel_port: number
   rathole_ssh_token?: string
+  ssh_key_id?: string
   status: string
   last_seen: string | null
   created_at: string
@@ -37,6 +38,16 @@ export interface Tunnel {
   status: string
   managed?: boolean
   kind?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface SSHKey {
+  id: string
+  name: string
+  public_key: string
+  is_default: boolean
+  machine_count?: number
   created_at: string
   updated_at: string
 }

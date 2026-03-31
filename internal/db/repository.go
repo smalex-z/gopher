@@ -144,6 +144,79 @@ func GetAllTunnelsForVPS() ([]Tunnel, error) {
 	return tunnels, nil
 }
 
+// SSH Key Repository
+
+func GetSSHKeys() ([]SSHKey, error) {
+	var keys []SSHKey
+	if err := DB.Order("created_at ASC").Find(&keys).Error; err != nil {
+		return nil, err
+	}
+	return keys, nil
+}
+
+func GetSSHKey(id string) (*SSHKey, error) {
+	var key SSHKey
+	if err := DB.First(&key, "id = ?", id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "ssh_key", ID: id}
+		}
+		return nil, err
+	}
+	return &key, nil
+}
+
+func GetDefaultSSHKey() (*SSHKey, error) {
+	var key SSHKey
+	if err := DB.Where("is_default = ?", true).First(&key).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "ssh_key", ID: "default"}
+		}
+		return nil, err
+	}
+	return &key, nil
+}
+
+func CreateSSHKey(key *SSHKey) error {
+	return DB.Create(key).Error
+}
+
+func UpdateSSHKey(key *SSHKey) error {
+	return DB.Save(key).Error
+}
+
+func DeleteSSHKeyByID(id string) error {
+	return DB.Delete(&SSHKey{}, "id = ?", id).Error
+}
+
+func SetDefaultSSHKey(id string) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&SSHKey{}).Where("is_default = ?", true).Update("is_default", false).Error; err != nil {
+			return err
+		}
+		return tx.Model(&SSHKey{}).Where("id = ?", id).Update("is_default", true).Error
+	})
+}
+
+func CountSSHKeys() (int64, error) {
+	var count int64
+	return count, DB.Model(&SSHKey{}).Count(&count).Error
+}
+
+func CountMachinesUsingKey(keyID string) (int64, error) {
+	var count int64
+	return count, DB.Model(&Machine{}).Where("ssh_key_id = ?", keyID).Count(&count).Error
+}
+
+func GetSSHKeyForMachine(machine *Machine) (*SSHKey, error) {
+	if machine.SSHKeyID != "" {
+		key, err := GetSSHKey(machine.SSHKeyID)
+		if err == nil {
+			return key, nil
+		}
+	}
+	return GetDefaultSSHKey()
+}
+
 // Bootstrap Token Repository
 
 func CreateBootstrapToken(t *BootstrapToken) error {
