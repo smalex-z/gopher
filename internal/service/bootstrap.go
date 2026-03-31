@@ -21,12 +21,15 @@ func NewBootstrapService(local *LocalSetupService) *BootstrapService {
 }
 
 // GenerateToken creates a one-time bootstrap token valid for 1 hour.
-func (s *BootstrapService) GenerateToken() (*db.BootstrapToken, error) {
+// tunnelPort optionally pre-assigns the SSH tunnel port for the machine;
+// pass 0 to auto-allocate from the next available port.
+func (s *BootstrapService) GenerateToken(tunnelPort int) (*db.BootstrapToken, error) {
 	bt := &db.BootstrapToken{
-		ID:        shortToken(),
-		Token:     shortToken(),
-		ExpiresAt: time.Now().Add(time.Hour),
-		CreatedAt: time.Now(),
+		ID:         shortToken(),
+		Token:      shortToken(),
+		ExpiresAt:  time.Now().Add(time.Hour),
+		CreatedAt:  time.Now(),
+		TunnelPort: tunnelPort,
 	}
 	if err := db.CreateBootstrapToken(bt); err != nil {
 		return nil, err
@@ -73,9 +76,14 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		}
 	}
 
-	tunnelPort, err := db.NextSSHTunnelPort()
-	if err != nil {
-		return nil, fmt.Errorf("failed to allocate tunnel port: %w", err)
+	var tunnelPort int
+	if bt.TunnelPort != 0 {
+		tunnelPort = bt.TunnelPort
+	} else {
+		tunnelPort, err = db.NextSSHTunnelPort()
+		if err != nil {
+			return nil, fmt.Errorf("failed to allocate tunnel port: %w", err)
+		}
 	}
 
 	ratholeToken := shortToken()

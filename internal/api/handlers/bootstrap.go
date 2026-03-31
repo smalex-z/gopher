@@ -50,7 +50,13 @@ func hostURL(r *http.Request) string {
 
 // POST /api/bootstrap/token - generate a one-time bootstrap token
 func (h *BootstrapHandler) GenerateToken(w http.ResponseWriter, r *http.Request) {
-	bt, err := h.svc.GenerateToken()
+	var req struct {
+		TunnelPort int `json:"tunnel_port"`
+	}
+	// Body is optional; ignore decode errors so a plain POST with no body still works.
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	bt, err := h.svc.GenerateToken(req.TunnelPort)
 	if err != nil {
 		response.InternalError(w, err.Error())
 		return

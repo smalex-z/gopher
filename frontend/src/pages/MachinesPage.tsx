@@ -15,6 +15,8 @@ export default function MachinesPage() {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const [bootstrapModal, setBootstrapModal] = useState<BootstrapModal>({ isOpen: false, command: '', token: '', expiresAt: '' })
+  const [configModal, setConfigModal] = useState(false)
+  const [tunnelPortInput, setTunnelPortInput] = useState('')
   const [copied, setCopied] = useState(false)
   const [tokenLoading, setTokenLoading] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -34,11 +36,18 @@ export default function MachinesPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
+  const openConfigModal = () => {
+    setTunnelPortInput('')
+    setConfigModal(true)
+  }
+
   const generateToken = async () => {
+    const port = tunnelPortInput ? parseInt(tunnelPortInput, 10) : undefined
     setTokenLoading(true)
     try {
-      const result = await vpsApi.generateToken()
+      const result = await vpsApi.generateToken(port)
       if (result?.data) {
+        setConfigModal(false)
         setBootstrapModal({
           isOpen: true,
           command: result.data.bootstrap_command,
@@ -88,11 +97,10 @@ export default function MachinesPage() {
           <p className="text-gray-500 mt-1">Servers registered via bootstrap tunnel</p>
         </div>
         <button
-          onClick={generateToken}
-          disabled={tokenLoading}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50"
+          onClick={openConfigModal}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
         >
-          {tokenLoading ? 'Generating...' : '+ Bootstrap New Machine'}
+          + Bootstrap New Machine
         </button>
       </div>
 
@@ -104,11 +112,10 @@ export default function MachinesPage() {
             Generate a bootstrap token and run the script on any machine to register it automatically via reverse SSH tunnel.
           </p>
           <button
-            onClick={generateToken}
-            disabled={tokenLoading}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50"
+            onClick={openConfigModal}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
           >
-            {tokenLoading ? 'Generating...' : 'Generate Bootstrap Token'}
+            Generate Bootstrap Token
           </button>
         </div>
       ) : (
@@ -205,6 +212,55 @@ export default function MachinesPage() {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Bootstrap Config Modal */}
+      {configModal && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm">
+            <div className="flex items-center justify-between p-4 border-b">
+              <h2 className="text-lg font-semibold">Bootstrap New Machine</h2>
+              <button
+                onClick={() => setConfigModal(false)}
+                className="text-gray-400 hover:text-gray-600 text-xl"
+              >
+                ×
+              </button>
+            </div>
+            <div className="p-4 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  SSH Tunnel Port <span className="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <input
+                  type="number"
+                  value={tunnelPortInput}
+                  onChange={e => setTunnelPortInput(e.target.value)}
+                  placeholder="Auto-assign"
+                  min={1}
+                  max={65535}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p className="text-xs text-gray-400 mt-1">Leave blank to auto-assign the next available port.</p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 p-4 border-t">
+              <button
+                onClick={() => setConfigModal(false)}
+                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={generateToken}
+                disabled={tokenLoading}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50"
+              >
+                {tokenLoading ? 'Generating...' : 'Generate Token'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -117,7 +117,7 @@ if ! command -v rathole &>/dev/null && [ ! -f "$HOME/.local/bin/rathole" ]; then
   fi
   if ! command -v unzip &>/dev/null; then
     echo "  unzip not found, trying apt..."
-    if [ "$HAS_SUDO" = true ]; then sudo apt-get install -y unzip -qq; else echo "ERROR: unzip not available and cannot install (no sudo). Install unzip manually."; exit 1; fi
+    sudo apt-get install -y unzip -qq || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
   fi
   unzip -q /tmp/rathole-dl/rathole.zip -d /tmp/rathole-dl/ || { echo "ERROR: unzip failed"; exit 1; }
 

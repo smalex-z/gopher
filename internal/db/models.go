@@ -48,12 +48,13 @@ type Tunnel struct {
 }
 
 type BootstrapToken struct {
-	ID        string     `json:"id" gorm:"primaryKey"`
-	Token     string     `json:"token" gorm:"uniqueIndex"`
-	ExpiresAt time.Time  `json:"expires_at"`
-	UsedAt    *time.Time `json:"used_at"`
-	MachineID *string    `json:"machine_id"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID          string     `json:"id" gorm:"primaryKey"`
+	Token       string     `json:"token" gorm:"uniqueIndex"`
+	ExpiresAt   time.Time  `json:"expires_at"`
+	UsedAt      *time.Time `json:"used_at"`
+	MachineID   *string    `json:"machine_id"`
+	TunnelPort  int        `json:"tunnel_port"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 type AppSettings struct {
