@@ -21,6 +21,8 @@ export default function MachinesPage() {
   const [copied, setCopied] = useState(false)
   const [tokenLoading, setTokenLoading] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [reassigning, setReassigning] = useState<string | null>(null) // machine ID being reassigned
+  const [reassignKeyID, setReassignKeyID] = useState('')
 
   const { data, isLoading } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list() })
   const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
@@ -35,6 +37,18 @@ export default function MachinesPage() {
       qc.invalidateQueries({ queryKey: ['machines'] })
       qc.invalidateQueries({ queryKey: ['tunnels'] })
       toast.success('Machine deleted.')
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const reassignMutation = useMutation({
+    mutationFn: ({ machineId, keyId }: { machineId: string; keyId: string }) =>
+      machinesApi.reassignSSHKey(machineId, keyId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['machines'] })
+      qc.invalidateQueries({ queryKey: ['ssh-keys'] })
+      setReassigning(null)
+      toast.success('SSH key updated — new key installed on machine.')
     },
     onError: (e: Error) => toast.error(e.message),
   })
@@ -173,15 +187,57 @@ export default function MachinesPage() {
                       <tr className="bg-gray-50">
                         <td /> {/* chevron col */}
                         <td colSpan={5} className="px-4 py-3">
-                          {m.ssh_key_id && (() => {
-                            const k = sshKeys.find(k => k.id === m.ssh_key_id)
-                            return k ? (
-                              <div className="flex items-center gap-1.5 text-xs text-gray-500 mb-2">
-                                <Key size={11} className="text-gray-400" />
-                                SSH key: <span className="font-medium text-gray-700">{k.name}</span>
-                              </div>
-                            ) : null
-                          })()}
+                          {/* SSH key row */}
+                          <div className="flex items-center gap-2 mb-2">
+                            <Key size={11} className="text-gray-400 shrink-0" />
+                            {reassigning === m.id ? (
+                              <>
+                                <select
+                                  value={reassignKeyID}
+                                  onChange={e => setReassignKeyID(e.target.value)}
+                                  className="border border-gray-300 rounded px-2 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
+                                  autoFocus
+                                >
+                                  <option value="">Select a key…</option>
+                                  {sshKeys.filter(k => k.id !== m.ssh_key_id).map(k => (
+                                    <option key={k.id} value={k.id}>
+                                      {k.name}{k.is_default ? ' (default)' : ''}
+                                    </option>
+                                  ))}
+                                </select>
+                                <button
+                                  onClick={() => { if (reassignKeyID) reassignMutation.mutate({ machineId: m.id, keyId: reassignKeyID }) }}
+                                  disabled={!reassignKeyID || reassignMutation.isPending}
+                                  className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+                                >
+                                  {reassignMutation.isPending ? 'Saving…' : 'Save'}
+                                </button>
+                                <button
+                                  onClick={() => setReassigning(null)}
+                                  className="text-xs text-gray-400 hover:text-gray-600"
+                                >
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <span className="text-xs text-gray-500">
+                                  SSH key:{' '}
+                                  <span className="font-medium text-gray-700">
+                                    {sshKeys.find(k => k.id === m.ssh_key_id)?.name ?? (m.ssh_key_id ? 'Unknown' : 'None')}
+                                  </span>
+                                </span>
+                                {sshKeys.length > 1 && (
+                                  <button
+                                    onClick={() => { setReassigning(m.id); setReassignKeyID('') }}
+                                    className="text-xs text-blue-600 hover:text-blue-800"
+                                  >
+                                    Change
+                                  </button>
+                                )}
+                              </>
+                            )}
+                          </div>
                           <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Tunnels</div>
                           <div className="space-y-1">
                             {/* Built-in SSH tunnel */}

@@ -378,8 +378,8 @@ export default function SSHKeysPage() {
                             deleteMutation.mutate(key.id)
                           }
                         }}
-                        disabled={deleteMutation.isPending}
-                        title="Delete key"
+                        disabled={deleteMutation.isPending || (key.machine_count ?? 0) > 0}
+                        title={(key.machine_count ?? 0) > 0 ? `${key.machine_count} machine(s) still use this key` : 'Delete key'}
                         className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         <Trash2 size={14} />

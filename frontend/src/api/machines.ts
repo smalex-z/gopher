@@ -9,4 +9,5 @@ export const machinesApi = {
   delete: (id: string) => client.delete(`/machines/${id}`).then(r => r.data),
   deploy: (id: string) => client.post(`/machines/${id}/deploy`).then(r => r.data),
   status: (id: string) => client.get(`/machines/${id}/status`).then(r => r.data),
+  reassignSSHKey: (id: string, sshKeyID: string) => client.put(`/machines/${id}/ssh-key`, { ssh_key_id: sshKeyID }).then(r => r.data),
 }

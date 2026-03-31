@@ -91,6 +91,7 @@ func NewRouter(
 				r.Delete("/{id}", machineH.Delete)
 				r.Post("/{id}/deploy", machineH.Deploy)
 				r.Get("/{id}/status", machineH.Status)
+				r.Put("/{id}/ssh-key", machineH.ReassignSSHKey)
 			})
 
 			r.Route("/tunnels", func(r chi.Router) {
