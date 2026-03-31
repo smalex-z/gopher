@@ -1,13 +1,13 @@
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Server, Copy, Check, ChevronDown, ChevronRight, Plus } from 'lucide-react'
+import { Server, Copy, Check, ChevronDown, ChevronRight, Plus, Key } from 'lucide-react'
 import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
 import { vpsApi } from '../api/vps'
 import StatusBadge from '../components/StatusBadge'
 import { toast } from '../lib/toast'
-import type { Machine, Tunnel } from '../types'
+import type { Machine, Tunnel, SSHKey } from '../types'
 
 interface BootstrapModal { isOpen: boolean; command: string; token: string; expiresAt: string }
 
@@ -17,13 +17,16 @@ export default function MachinesPage() {
   const [bootstrapModal, setBootstrapModal] = useState<BootstrapModal>({ isOpen: false, command: '', token: '', expiresAt: '' })
   const [configModal, setConfigModal] = useState(false)
   const [tunnelPortInput, setTunnelPortInput] = useState('')
+  const [sshKeyInput, setSSHKeyInput] = useState('')
   const [copied, setCopied] = useState(false)
   const [tokenLoading, setTokenLoading] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const { data, isLoading } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list() })
   const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
+  const { data: keysRes } = useQuery({ queryKey: ['ssh-keys'], queryFn: () => localApi.listSSHKeys() })
   const machines: Machine[] = data?.data ?? []
+  const sshKeys: SSHKey[] = keysRes?.data ?? []
   const domain = localStatus?.domain ?? ''
 
   const deleteMutation = useMutation({
@@ -38,14 +41,16 @@ export default function MachinesPage() {
 
   const openConfigModal = () => {
     setTunnelPortInput('')
+    setSSHKeyInput('')
     setConfigModal(true)
   }
 
   const generateToken = async () => {
     const port = tunnelPortInput ? parseInt(tunnelPortInput, 10) : undefined
+    const keyID = sshKeyInput || undefined
     setTokenLoading(true)
     try {
-      const result = await vpsApi.generateToken(port)
+      const result = await vpsApi.generateToken(port, keyID)
       if (result?.data) {
         setConfigModal(false)
         setBootstrapModal({
@@ -168,6 +173,15 @@ export default function MachinesPage() {
                       <tr className="bg-gray-50">
                         <td /> {/* chevron col */}
                         <td colSpan={5} className="px-4 py-3">
+                          {m.ssh_key_id && (() => {
+                            const k = sshKeys.find(k => k.id === m.ssh_key_id)
+                            return k ? (
+                              <div className="flex items-center gap-1.5 text-xs text-gray-500 mb-2">
+                                <Key size={11} className="text-gray-400" />
+                                SSH key: <span className="font-medium text-gray-700">{k.name}</span>
+                              </div>
+                            ) : null
+                          })()}
                           <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Tunnels</div>
                           <div className="space-y-1">
                             {/* Built-in SSH tunnel */}
@@ -229,6 +243,24 @@ export default function MachinesPage() {
               </button>
             </div>
             <div className="p-4 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  SSH Key <span className="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <select
+                  value={sshKeyInput}
+                  onChange={e => setSSHKeyInput(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                >
+                  <option value="">Use default key</option>
+                  {sshKeys.map(k => (
+                    <option key={k.id} value={k.id}>
+                      {k.name}{k.is_default ? ' (default)' : ''}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-gray-400 mt-1">The selected key's public key will be installed on the machine.</p>
+              </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   SSH Tunnel Port <span className="text-gray-400 font-normal">(optional)</span>

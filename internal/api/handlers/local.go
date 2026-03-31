@@ -12,6 +12,7 @@ import (
 
 	chi "github.com/go-chi/chi/v5"
 	"github.com/smalex-z/gopher/internal/api/response"
+	"github.com/smalex-z/gopher/internal/db"
 	"github.com/smalex-z/gopher/internal/service"
 )
 
@@ -74,14 +75,24 @@ func (h *LocalHandler) Reconcile(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, map[string]string{"message": "server config reconciled"})
 }
 
-// GET /api/local/ssh-keys — list all key records (no private keys)
+type sshKeyWithStats struct {
+	db.SSHKey
+	MachineCount int64 `json:"machine_count"`
+}
+
+// GET /api/local/ssh-keys — list all key records with machine counts (no private keys)
 func (h *LocalHandler) ListSSHKeys(w http.ResponseWriter, r *http.Request) {
 	keys, err := h.svc.ListSSHKeys()
 	if err != nil {
 		response.InternalError(w, err.Error())
 		return
 	}
-	response.Success(w, keys)
+	result := make([]sshKeyWithStats, len(keys))
+	for i, k := range keys {
+		count, _ := db.CountMachinesUsingKey(k.ID)
+		result[i] = sshKeyWithStats{SSHKey: k, MachineCount: count}
+	}
+	response.Success(w, result)
 }
 
 // POST /api/local/ssh-keys/generate — generate a new key pair

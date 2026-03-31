@@ -47,6 +47,7 @@ export interface SSHKey {
   name: string
   public_key: string
   is_default: boolean
+  machine_count?: number
   created_at: string
   updated_at: string
 }

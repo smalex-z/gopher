@@ -21,15 +21,16 @@ func NewBootstrapService(local *LocalSetupService) *BootstrapService {
 }
 
 // GenerateToken creates a one-time bootstrap token valid for 1 hour.
-// tunnelPort optionally pre-assigns the SSH tunnel port for the machine;
-// pass 0 to auto-allocate from the next available port.
-func (s *BootstrapService) GenerateToken(tunnelPort int) (*db.BootstrapToken, error) {
+// tunnelPort optionally pre-assigns the SSH tunnel port (0 = auto-allocate).
+// sshKeyID optionally pins the SSH key to install on the machine (empty = use default).
+func (s *BootstrapService) GenerateToken(tunnelPort int, sshKeyID string) (*db.BootstrapToken, error) {
 	bt := &db.BootstrapToken{
 		ID:         shortToken(),
 		Token:      shortToken(),
 		ExpiresAt:  time.Now().Add(time.Hour),
 		CreatedAt:  time.Now(),
 		TunnelPort: tunnelPort,
+		SSHKeyID:   sshKeyID,
 	}
 	if err := db.CreateBootstrapToken(bt); err != nil {
 		return nil, err
@@ -59,8 +60,16 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		return nil, fmt.Errorf("invalid or expired token")
 	}
 
-	// Retrieve or lazily create the default SSH key for connecting back to machines.
-	sshKey, err := db.GetDefaultSSHKey()
+	// Retrieve the SSH key to use: token-pinned key → default → auto-generate.
+	var sshKey *db.SSHKey
+	if bt.SSHKeyID != "" {
+		sshKey, err = db.GetSSHKey(bt.SSHKeyID)
+		if err != nil {
+			return nil, fmt.Errorf("specified SSH key not found: %w", err)
+		}
+	} else {
+		sshKey, err = db.GetDefaultSSHKey()
+	}
 	if err != nil {
 		// No key yet (user skipped setup step 3) — auto-generate one.
 		privKey, pubKey, kerr := sshpkg.GenerateRSAKeypair()

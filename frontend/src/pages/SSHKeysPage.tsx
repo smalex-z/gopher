@@ -337,11 +337,16 @@ export default function SSHKeysPage() {
               {keys.map(key => (
                 <tr key={key.id} className="hover:bg-gray-50 transition-colors">
                   <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium text-gray-900">{key.name}</span>
                       {key.is_default && (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
                           <Star size={10} fill="currentColor" /> Default
+                        </span>
+                      )}
+                      {(key.machine_count ?? 0) > 0 && (
+                        <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
+                          {key.machine_count} machine{key.machine_count !== 1 ? 's' : ''}
                         </span>
                       )}
                     </div>
