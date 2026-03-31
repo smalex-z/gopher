@@ -59,20 +59,25 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		return nil, fmt.Errorf("invalid or expired token")
 	}
 
-	// Ensure the server has an SSH keypair for connecting back to machines.
-	settings, err := db.GetSettings()
+	// Retrieve or lazily create the default SSH key for connecting back to machines.
+	sshKey, err := db.GetDefaultSSHKey()
 	if err != nil {
-		return nil, fmt.Errorf("settings unavailable: %w", err)
-	}
-	if settings.SSHPublicKey == "" {
+		// No key yet (user skipped setup step 3) — auto-generate one.
 		privKey, pubKey, kerr := sshpkg.GenerateRSAKeypair()
 		if kerr != nil {
 			return nil, fmt.Errorf("failed to generate SSH keypair: %w", kerr)
 		}
-		settings.SSHPublicKey = pubKey
-		settings.SSHPrivateKey = privKey
-		if err := db.SaveSettings(settings); err != nil {
-			return nil, fmt.Errorf("failed to save SSH keypair: %w", err)
+		sshKey = &db.SSHKey{
+			ID:         shortToken(),
+			Name:       "Auto-generated",
+			PublicKey:  pubKey,
+			PrivateKey: privKey,
+			IsDefault:  true,
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+		}
+		if kerr := db.CreateSSHKey(sshKey); kerr != nil {
+			return nil, fmt.Errorf("failed to save SSH keypair: %w", kerr)
 		}
 	}
 
@@ -94,6 +99,7 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		Username:        req.Username,
 		TunnelPort:      tunnelPort,
 		RatholeSSHToken: ratholeToken,
+		SSHKeyID:        sshKey.ID,
 		Status:          "pending",
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
@@ -119,12 +125,12 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 	ratholeConfig := config.GenerateMachineSSHClientConfig(ratholeHost, machine)
 
 	// Async: wait for tunnel then verify SSH connectivity.
-	go s.awaitSSHHealth(machine, settings.SSHPrivateKey)
+	go s.awaitSSHHealth(machine, sshKey.PrivateKey)
 
 	return &BootstrapResponse{
 		TunnelPort:    tunnelPort,
 		RatholeToken:  ratholeToken,
-		VPSPublicKey:  settings.SSHPublicKey,
+		VPSPublicKey:  sshKey.PublicKey,
 		RatholeConfig: ratholeConfig,
 		VPSHost:       ratholeHost,
 	}, nil

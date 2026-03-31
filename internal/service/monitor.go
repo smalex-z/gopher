@@ -47,12 +47,14 @@ func (s *MonitorService) checkMachines() {
 }
 
 func (s *MonitorService) checkMachine(machine db.Machine) {
-	settings, err := db.GetSettings()
-	if err != nil || settings.SSHPrivateKey == "" || machine.TunnelPort == 0 || machine.Username == "" {
+	if machine.TunnelPort == 0 || machine.Username == "" {
 		return
 	}
-
-	client, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
+	sshKey, err := db.GetSSHKeyForMachine(&machine)
+	if err != nil {
+		return
+	}
+	client, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 	if err != nil {
 		return
 	}

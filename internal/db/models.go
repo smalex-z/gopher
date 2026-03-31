@@ -24,6 +24,7 @@ type Machine struct {
 	PrivateKey      string     `json:"private_key,omitempty"`
 	TunnelPort      int        `json:"tunnel_port"`
 	RatholeSSHToken string     `json:"rathole_ssh_token,omitempty"`
+	SSHKeyID        string     `json:"ssh_key_id" gorm:"index"`
 	Status          string     `json:"status"`
 	LastSeen        *time.Time `json:"last_seen"`
 	CreatedAt       time.Time  `json:"created_at"`
@@ -63,8 +64,16 @@ type AppSettings struct {
 	IsSetup        bool      `json:"is_setup"`
 	Domain         string    `json:"domain"`
 	LocalSetupDone bool      `json:"local_setup_done"`
-	SSHPublicKey   string    `json:"ssh_public_key"`
-	SSHPrivateKey  string    `json:"-" gorm:"column:ssh_private_key"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type SSHKey struct {
+	ID         string    `json:"id" gorm:"primaryKey"`
+	Name       string    `json:"name"`
+	PublicKey  string    `json:"public_key"`
+	PrivateKey string    `json:"-" gorm:"column:private_key"`
+	IsDefault  bool      `json:"is_default"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }

@@ -5,6 +5,7 @@ import { useAuth } from '../lib/auth'
 import { localApi, type LocalServiceStatus } from '../api/local'
 import { toast } from '../lib/toast'
 import DeployLogModal from '../components/DeployLogModal'
+import type { SSHKey } from '../types'
 
 // ─── Step 1: Password ────────────────────────────────────────────────────────
 
@@ -366,16 +367,19 @@ type KeyMode = 'choose' | 'generate' | 'upload'
 function SSHKeyStep({ onDone }: { onDone: () => void }) {
   const [mode, setMode] = useState<KeyMode>('choose')
   const [loading, setLoading] = useState(false)
-  const [generatedPubKey, setGeneratedPubKey] = useState('')
+  const [generatedKey, setGeneratedKey] = useState<SSHKey | null>(null)
+  const [keyName, setKeyName] = useState('Default')
   const [privKeyText, setPrivKeyText] = useState('')
   const [pubKeyText, setPubKeyText] = useState('')
 
   const handleGenerate = async () => {
     setLoading(true)
     try {
-      const pubKey = await localApi.generateSSHKey()
-      setGeneratedPubKey(pubKey)
-      setMode('generate')
+      const res = await localApi.generateSSHKey(keyName || 'Default', true)
+      if (res.data) {
+        setGeneratedKey(res.data)
+        setMode('generate')
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to generate key')
     } finally {
@@ -386,7 +390,7 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
   const handleUploadSave = async () => {
     setLoading(true)
     try {
-      await localApi.uploadSSHKey(privKeyText, pubKeyText)
+      await localApi.uploadSSHKey(keyName || 'Uploaded key', privKeyText, pubKeyText, true)
       toast.success('SSH key pair saved')
       onDone()
     } catch (err) {
@@ -403,8 +407,9 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
   }
 
   const downloadPrivateKey = async () => {
+    if (!generatedKey) return
     try {
-      const blob = await localApi.downloadSSHKey()
+      const blob = await localApi.downloadSSHKey(generatedKey.id)
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url; a.download = 'gopher_id_rsa'; a.click()
@@ -426,6 +431,16 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
           Gopher uses an SSH key pair to connect back into bootstrapped machines through their
           reverse tunnels. Generate a fresh key or bring your own.
         </p>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Key name</label>
+          <input
+            type="text"
+            value={keyName}
+            onChange={e => setKeyName(e.target.value)}
+            placeholder="Default"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <button
             onClick={handleGenerate}
@@ -479,9 +494,9 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
         <div>
           <div className="text-xs font-medium text-gray-500 mb-1">Public key</div>
           <div className="bg-gray-50 rounded-lg p-3 flex items-center gap-2">
-            <code className="text-xs text-gray-700 break-all flex-1">{generatedPubKey}</code>
+            <code className="text-xs text-gray-700 break-all flex-1">{generatedKey?.public_key}</code>
             <button
-              onClick={() => { navigator.clipboard.writeText(generatedPubKey); toast.success('Copied!') }}
+              onClick={() => { navigator.clipboard.writeText(generatedKey?.public_key ?? ''); toast.success('Copied!') }}
               className="shrink-0 text-gray-400 hover:text-gray-600"
             >
               <ClipboardCopy size={14} />
@@ -512,6 +527,16 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
         <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 3 — Upload SSH key</span>
       </div>
       <p className="text-sm text-gray-500">Paste your key contents or click Browse to select files.</p>
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">Key name</label>
+        <input
+          type="text"
+          value={keyName}
+          onChange={e => setKeyName(e.target.value)}
+          placeholder="Uploaded key"
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+      </div>
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-1">
           Private key <span className="text-gray-400 font-normal">(id_rsa — PEM or OpenSSH format)</span>

@@ -128,15 +128,18 @@ func (s *MachineService) Status(id string) (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	settings, _ := db.GetSettings()
-
 	var client *sshpkg.SSHClient
-	if settings != nil && machine.TunnelPort > 0 && settings.SSHPrivateKey != "" {
-		client, err = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, settings.SSHPrivateKey)
-	} else if machine.Host != "" {
-		client, err = sshpkg.NewClient(machine.Host, machine.Port, machine.Username, machine.PrivateKey)
-	} else {
-		return map[string]interface{}{"id": id, "connected": false, "error": "no ssh access method"}, nil
+	if machine.TunnelPort > 0 {
+		if sshKey, kerr := db.GetSSHKeyForMachine(machine); kerr == nil {
+			client, err = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
+		}
+	}
+	if client == nil {
+		if machine.Host != "" {
+			client, err = sshpkg.NewClient(machine.Host, machine.Port, machine.Username, machine.PrivateKey)
+		} else {
+			return map[string]interface{}{"id": id, "connected": false, "error": "no ssh access method"}, nil
+		}
 	}
 	if err != nil {
 		return map[string]interface{}{

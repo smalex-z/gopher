@@ -63,9 +63,14 @@ func NewRouter(
 
 			r.Route("/local", func(r chi.Router) {
 				r.Post("/reconcile", localH.Reconcile)
-				r.Get("/ssh-key", localH.DownloadSSHKey)
-				r.Put("/ssh-key", localH.UploadSSHKey)
-				r.Post("/generate-ssh-key", localH.GenerateSSHKey)
+				r.Route("/ssh-keys", func(r chi.Router) {
+					r.Get("/", localH.ListSSHKeys)
+					r.Post("/generate", localH.GenerateSSHKey)
+					r.Post("/upload", localH.UploadSSHKey)
+					r.Delete("/{id}", localH.DeleteSSHKey)
+					r.Put("/{id}/default", localH.SetDefaultSSHKey)
+					r.Get("/{id}/download", localH.DownloadSSHKey)
+				})
 			})
 
 			r.Route("/vps", func(r chi.Router) {
