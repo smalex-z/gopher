@@ -21,7 +21,7 @@ export default function DashboardPage() {
     queryFn: () => tunnelsApi.list(),
   })
 
-  const { data: localStatus, refetch: refetchLocalStatus } = useQuery({
+  const { data: localStatus } = useQuery({
     queryKey: ['local-status'],
     queryFn: () => localApi.status(),
     refetchInterval: 10000,
