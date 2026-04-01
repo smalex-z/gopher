@@ -51,6 +51,24 @@ export default function TunnelsPage() {
   const domain = localStatus?.domain
   const routingEnabled = Boolean(domain)
 
+  const { data: domainIPData } = useQuery({
+    queryKey: ['resolve-ip', domain ?? ''],
+    queryFn: () => localApi.resolveIP(domain!),
+    enabled: !!domain,
+    staleTime: 10 * 60 * 1000,
+  })
+  const { data: routerIPData } = useQuery({
+    queryKey: ['resolve-ip', domain ? `router.${domain}` : ''],
+    queryFn: () => localApi.resolveIP(`router.${domain}`),
+    enabled: !!domain,
+    staleTime: 10 * 60 * 1000,
+  })
+  const domainIP = domainIPData?.ip ?? ''
+  const routerIP = routerIPData?.ip ?? ''
+  const displayHost = domain
+    ? (domainIP && routerIP && domainIP === routerIP ? domain : `router.${domain}`)
+    : undefined
+
   useEffect(() => {
     const machineId = searchParams.get('machine')
     if (machineId) {
@@ -96,8 +114,7 @@ export default function TunnelsPage() {
   const getMachineName = (machineId: string) => machines.find(m => m.id === machineId)?.name ?? machineId
 
   const copyUrl = (t: Tunnel) => {
-    const host = domain || window.location.hostname || 'server'
-    const url = routingEnabled && t.subdomain ? `${t.subdomain}.${domain}` : `${host}:${t.rathole_port}`
+    const url = routingEnabled && t.subdomain ? `${t.subdomain}.${domain}` : `${displayHost ?? window.location.hostname}:${t.rathole_port}`
     navigator.clipboard.writeText(url)
     toast.success('Copied!')
   }
@@ -153,7 +170,7 @@ export default function TunnelsPage() {
                             <a href={`https://${t.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
                               className="text-blue-600 hover:underline">{t.subdomain}.{domain}</a>
                           )}
-                          <span className="text-gray-500">{domain ?? 'server'}:{t.rathole_port}</span>
+                          <span className="text-gray-500">{displayHost ?? 'server'}:{t.rathole_port}</span>
                         </div>
                         <ArrowRight size={12} className="text-gray-400 shrink-0" />
                         <span>localhost:{t.local_port}</span>
@@ -258,7 +275,7 @@ export default function TunnelsPage() {
                     </div>
                   ) : (
                     <p className="text-xs text-gray-400 mt-1">
-                      Leave blank to use raw TCP port only (e.g. {domain ?? 'server'}:20000).
+                      Leave blank to use raw TCP port only (e.g. {displayHost ?? 'server'}:20000).
                     </p>
                   )}
                 </div>
@@ -270,7 +287,7 @@ export default function TunnelsPage() {
                   <span className="ml-1 font-normal text-gray-400 text-xs">(port on your VPS — must be 20000–65535)</span>
                 </label>
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-500 font-mono shrink-0 truncate max-w-[160px]" title={domain ?? 'server'}>{domain ?? 'server'}:</span>
+                  <span className="text-sm text-gray-500 font-mono shrink-0 truncate max-w-[160px]" title={displayHost ?? 'server'}>{displayHost ?? 'server'}:</span>
                   <input
                     type="number"
                     min={20000}

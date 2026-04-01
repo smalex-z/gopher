@@ -26,6 +26,7 @@ type Machine struct {
 	RatholeSSHToken string     `json:"rathole_ssh_token,omitempty"`
 	SSHKeyID        string     `json:"ssh_key_id" gorm:"index"`
 	Status          string     `json:"status"`
+	PublicIP        string     `json:"public_ip"`
 	LastSeen        *time.Time `json:"last_seen"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`

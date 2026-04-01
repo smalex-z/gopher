@@ -114,6 +114,20 @@ func (h *MachineHandler) ReassignSSHKey(w http.ResponseWriter, r *http.Request) 
 	response.Success(w, map[string]string{"message": "SSH key updated"})
 }
 
+func (h *MachineHandler) NetworkInfo(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	info, err := h.svc.RefreshNetworkInfo(id)
+	if err != nil {
+		if _, ok := err.(*apperrors.NotFoundError); ok {
+			response.NotFound(w, "machine not found")
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, info)
+}
+
 func (h *MachineHandler) Status(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	status, err := h.svc.Status(id)

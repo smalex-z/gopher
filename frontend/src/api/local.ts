@@ -26,6 +26,8 @@ export const localApi = {
   skip: (domain?: string) => client.post('/local/skip', { domain }).then(r => r.data),
   checkDNS: (domain: string) =>
     client.get<{ data: DNSCheckResult }>(`/local/check-dns?domain=${encodeURIComponent(domain)}`).then(r => r.data.data),
+  resolveIP: (host: string) =>
+    client.get<{ data: { ip: string } }>(`/local/resolve-ip?host=${encodeURIComponent(host)}`).then(r => r.data.data),
   listSSHKeys: () =>
     client.get<ApiResponse<SSHKey[]>>('/local/ssh-keys').then(r => r.data),
   generateSSHKey: (name: string, setDefault: boolean) =>

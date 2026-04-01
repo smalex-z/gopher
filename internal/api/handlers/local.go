@@ -174,6 +174,33 @@ func (h *LocalHandler) DownloadSSHKey(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(key))
 }
 
+// GET /api/local/resolve-ip?host=X  — resolves a hostname to its first A record.
+// Works for plain IPs too (returns them as-is). Used by the network map to show
+// the VPS's real public IP when the stored host is a hostname, not a raw IP.
+func (h *LocalHandler) ResolveIP(w http.ResponseWriter, r *http.Request) {
+	host := strings.TrimSpace(r.URL.Query().Get("host"))
+	if host == "" {
+		response.BadRequest(w, "host is required")
+		return
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		response.Success(w, map[string]string{"ip": ip.String()})
+		return
+	}
+	if len(host) > 253 || !validDomain.MatchString(host) {
+		response.BadRequest(w, "invalid host")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil || len(ips) == 0 {
+		response.Success(w, map[string]string{"ip": ""})
+		return
+	}
+	response.Success(w, map[string]string{"ip": ips[0]})
+}
+
 // GET /api/local/check-dns?domain=example.com
 // Public endpoint — called during setup wizard before auth is established.
 // Resolves router.DOMAIN to verify the wildcard DNS record is in place.
