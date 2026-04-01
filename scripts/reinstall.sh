@@ -9,6 +9,9 @@ SERVICE="gopher"
 echo "→ Building..."
 bash "$ROOT/scripts/build.sh"
 
+echo "→ Reloading systemd units..."
+sudo systemctl daemon-reload
+
 echo "→ Stopping $SERVICE service..."
 sudo systemctl stop "$SERVICE"
 
