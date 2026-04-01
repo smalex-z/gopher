@@ -52,6 +52,7 @@ func NewRouter(
 		r.Post("/local/skip", localH.Skip)
 		r.Get("/local/logs/ws", logsH.WebSocketDuringSetup)
 		r.Get("/local/check-dns", localH.CheckDNS)
+		r.Get("/local/resolve-ip", localH.ResolveIP)
 
 		// All routes below require a valid session
 		r.Group(func(r chi.Router) {
@@ -91,6 +92,7 @@ func NewRouter(
 				r.Delete("/{id}", machineH.Delete)
 				r.Post("/{id}/deploy", machineH.Deploy)
 				r.Get("/{id}/status", machineH.Status)
+				r.Get("/{id}/network-info", machineH.NetworkInfo)
 				r.Put("/{id}/ssh-key", machineH.ReassignSSHKey)
 			})
 

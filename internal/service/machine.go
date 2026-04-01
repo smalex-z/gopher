@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/smalex-z/gopher/internal/api/dto"
@@ -161,6 +162,65 @@ func (s *MachineService) Status(id string) (map[string]interface{}, error) {
 		"id":             id,
 		"connected":      true,
 		"rathole_status": status,
+	}, nil
+}
+
+// RefreshNetworkInfo SSHes into the machine, discovers its WAN IP and LAN IP,
+// stores the public IP on the machine record, and returns the info.
+func (s *MachineService) RefreshNetworkInfo(id string) (map[string]interface{}, error) {
+	machine, err := db.GetMachine(id)
+	if err != nil {
+		return nil, err
+	}
+
+	var client *sshpkg.SSHClient
+	if machine.TunnelPort > 0 {
+		if key, kerr := db.GetSSHKeyForMachine(machine); kerr == nil {
+			client, _ = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, key.PrivateKey)
+		}
+	}
+	if client == nil && machine.Host != "" {
+		p := machine.Port
+		if p == 0 {
+			p = 22
+		}
+		client, err = sshpkg.NewClient(machine.Host, p, machine.Username, machine.PrivateKey)
+		if err != nil {
+			return map[string]interface{}{"id": id, "error": err.Error()}, nil
+		}
+	}
+	if client == nil {
+		return map[string]interface{}{"id": id, "error": "no ssh access method"}, nil
+	}
+	defer client.Close()
+
+	// WAN (public) IP — try opendns first, fall back to ipify.
+	wanOut, _ := client.Execute(
+		`dig +short myip.opendns.com @resolver1.opendns.com 2>/dev/null | head -1 || curl -sf --max-time 5 https://api.ipify.org 2>/dev/null`,
+	)
+	publicIP := strings.TrimSpace(wanOut)
+
+	// LAN (private) IP from the machine's own NIC.
+	lanOut, _ := client.Execute(`hostname -I 2>/dev/null | awk '{print $1}'`)
+	privateIP := strings.TrimSpace(lanOut)
+	if privateIP == "" {
+		privateIP = machine.Host
+	}
+
+	// Persist so subsequent loads don't need an SSH round-trip.
+	if publicIP != "" && publicIP != machine.PublicIP {
+		machine.PublicIP = publicIP
+		machine.UpdatedAt = time.Now()
+		_ = db.UpdateMachine(machine)
+	}
+
+	isNAT := publicIP != "" && privateIP != "" && publicIP != privateIP
+
+	return map[string]interface{}{
+		"id":         id,
+		"public_ip":  publicIP,
+		"private_ip": privateIP,
+		"is_nat":     isNAT,
 	}, nil
 }
 

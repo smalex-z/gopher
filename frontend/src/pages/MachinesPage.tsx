@@ -31,6 +31,24 @@ export default function MachinesPage() {
   const sshKeys: SSHKey[] = keysRes?.data ?? []
   const domain = localStatus?.domain ?? ''
 
+  const { data: domainIPData } = useQuery({
+    queryKey: ['resolve-ip', domain],
+    queryFn: () => localApi.resolveIP(domain),
+    enabled: !!domain,
+    staleTime: 10 * 60 * 1000,
+  })
+  const { data: routerIPData } = useQuery({
+    queryKey: ['resolve-ip', `router.${domain}`],
+    queryFn: () => localApi.resolveIP(`router.${domain}`),
+    enabled: !!domain,
+    staleTime: 10 * 60 * 1000,
+  })
+  const domainIP = domainIPData?.ip ?? ''
+  const routerIP = routerIPData?.ip ?? ''
+  const displayHost = domain
+    ? (domainIP && routerIP && domainIP === routerIP ? domain : `router.${domain}`)
+    : ''
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => machinesApi.delete(id),
     onSuccess: () => {
@@ -244,7 +262,7 @@ export default function MachinesPage() {
                             {m.tunnel_port > 0 && (
                               <div className="flex items-center gap-3 bg-white border border-gray-200 rounded-lg px-3 py-2">
                                 <span className="font-mono text-xs text-gray-700">
-                                  {domain ? `${domain}:${m.tunnel_port}` : `:${m.tunnel_port}`}
+                                  {displayHost ? `${displayHost}:${m.tunnel_port}` : `:${m.tunnel_port}`}
                                   <span className="text-gray-400"> → </span>
                                   localhost:22
                                 </span>
@@ -256,7 +274,9 @@ export default function MachinesPage() {
                             {tunnels.map(t => (
                               <div key={t.id} className="flex items-center gap-3 bg-white border border-gray-200 rounded-lg px-3 py-2">
                                 <span className="font-mono text-xs text-gray-700">
-                                  {domain ? `${t.subdomain}.${domain}` : t.subdomain}
+                                  {t.subdomain && domain
+                                    ? <>{t.subdomain}.{domain}<span className="text-gray-500"> ({displayHost || domain}:{t.rathole_port})</span></>
+                                    : `${displayHost || domain}:${t.rathole_port}`}
                                   <span className="text-gray-400"> → </span>
                                   localhost:{t.local_port}
                                 </span>

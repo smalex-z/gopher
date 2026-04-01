@@ -21,6 +21,7 @@ export interface Machine {
   rathole_ssh_token?: string
   ssh_key_id?: string
   status: string
+  public_ip?: string
   last_seen: string | null
   created_at: string
   updated_at: string
