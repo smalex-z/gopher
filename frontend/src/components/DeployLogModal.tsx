@@ -84,7 +84,7 @@ export default function DeployLogModal({ isOpen, onClose, title, onStart, onComp
   const canClose = status !== 'connecting' && status !== 'running'
 
   return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl">
         <div className="flex items-center justify-between p-4 border-b">
           <h2 className="text-lg font-semibold">{title}</h2>
@@ -119,6 +119,6 @@ export default function DeployLogModal({ isOpen, onClose, title, onStart, onComp
           </button>
         </div>
       </div>
-    </div>
+    </div></div>
   )
 }

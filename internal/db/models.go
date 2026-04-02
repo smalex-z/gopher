@@ -42,6 +42,8 @@ type Tunnel struct {
 	RatholePort  int       `json:"rathole_port"`
 	RatholeToken string    `json:"rathole_token"`
 	Protocol     string    `json:"protocol"`
+	Transport    string    `json:"transport"`  // "tcp" (default) or "udp"
+	NoTLS        bool      `json:"no_tls"`     // skip Caddy HTTPS; use plain http://
 	Status       string    `json:"status"`
 	Managed      bool      `json:"managed,omitempty" gorm:"-"`
 	Kind         string    `json:"kind,omitempty" gorm:"-"`

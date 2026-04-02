@@ -134,8 +134,8 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		return fmt.Errorf("failed to update server.toml: %w", err)
 	}
 
-	// --- 2. Update managed Caddy entry if subdomain is set ---
-	if tunnel.Subdomain != "" && settings.Domain != "" {
+	// --- 2. Update managed Caddy entry if subdomain is set (TCP only; UDP has no HTTP routing) ---
+	if tunnel.Subdomain != "" && settings.Domain != "" && tunnel.Transport != "udp" {
 		if err := ensureManagedCaddyLayout(); err != nil {
 			return fmt.Errorf("failed to prepare Caddy managed layout: %w", err)
 		}
@@ -143,7 +143,7 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 			return fmt.Errorf("failed to write router Caddy file: %w", err)
 		}
 		managedPath := managedTunnelCaddyPath(tunnel.ID)
-		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort)
+		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS)
 		if err := writeLocalFile(managedPath, block); err != nil {
 			return fmt.Errorf("failed to write tunnel Caddy file %s: %w", managedPath, err)
 		}
@@ -389,13 +389,17 @@ func buildClientTunnelSection(tunnel *db.Tunnel) string {
 	if token == "" {
 		token = tunnel.ID // backward compat
 	}
+	transport := tunnel.Transport
+	if transport != "udp" {
+		transport = "tcp"
+	}
 	return fmt.Sprintf(`# gopher-tunnel-start: %s
 [client.services.tunnel-%s]
-type = "tcp"
+type = "%s"
 token = "%s"
 local_addr = "localhost:%d"
 # gopher-tunnel-end: %s
-`, tunnel.ID, tunnel.ID, token, tunnel.LocalPort, tunnel.ID)
+`, tunnel.ID, tunnel.ID, transport, token, tunnel.LocalPort, tunnel.ID)
 }
 
 func buildClientMachineSection(machine *db.Machine) string {
