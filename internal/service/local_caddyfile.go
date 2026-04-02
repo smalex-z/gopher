@@ -25,8 +25,12 @@ func buildRouterCaddyBlock(domain string) string {
 	return fmt.Sprintf("router.%s {\n    reverse_proxy localhost:8080\n}\n", domain)
 }
 
-func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int) string {
-	return fmt.Sprintf("%s.%s {\n    reverse_proxy localhost:%d\n}\n", subdomain, domain, ratholePort)
+func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool) string {
+	scheme := ""
+	if noTLS {
+		scheme = "http://"
+	}
+	return fmt.Sprintf("%s%s.%s {\n    reverse_proxy localhost:%d\n}\n", scheme, subdomain, domain, ratholePort)
 }
 
 func extractCaddyCustomBody(content string) string {

@@ -98,6 +98,15 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 	if req.LocalPort == 22 {
 		return nil, &apperrors.ValidationError{Field: "local_port", Message: "port 22 is reserved for machine SSH tunnels"}
 	}
+	transport := req.Transport
+	if transport != "udp" {
+		transport = "tcp"
+	}
+	// UDP tunnels cannot have HTTP subdomain routing
+	if transport == "udp" {
+		req.Subdomain = ""
+		req.NoTLS = false
+	}
 	if req.Subdomain != "" && settings.Domain == "" {
 		return nil, &apperrors.ValidationError{Field: "subdomain", Message: "URL routing is disabled; leave subdomain empty"}
 	}
@@ -148,6 +157,8 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 		RatholePort:  ratholePort,
 		RatholeToken: shortToken(),
 		Protocol:     "tcp",
+		Transport:    transport,
+		NoTLS:        req.NoTLS,
 		Status:       "inactive",
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),

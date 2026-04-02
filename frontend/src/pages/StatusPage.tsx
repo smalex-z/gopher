@@ -58,7 +58,7 @@ export default function StatusPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
               <tr>
-                {['Name', 'Host', 'Status', 'Last Seen', 'Check'].map(h => (
+                {['Name', 'Tunnel Port', 'Status', 'Last Seen', 'Check'].map(h => (
                   <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
@@ -67,7 +67,9 @@ export default function StatusPage() {
               {machines.map(m => (
                 <tr key={m.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 font-medium text-gray-900">{m.name}</td>
-                  <td className="px-4 py-3 text-gray-600">{m.host}:{m.port}</td>
+                  <td className="px-4 py-3 text-gray-500 font-mono text-xs">
+                    {m.tunnel_port > 0 ? `:${m.tunnel_port}` : '—'}
+                  </td>
                   <td className="px-4 py-3">
                     {machineStatuses[m.id] ? (
                       <span className={`text-xs ${machineStatuses[m.id].ok ? 'text-green-600' : 'text-red-600'}`}>

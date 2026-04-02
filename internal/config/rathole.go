@@ -101,6 +101,9 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel) str
 		buf.WriteString(fmt.Sprintf("[server.services.tunnel-%s]\n", t.ID))
 		buf.WriteString(fmt.Sprintf("token = \"%s\"\n", token))
 		buf.WriteString(fmt.Sprintf("bind_addr = \"0.0.0.0:%d\"\n", t.RatholePort))
+		if t.Transport == "udp" {
+			buf.WriteString("type = \"udp\"\n")
+		}
 		buf.WriteString(fmt.Sprintf("# gopher-tunnel-end: %s\n", t.ID))
 		managedEntries++
 	}

@@ -92,8 +92,10 @@ function TunnelDetailRow({ tunnel, domain }: { tunnel: Tunnel; domain?: string }
   const hasUrl = !!tunnel.subdomain && !!domain
   return (
     <div className="flex items-center gap-2 py-2 border-t border-gray-100 first:border-t-0">
-      <span className="text-xs font-mono px-1.5 py-0.5 rounded uppercase font-semibold shrink-0 bg-gray-100 text-gray-600">
-        {tunnel.protocol}
+      <span className={`text-xs font-mono px-1.5 py-0.5 rounded uppercase font-semibold shrink-0 ${
+        tunnel.transport === 'udp' ? 'bg-purple-50 text-purple-700' : 'bg-gray-100 text-gray-600'
+      }`}>
+        {tunnel.transport === 'udp' ? 'UDP' : tunnel.protocol}
       </span>
       <span className="text-sm text-gray-800 font-medium truncate flex-1">{tunnel.name}</span>
       <span className="text-xs font-mono text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-1.5 py-0.5 shrink-0">
@@ -199,6 +201,11 @@ export default function NetworkMapPage() {
     if (!lanGroupMap.has(key)) {
       lanGroupMap.set(key, { publicIP, isNat, machines: [] })
       lanGroupOrder.push(key)
+    } else if (isNat) {
+      // If any machine in the group has confirmed NAT, mark the whole group NAT.
+      // Prevents a race where the first machine's host is a hostname (not RFC1918)
+      // and the group gets temporarily labeled "direct".
+      lanGroupMap.get(key)!.isNat = true
     }
     lanGroupMap.get(key)!.machines.push(machine)
   }
@@ -306,26 +313,29 @@ export default function NetworkMapPage() {
           {/* ── Tunnel lines (behind everything) ─────────────────────────── */}
           {tunnelLines.map(({ tunnel, vpsY, machY }) => {
             const active = tunnel.status === 'active'
+            const isUdp = tunnel.transport === 'udp'
             const cy = (vpsY + machY) / 2
             const label = `:${tunnel.rathole_port}`
             const lw = label.length * 6.2 + 10
+            const lineColor = active ? (isUdp ? '#a855f7' : '#4ade80') : '#d1d5db'
+            const pillFill  = active ? (isUdp ? '#faf5ff' : '#f0fdf4') : '#f9fafb'
+            const pillStroke = active ? (isUdp ? '#a855f7' : '#4ade80') : '#d1d5db'
+            const textColor  = active ? (isUdp ? '#7e22ce' : '#16a34a') : '#6b7280'
             return (
               <g key={tunnel.id}>
                 <path
                   d={`M ${VPS_RIGHT} ${vpsY} C ${midX} ${vpsY}, ${midX} ${machY}, ${MACHINE_X} ${machY}`}
                   fill="none"
-                  stroke={active ? '#4ade80' : '#d1d5db'}
+                  stroke={lineColor}
                   strokeWidth={active ? 2.5 : 1.5}
                   strokeDasharray={active ? undefined : '5 4'}
                   opacity={0.9}
                 />
                 <rect x={midX - lw / 2} y={cy - 9} width={lw} height={17} rx={4}
-                  fill={active ? '#f0fdf4' : '#f9fafb'}
-                  stroke={active ? '#4ade80' : '#d1d5db'}
-                  strokeWidth={1} />
+                  fill={pillFill} stroke={pillStroke} strokeWidth={1} />
                 <text x={midX} y={cy + 4} textAnchor="middle"
                   fontSize={9.5} fontFamily="ui-monospace,monospace" fontWeight={700}
-                  fill={active ? '#16a34a' : '#6b7280'}>
+                  fill={textColor}>
                   {label}
                 </text>
               </g>
@@ -441,7 +451,8 @@ export default function NetworkMapPage() {
                         <text x={VPS_X + 12} y={ry + 4} fontSize={9.5} fill="#374151"
                           fontFamily="ui-monospace,monospace">{name}</text>
                         <text x={VPS_RIGHT - 16} y={ry + 4} textAnchor="end" fontSize={10}
-                          fill="#3730a3" fontFamily="ui-monospace,monospace" fontWeight={700}>
+                          fill={t.transport === 'udp' ? '#7e22ce' : '#3730a3'}
+                          fontFamily="ui-monospace,monospace" fontWeight={700}>
                           :{t.rathole_port}
                         </text>
                         <circle cx={VPS_RIGHT} cy={ry} r={4.5}
@@ -559,8 +570,9 @@ export default function NetworkMapPage() {
                         {name}
                       </text>
                       <text x={MACHINE_X + MACHINE_W - 10} y={ry + 4} textAnchor="end"
-                        fontSize={9} fill={s.text} fontFamily="ui-sans-serif,system-ui,sans-serif" opacity={0.6}>
-                        {t.protocol.toUpperCase()}
+                        fontSize={9} fill={t.transport === 'udp' ? '#7e22ce' : s.text}
+                        fontFamily="ui-sans-serif,system-ui,sans-serif" opacity={0.8}>
+                        {t.transport === 'udp' ? 'UDP' : t.protocol.toUpperCase()}
                       </text>
                     </g>
                   )
@@ -596,11 +608,22 @@ export default function NetworkMapPage() {
                 : selectedMachine.status === 'pending' || selectedMachine.status === 'connecting' ? 'bg-yellow-500'
                 : 'bg-gray-300'}`} />
               <span className="font-bold text-gray-900">{selectedMachine.name}</span>
-              {selectedMachine.host && (
-                <span className="text-sm text-gray-600 font-mono bg-gray-100 px-2 py-0.5 rounded">
-                  {selectedMachine.host}{selectedMachine.port ? `:${selectedMachine.port}` : ''}
-                </span>
-              )}
+              {(() => {
+                const info = netInfoMap.get(selectedMachine.id)
+                const privateIP = info?.private_ip || (isPrivateIP(selectedMachine.host ?? '') ? selectedMachine.host : null)
+                const directPort = selectedMachine.port && selectedMachine.port > 0 ? `:${selectedMachine.port}` : ''
+                if (privateIP) return (
+                  <span className="text-xs text-gray-600 font-mono bg-gray-100 px-2 py-0.5 rounded">
+                    {privateIP}{directPort}
+                  </span>
+                )
+                if (directPort) return (
+                  <span className="text-xs text-gray-600 font-mono bg-gray-100 px-2 py-0.5 rounded">
+                    {selectedMachine.host}{directPort}
+                  </span>
+                )
+                return null
+              })()}
               {netInfoMap.get(selectedMachine.id)?.public_ip && (
                 <span className="text-xs text-indigo-600 font-mono bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded">
                   ↑ {netInfoMap.get(selectedMachine.id)!.public_ip}

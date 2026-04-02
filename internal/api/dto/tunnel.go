@@ -6,6 +6,8 @@ type CreateTunnelRequest struct {
 	Subdomain   string `json:"subdomain"`
 	LocalPort   int    `json:"local_port"`
 	RatholePort int    `json:"rathole_port"` // 0 = auto-assign
+	Transport   string `json:"transport"`    // "tcp" (default) or "udp"
+	NoTLS       bool   `json:"no_tls"`       // skip Caddy TLS; plain http://
 }
 
 type UpdateTunnelRequest struct {

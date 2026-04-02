@@ -36,6 +36,8 @@ export interface Tunnel {
   local_port: number
   rathole_port: number
   protocol: string
+  transport?: string   // "tcp" (default) | "udp"
+  no_tls?: boolean     // skip Caddy TLS; use plain http://
   status: string
   managed?: boolean
   kind?: string

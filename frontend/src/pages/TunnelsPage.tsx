@@ -17,9 +17,11 @@ interface FormState {
   subdomain: string
   local_port: number
   rathole_port: number
+  transport: string
+  no_tls: boolean
 }
 
-const defaultForm: FormState = { machine_id: '', name: '', subdomain: '', local_port: 3000, rathole_port: 0 }
+const defaultForm: FormState = { machine_id: '', name: '', subdomain: '', local_port: 3000, rathole_port: 0, transport: 'tcp', no_tls: false }
 
 export default function TunnelsPage() {
   const qc = useQueryClient()
@@ -170,7 +172,10 @@ export default function TunnelsPage() {
                             <a href={`https://${t.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
                               className="text-blue-600 hover:underline">{t.subdomain}.{domain}</a>
                           )}
-                          <span className="text-gray-500">{displayHost ?? 'server'}:{t.rathole_port}</span>
+                          <span className="text-gray-500">
+                            {t.transport === 'udp' && <span className="text-purple-600 font-semibold mr-0.5">UDP</span>}
+                            {displayHost ?? 'server'}:{t.rathole_port}
+                          </span>
                         </div>
                         <ArrowRight size={12} className="text-gray-400 shrink-0" />
                         <span>localhost:{t.local_port}</span>
@@ -179,7 +184,17 @@ export default function TunnelsPage() {
                         </button>
                       </div>
                     </td>
-                    <td className="px-4 py-3"><StatusBadge status={t.status} /></td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5">
+                        <StatusBadge status={t.status} />
+                        {t.transport === 'udp' && (
+                          <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200">UDP</span>
+                        )}
+                        {t.no_tls && t.subdomain && (
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">HTTP</span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-4 py-3">
                       <div className="flex gap-2">
                         {isProtectedTunnel ? (
@@ -212,7 +227,7 @@ export default function TunnelsPage() {
       )}
 
       {modal.isOpen && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg">
             <div className="flex items-center justify-between p-4 border-b">
               <h2 className="text-lg font-semibold">Add Tunnel</h2>
@@ -250,6 +265,26 @@ export default function TunnelsPage() {
               </div>
 
               <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Transport</label>
+                <div className="flex gap-2">
+                  {(['tcp', 'udp'] as const).map(t => (
+                    <button key={t} type="button"
+                      onClick={() => setForm(f => ({ ...f, transport: t, ...(t === 'udp' ? { subdomain: '', no_tls: false } : {}) }))}
+                      className={`px-4 py-1.5 rounded-lg text-sm font-semibold border transition-colors ${
+                        form.transport === t
+                          ? t === 'udp' ? 'bg-purple-600 text-white border-purple-600' : 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                      }`}>
+                      {t.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+                {form.transport === 'udp' && (
+                  <p className="text-xs text-purple-600 mt-1">UDP tunnels don't support HTTP subdomain routing.</p>
+                )}
+              </div>
+
+              <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Local Port
                   <span className="ml-1 font-normal text-gray-400 text-xs">(port your service listens on)</span>
@@ -261,7 +296,7 @@ export default function TunnelsPage() {
                 </div>
               </div>
 
-              {routingEnabled ? (
+              {routingEnabled && form.transport !== 'udp' ? (
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Subdomain
@@ -270,9 +305,17 @@ export default function TunnelsPage() {
                   <input type="text" value={form.subdomain} onChange={e => setForm(f => ({ ...f, subdomain: e.target.value }))} placeholder="photos"
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                   {domain && form.subdomain ? (
-                    <div className="mt-1 text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded font-mono">
-                      https://{form.subdomain}.{domain} → localhost:{form.local_port}
-                    </div>
+                    <>
+                      <div className="mt-1 text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded font-mono">
+                        {form.no_tls ? 'http' : 'https'}://{form.subdomain}.{domain} → localhost:{form.local_port}
+                      </div>
+                      <label className="flex items-center gap-2 mt-2 text-sm text-gray-700 cursor-pointer select-none">
+                        <input type="checkbox" checked={form.no_tls}
+                          onChange={e => setForm(f => ({ ...f, no_tls: e.target.checked }))}
+                          className="rounded" />
+                        <span>HTTP only <span className="text-gray-400 font-normal text-xs">(skip TLS certificate — useful for internal services)</span></span>
+                      </label>
+                    </>
                   ) : (
                     <p className="text-xs text-gray-400 mt-1">
                       Leave blank to use raw TCP port only (e.g. {displayHost ?? 'server'}:20000).
@@ -304,14 +347,14 @@ export default function TunnelsPage() {
             <div className="flex justify-end gap-2 p-4 border-t">
               <button onClick={() => setModal({ isOpen: false })} className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm">Cancel</button>
               <button
-                onClick={() => createMutation.mutate({ ...form, subdomain: routingEnabled ? form.subdomain : '' })}
+                onClick={() => createMutation.mutate({ ...form, subdomain: routingEnabled && form.transport !== 'udp' ? form.subdomain : '' })}
                 disabled={createMutation.isPending}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-50">
                 {createMutation.isPending ? 'Creating...' : 'Create Tunnel'}
               </button>
             </div>
           </div>
-        </div>
+        </div></div>
       )}
     </div>
   )

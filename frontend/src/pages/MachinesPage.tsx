@@ -280,7 +280,9 @@ export default function MachinesPage() {
                                   <span className="text-gray-400"> → </span>
                                   localhost:{t.local_port}
                                 </span>
-                                <span className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded uppercase">{t.protocol}</span>
+                                <span className={`text-xs px-1.5 py-0.5 rounded uppercase ${t.transport === 'udp' ? 'bg-purple-50 text-purple-700' : 'bg-blue-50 text-blue-600'}`}>
+                                  {t.transport === 'udp' ? 'UDP' : t.protocol}
+                                </span>
                                 <StatusBadge status={t.status} />
                               </div>
                             ))}
@@ -307,7 +309,7 @@ export default function MachinesPage() {
 
       {/* Bootstrap Config Modal */}
       {configModal && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm">
             <div className="flex items-center justify-between p-4 border-b">
               <h2 className="text-lg font-semibold">Bootstrap New Machine</h2>
@@ -369,12 +371,12 @@ export default function MachinesPage() {
               </button>
             </div>
           </div>
-        </div>
+        </div></div>
       )}
 
       {/* Bootstrap Token Modal */}
       {bootstrapModal.isOpen && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl">
             <div className="flex items-center justify-between p-4 border-b">
               <h2 className="text-lg font-semibold">Bootstrap New Machine</h2>
@@ -423,7 +425,7 @@ export default function MachinesPage() {
               </button>
             </div>
           </div>
-        </div>
+        </div></div>
       )}
 
     </div>

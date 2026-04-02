@@ -214,7 +214,7 @@ export default function DashboardPage() {
                 <div key={m.id} className="flex items-center justify-between">
                   <div>
                     <div className="font-medium text-sm text-gray-800">{m.name}</div>
-                    <div className="text-xs text-gray-400">{m.host}:{m.port}</div>
+                    <div className="text-xs text-gray-400">{m.status === 'connected' || m.status === 'active' ? 'online' : m.last_seen ? new Date(m.last_seen).toLocaleString() : 'never seen'}</div>
                   </div>
                   <StatusBadge status={m.status} />
                 </div>
