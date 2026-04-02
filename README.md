@@ -1,30 +1,45 @@
 # 🐹 Gopher
 
-Public router for private services. Self-hosted reverse tunnel system with automatic HTTPS and subdomain routing. Expose homelab services, research servers, or any private machine via clean URLs - no port forwarding needed.
+Public router for private services. Self-hosted reverse tunnel system with automatic HTTPS and subdomain routing. Expose homelab services, research servers, or any private machine via clean URLs — no port forwarding needed.
 
 **Example:**
 ```
 photos.yourdomain.com → Immich on home NAS (192.168.1.50:2283)
-lab.yourdomain.com → Jupyter on university server (no public IP)
-vault.yourdomain.com → Bitwarden on Raspberry Pi (behind NAT)
+lab.yourdomain.com    → Jupyter on university server (no public IP)
+vault.yourdomain.com  → Bitwarden on Raspberry Pi (behind NAT)
 ```
+
+---
+
+## Built on Caddy and rathole
+
+Gopher would not exist without two excellent open-source projects:
+
+**[Caddy](https://caddyserver.com/)** handles all HTTPS termination and subdomain routing on the VPS. It automatically provisions and renews TLS certificates via Let's Encrypt, with zero configuration required from the user. Gopher generates and manages the Caddyfile for you, but Caddy is doing the actual reverse proxying.
+
+**[rathole](https://github.com/rathole-org/rathole)** is the tunnel engine. It's a Rust-based, extremely lightweight TCP/UDP tunnel that machines use to punch through NAT and firewalls by maintaining a persistent outbound connection to the VPS. Gopher manages the rathole server config and deploys rathole client configs to each machine — but rathole is what makes the tunnels actually work.
+
+If you find Gopher useful, please consider starring those projects too.
+
+---
 
 ## How It Works
 
 Run Gopher on a VPS. It manages Caddy (reverse proxy) and rathole (tunnel server). Private machines establish outbound tunnels. Gopher routes incoming traffic by subdomain.
+
 ```
 Internet
    │
    ▼
 ┌─────────────────────────────────────────────────┐
-│  Public VPS (Gopher runs here)                   │
-│                                                   │
-│  ┌─────────────────┐   ┌─────────────────────┐   │
-│  │  Caddy (80/443) │   │  rathole server     │   │
-│  │  auto-HTTPS     │──▶│  (port 2333)        │   │
-│  │  subdomain→port │   │  tunnels listening  │   │
-│  └─────────────────┘   └────────┬────────────┘   │
-└────────────────────────────────-│────────────────┘
+│  Public VPS (Gopher runs here)                  │
+│                                                 │
+│  ┌─────────────────┐   ┌─────────────────────┐  │
+│  │  Caddy (80/443) │   │  rathole server     │  │
+│  │  auto-HTTPS     │──▶│  (port 2333)        │  │
+│  │  subdomain→port │   │  tunnels listening  │  │
+│  └─────────────────┘   └────────┬────────────┘  │
+└────────────────────────────────-│───────────────┘
                                   │  outbound TCP tunnel
                    ───────────────┘
                   │
@@ -41,192 +56,273 @@ Internet
 
 **Traffic flow:** `photos.yourdomain.com` → Caddy (VPS) → rathole tunnel → rathole client → `localhost:2283` (Immich)
 
-**Key insight:** Machines connect *outbound* to VPS (bypasses firewalls). VPS routes incoming requests through established tunnels.
+**Key insight:** Machines connect *outbound* to the VPS, bypassing NAT and firewalls. The VPS routes incoming traffic back through those established tunnels.
 
-## Quick Start
+---
 
-### Prerequisites
+## Installation
 
-- **VPS:** Any cloud provider (Oracle, AWS, Hetzner) with Ubuntu/Debian
-- **Domain:** Point DNS A record to your VPS IP
-- **Build tools:** Go 1.21+ and Node.js 18+
+Gopher ships as a single self-contained binary for Linux. No runtime dependencies — Caddy and rathole are downloaded automatically during setup.
 
-### Installation
+### Requirements
+
+- Linux VPS (Ubuntu 22.04+ or RHEL 8+ recommended), x86_64 or arm64
+- A domain with a wildcard DNS A record pointing at your VPS: `*.yourdomain.com → <VPS IP>`
+- Ports 22, 80, 443, and 2333 reachable on the VPS
+
+### Download
+
+**Latest stable release:**
 ```bash
-# Build
-git clone https://github.com/smalex-z/gopher.git
-cd gopher
-./scripts/build.sh        # Builds frontend + Go binary
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+TAG=$(curl -fsSL https://api.github.com/repos/smalex-z/gopher/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+curl -fsSL "https://github.com/smalex-z/gopher/releases/download/${TAG}/gopher-linux-${ARCH}" -o gopher && chmod +x gopher
+```
 
-# Run
+**Latest pre-release** (recommended for now — no stable release yet):
+```bash
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+TAG=$(curl -fsSL https://api.github.com/repos/smalex-z/gopher/releases | grep -m1 '"tag_name"' | cut -d'"' -f4)
+curl -fsSL "https://github.com/smalex-z/gopher/releases/download/${TAG}/gopher-linux-${ARCH}" -o gopher && chmod +x gopher
+```
+
+You can verify your download against the checksums file on the [releases page](https://github.com/smalex-z/gopher/releases).
+
+### Run
+
+```bash
+# Start the web UI (listens on :8080)
 ./gopher
-# On first start, Gopher may prompt once for your sudo password
-# to configure passwordless sudo for local service management.
 
-# Optional: install as a systemd service
-./gopher install
-
-# In setup, you can optionally check "Skip Caddy / reverse proxy"
-# to run rathole-only mode (no domain/subdomain URL routing).
+# Install as a systemd service (runs on boot, survives reboots)
+sudo ./gopher install
 
 # Service management
 sudo systemctl status gopher
 sudo systemctl restart gopher
 
-# Uninstall service and installed paths
-./gopher uninstall
-# During uninstall, Gopher prompts whether to reset or fully remove
-# Caddy and rathole.
-# Open http://localhost:8080
+# Uninstall
+sudo ./gopher uninstall
 ```
 
-### Setup Workflow
+On first start, visit `http://<your-vps-ip>:8080` and complete the setup wizard:
 
-**1. Configure Server (Server tab)**
-- Enter VPS IP/hostname
-- Provide SSH credentials (user + private key)
-- Enter your domain (e.g., `example.com`)
-- Click **Install Server** → Gopher installs Caddy + rathole on VPS
+1. **Password** — set your admin password
+2. **Local services** — install Caddy and rathole on this machine (or skip for rathole-only)
+3. **Firewall** — choose how network rules are managed (Gopher-managed is recommended)
+4. **SSH key** — generate or upload an SSH key pair used to access bootstrapped machines
 
-**2. Add Machines (Machines tab)**
+---
+
+## Setup Workflow
+
+After the wizard, you're at the main dashboard:
+
+**1. Add Machines (Machines tab)**
 - Click **Bootstrap New Machine**
-- Copy the one-liner command
-- SSH to your private machine and run it
-- Machine establishes reverse tunnel to VPS
+- Copy the one-liner and run it on any machine you want to expose
+- It installs rathole client and establishes a reverse tunnel back to your VPS
 
-**3. Create Tunnels (Tunnels tab)**
-- Select machine from dropdown
-- Enter subdomain (e.g., `photos`)
-- Enter local port (e.g., `2283` for Immich)
+**2. Create Tunnels (Tunnels tab)**
+- Select a machine, enter a subdomain (e.g. `photos`) and the local port (e.g. `2283`)
 - Click **Create Tunnel**
+- `https://photos.yourdomain.com` is live with automatic TLS in seconds
 
-**Done!** `https://photos.example.com` is live with automatic TLS.
+Gopher supports **HTTP, raw TCP, and UDP** tunnels.
+
+---
 
 ## Use Cases
 
 **Homelab:**
 ```
-photos.home.com    → Jellyfin media server
-vault.home.com     → Bitwarden password manager
-files.home.com     → Nextcloud file sync
-monitor.home.com   → Grafana dashboards
+photos.home.com   → Jellyfin media server
+vault.home.com    → Bitwarden password manager
+files.home.com    → Nextcloud file sync
+monitor.home.com  → Grafana dashboards
 ```
 
 **Research Lab:**
 ```
-jupyter.lab.edu    → Jupyter notebook server
-vnc1.lab.edu       → VNC to lab computer 1
-vnc2.lab.edu       → VNC to lab computer 2
-data.lab.edu       → Dataset browser
+jupyter.lab.edu   → Jupyter notebook server
+vnc1.lab.edu      → VNC to lab workstation
+data.lab.edu      → Dataset browser
 ```
 
-**Multi-Network:**
+**Multi-site:**
 ```
-nas.alexzheng.com       → Home NAS (Maryland)
-jupyter.alexzheng.com   → Lab server (UCLA)
-media.alexzheng.com     → Friend's Plex (shared server)
+nas.example.com      → Home NAS (Maryland)
+jupyter.example.com  → Lab server (UCLA)
+media.example.com    → Friend's shared Plex
 ```
 
-All managed from one dashboard, all accessible via clean URLs.
+---
+
+## Comparison
+
+|  | Gopher | ngrok | Cloudflare Tunnel | Port Forwarding |
+|---|--------|-------|-------------------|-----------------|
+| **Cost** | VPS (~$3–5/mo) | $8–20/mo | Free* | None |
+| **Custom domain** | ✅ | 💰 Paid tier | ⚠️ CF DNS required | ✅ |
+| **Permanent URLs** | ✅ | ❌ Ephemeral | ✅ | ✅ |
+| **Self-hosted** | ✅ | ❌ | ❌ | N/A |
+| **Vendor lock-in** | ❌ | ✅ | ✅ | ❌ |
+| **Protocol support** | HTTP / TCP / UDP | HTTP / TCP | HTTP only** | All |
+| **Works behind NAT** | ✅ | ✅ | ✅ | ❌ |
+| **Automatic HTTPS** | ✅ | ✅ | ✅ | ❌ |
+| **Traffic privacy** | ✅ You control | ❌ ngrok sees all | ❌ CF sees all | ✅ |
+
+\* Free with limitations  
+\*\* Non-HTTP protocols require Cloudflare Access (paid)
+
+---
+
+## Firewall Setup
+
+Gopher needs four ports reachable on your VPS: **22** (SSH), **80** (HTTP), **443** (HTTPS), and **2333** (rathole control).
+
+> **Note:** Automatic firewall management is planned for a future release. For now, open the required ports manually using the instructions below.
+
+### OS-level firewall (on the VPS itself)
+
+If your VPS is running UFW:
+
+```bash
+sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw allow 2333/tcp
+sudo ufw enable
+```
+
+If it's running firewalld (RHEL/CentOS):
+
+```bash
+sudo firewall-cmd --permanent --add-port=22/tcp
+sudo firewall-cmd --permanent --add-port=80/tcp
+sudo firewall-cmd --permanent --add-port=443/tcp
+sudo firewall-cmd --permanent --add-port=2333/tcp
+sudo firewall-cmd --reload
+```
+
+Or with raw iptables:
+
+```bash
+sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 2333 -j ACCEPT
+# Save rules so they persist after reboot
+sudo iptables-save | sudo tee /etc/iptables/rules.v4   # Debian/Ubuntu
+# sudo iptables-save | sudo tee /etc/sysconfig/iptables  # RHEL/CentOS
+```
+
+Each tunnel you create also gets its own port (starting around 20000). You'll need to open those too as you add tunnels — Gopher shows the assigned port when you create one.
+
+### Cloud-level firewall / security groups
+
+Most cloud providers have a firewall that sits in front of the VM and blocks traffic before it ever reaches the OS. You need to open ports there as well.
+
+**Oracle Cloud (OCI)** — the most common gotcha, since the default security list blocks almost everything:
+
+1. Go to **Networking → Virtual Cloud Networks → your VCN → Security Lists**
+2. Edit the **Default Security List** (or whichever is attached to your subnet)
+3. Add ingress rules for TCP ports 80, 443, and 2333 from source `0.0.0.0/0`
+4. Port 22 is usually already open
+
+Alternatively, use a **Network Security Group** attached to your instance instead of the security list.
+
+**AWS EC2:**
+
+1. Go to **EC2 → Instances → your instance → Security**
+2. Click the security group link
+3. Edit **Inbound rules** → add TCP 80, 443, 2333 from `0.0.0.0/0`
+
+**Hetzner:**
+
+1. Go to **Firewall** in the Cloud Console
+2. Add inbound rules for TCP 80, 443, 2333
+3. Apply the firewall to your server
+
+**DigitalOcean:**
+
+1. Go to **Networking → Firewalls**
+2. Create or edit a firewall, add TCP 80, 443, 2333 inbound
+3. Apply it to your droplet
+
+---
+
+## VPS Recommendations
+
+**Tested providers:**
+- **Oracle Cloud Free Tier** — 4 vCPU ARM, 24 GB RAM, 4 Gbps — best free option for Gopher
+- **Hetzner** — ~€4/month — reliable and cheap
+- **DigitalOcean / Vultr** — $6/month droplet works well
+- **AWS EC2** — t2.micro is free tier eligible but networking is slow (~0.05 Gbps)
+
+**Minimum:** 1 vCPU, 512 MB RAM handles 10+ tunnels comfortably.
+
+---
 
 ## Project Structure
+
 ```
 gopher/
 ├── cmd/server/
 │   ├── main.go                     # Entry point; embeds frontend
-│   └── frontend/dist/              # Compiled React app
+│   └── frontend/dist/              # Compiled React app (embedded at build time)
 ├── frontend/                       # React + TypeScript + Tailwind
 │   └── src/
-│       ├── pages/                  # Dashboard, Machines, Tunnels, Server
+│       ├── pages/                  # Dashboard, Machines, Tunnels, Server, Setup
 │       └── components/             # UI components
 ├── internal/
-│   ├── api/                        # Chi router + handlers
+│   ├── api/                        # Chi router + HTTP handlers
 │   ├── config/                     # Caddyfile + rathole TOML generation
 │   ├── db/                         # SQLite (GORM) models + migrations
-│   ├── service/                    # Business logic
-│   └── ssh/                        # SSH client + deploy scripts
+│   ├── service/                    # Business logic (install, tunnels, firewall, …)
+│   └── ssh/                        # SSH client + VPS/machine deploy scripts
 └── scripts/
-    ├── build.sh                    # Build script
-    └── dev.sh                      # Dev mode (hot reload)
+    ├── build.sh                    # Build frontend then Go binary
+    └── dev.sh                      # Dev mode with hot reload
 ```
 
 ## Tech Stack
 
-**Backend:**
-- Go 1.21+ - Single binary, great for SSH/networking
-- Chi router - Lightweight HTTP router
-- GORM + glebarez/sqlite - Pure Go SQLite (no CGO)
-- golang.org/x/crypto/ssh - SSH for VPS management
+**Backend:** Go 1.21+, Chi router, GORM + glebarez/sqlite (pure-Go, no CGO), golang.org/x/crypto/ssh
 
-**Frontend:**
-- React 18 + TypeScript - Component-based UI with type safety
-- Vite - Lightning-fast dev server
-- Tailwind CSS - Utility-first styling
-- Embedded via `//go:embed` - Single binary distribution
+**Frontend:** React 18 + TypeScript, Vite, Tailwind CSS — embedded in the binary via `//go:embed`
 
-**Infrastructure (deployed by Gopher):**
-- Caddy 2 - Reverse proxy with automatic HTTPS
-- rathole - Lightweight TCP tunnel (Rust-based)
+**Infrastructure (managed by Gopher):** [Caddy 2](https://caddyserver.com/) for HTTPS + routing, [rathole](https://github.com/rathole-org/rathole) for tunneling
+
+---
 
 ## Development
+
 ```bash
-# Development mode (hot reload)
+# Dev mode (hot reload on both frontend and backend)
 ./scripts/dev.sh
 # Frontend: http://localhost:5173
-# Backend: http://localhost:8080
+# Backend:  http://localhost:8080
 
 # Production build
 ./scripts/build.sh
 ./gopher
 ```
 
-## VPS Recommendations
-
-**Tested providers:**
-- **Oracle Cloud:** Free tier (4 vCPU ARM, 24GB RAM, 4 Gbps) - perfect for Gopher
-- **Hetzner:** €3.79/month - reliable and cheap
-- **DigitalOcean:** $6/month droplet works well
-- **AWS EC2:** t2.micro (free tier eligible)
-  - Not recommended because of miserable networking (~0.05 Gbps)
-
-**Minimum specs:** 1 vCPU, 1GB RAM handles ~10 tunnels
-
-**Required ports open:** 22 (SSH), 80 (HTTP), 443 (HTTPS), 2333 (rathole)
-
-## Comparison
-
-|  | Gopher | ngrok | Cloudflare Tunnel | Port Forwarding |
-|---|--------|-------|-------------------|-----------------|
-| **Cost** | VPS (~$3-5/mo) | $8-20/mo | Free* | None |
-| **Custom domain** | ✅ | 💰 Paid tier | ⚠️ CF DNS required | ✅ |
-| **Permanent URLs** | ✅ | ❌ Ephemeral | ✅ | ✅ |
-| **Self-hosted** | ✅ | ❌ | ❌ | N/A |
-| **Vendor lock-in** | ❌ | ✅ | ✅ | ❌ |
-| **Protocol support** | HTTP/TCP/UDP | HTTP/TCP | HTTP only** | All |
-| **File size limit** | None (VPS disk) | Varies | ⚠️ 100-500 MB | None |
-| **Bandwidth limit** | VPS limit (1-10 TB) | Plan based | ⚠️ Undefined | ISP only |
-| **Request timeout** | Unlimited | Varies | ⚠️ 100s free | Unlimited |
-| **Works behind NAT** | ✅ | ✅ | ✅ | ❌ |
-| **Automatic HTTPS** | ✅ | ✅ | ✅ | ❌ |
-| **Traffic privacy** | ✅ You control | ❌ ngrok sees all | ❌ CF sees all | ✅ |
-| **Use case** | Self-hosted services | Development/demos | Simple websites | Home network |
-
-*Free with limitations  
-**Non-HTTP protocols require Cloudflare Access (paid)
+---
 
 ## Contributing
 
-Issues and PRs welcome! See [issues](https://github.com/smalex-z/gopher/issues).
+Issues and PRs welcome. See [open issues](https://github.com/smalex-z/gopher/issues).
 
-**Areas needing help:**
-- Testing on different VPS providers
-- Documentation improvements
-- Bug reports and fixes
+Areas that would help most:
+- Testing on different distros and VPS providers
+- Bug reports with reproduction steps
 
 ## License
 
-MIT - see [LICENSE](LICENSE)
+MIT — see [LICENSE](LICENSE)
 
 ## Acknowledgments
 
-Built with [Caddy](https://caddyserver.com/), [rathole](https://github.com/rapiz1/rathole), and inspired by ngrok and Cloudflare Tunnel.
+Gopher is a thin management layer on top of two great projects: [Caddy](https://caddyserver.com/) by Matt Holt and the team, and [rathole](https://github.com/rathole-org/rathole) (originally by rapiz1). Without them there is no Gopher.
