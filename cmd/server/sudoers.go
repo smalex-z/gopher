@@ -56,6 +56,12 @@ func ensurePasswordlessSudoForCurrentUser() error {
 // buildBootstrapSudoers generates limited passwordless sudo rules for machine bootstrap.
 // Allows only the commands necessary for managing rathole-client and Caddy services.
 func buildBootstrapSudoers(username string) string {
+	pkgMgrLine := "/usr/bin/apt-get, /bin/apt-get"
+	if p, err := exec.LookPath("dnf"); err == nil {
+		pkgMgrLine = p
+	} else if p, err := exec.LookPath("yum"); err == nil {
+		pkgMgrLine = p
+	}
 	return fmt.Sprintf(`# Gopher rathole bootstrap - limited sudo access
 %s ALL=(ALL:ALL) NOPASSWD: /bin/mkdir, /usr/bin/mkdir
 %s ALL=(ALL:ALL) NOPASSWD: /bin/systemctl, /usr/bin/systemctl
@@ -64,7 +70,7 @@ func buildBootstrapSudoers(username string) string {
 %s ALL=(ALL:ALL) NOPASSWD: /usr/bin/chown, /bin/chown
 %s ALL=(ALL:ALL) NOPASSWD: /usr/bin/tee, /bin/tee
 %s ALL=(ALL:ALL) NOPASSWD: /bin/chmod, /usr/bin/chmod
-%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/apt-get, /bin/apt-get
+%s ALL=(ALL:ALL) NOPASSWD: `+pkgMgrLine+`
 %s ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash
 %s ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl
 `, username, username, username, username, username, username, username, username, username, username)
