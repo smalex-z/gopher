@@ -53,6 +53,8 @@ func NewRouter(
 		r.Get("/local/logs/ws", logsH.WebSocketDuringSetup)
 		r.Get("/local/check-dns", localH.CheckDNS)
 		r.Get("/local/resolve-ip", localH.ResolveIP)
+		r.Get("/local/firewall/detect", localH.DetectFirewall)
+		r.Post("/local/firewall/configure", localH.ConfigureFirewall)
 
 		// All routes below require a valid session
 		r.Group(func(r chi.Router) {

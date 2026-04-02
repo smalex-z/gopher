@@ -23,6 +23,8 @@ type LocalServiceStatus struct {
 	LocalSetupDone       bool   `json:"local_setup_done"`
 	HasInstallPermission bool   `json:"has_install_permission"`
 	SSHPublicKey         string `json:"ssh_public_key"`
+	// FirewallMode is the persisted firewall strategy: "gopher", "manual", "none", or "" (not configured).
+	FirewallMode         string `json:"firewall_mode"`
 }
 
 type LocalSetupService struct {
@@ -46,6 +48,7 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 		Domain:               settings.Domain,
 		LocalSetupDone:       settings.LocalSetupDone,
 		HasInstallPermission: hasInstallPermission(),
+		FirewallMode:         settings.FirewallMode,
 	}
 	if key, kerr := db.GetDefaultSSHKey(); kerr == nil {
 		status.SSHPublicKey = key.PublicKey

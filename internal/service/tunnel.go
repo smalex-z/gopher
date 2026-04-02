@@ -168,6 +168,9 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 		return nil, err
 	}
 
+	// Open firewall port if Gopher manages the firewall (non-fatal).
+	ApplyTunnelPort(tunnel.RatholePort, tunnel.Transport)
+
 	// Push configs to server + client (non-fatal: tunnel is saved even if this fails)
 	machine, machErr := db.GetMachine(req.MachineID)
 	if machErr == nil && s.local != nil {
@@ -248,6 +251,9 @@ func (s *TunnelService) Delete(id string) error {
 	if err := db.DeleteTunnel(id); err != nil {
 		return err
 	}
+
+	// Close firewall port if Gopher manages the firewall (non-fatal).
+	RevokeTunnelPort(tunnel.RatholePort, tunnel.Transport)
 
 	if s.local != nil {
 		if err := s.local.ReconcileServerConfig(); err != nil {

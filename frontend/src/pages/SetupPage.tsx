@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { Lock, Eye, EyeOff, CheckCircle2, XCircle, Loader2, SkipForward, Key, RefreshCw, Upload, Download, ClipboardCopy } from 'lucide-react'
+import { Lock, Eye, EyeOff, CheckCircle2, XCircle, Loader2, SkipForward, Key, RefreshCw, Upload, Download, ClipboardCopy, Shield, ShieldAlert, ShieldCheck, ShieldOff } from 'lucide-react'
 import client from '../api/client'
 import { useAuth } from '../lib/auth'
-import { localApi, type LocalServiceStatus } from '../api/local'
+import { localApi, type LocalServiceStatus, type FirewallStatus, type FirewallMode } from '../api/local'
 import { toast } from '../lib/toast'
 import DeployLogModal from '../components/DeployLogModal'
 import type { SSHKey } from '../types'
@@ -35,7 +35,7 @@ function PasswordStep({ onDone }: { onDone: () => void }) {
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
       <div className="flex items-center gap-2 mb-6 text-blue-600">
         <Lock size={18} />
-        <span className="font-semibold text-sm uppercase tracking-wide">Step 1 of 3 — Admin password</span>
+        <span className="font-semibold text-sm uppercase tracking-wide">Step 1 of 4 — Admin password</span>
       </div>
       <form onSubmit={handleSubmit} className="space-y-5">
         <div>
@@ -194,7 +194,7 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-6">
       <div className="flex items-center gap-2 text-blue-600">
-        <span className="font-semibold text-sm uppercase tracking-wide">Step 2 of 3 — Local services</span>
+        <span className="font-semibold text-sm uppercase tracking-wide">Step 2 of 4 — Local services</span>
       </div>
 
       <p className="text-sm text-gray-600">
@@ -361,7 +361,240 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
   )
 }
 
-// ─── Step 3: SSH Key ─────────────────────────────────────────────────────────
+// ─── Step 3: Firewall ────────────────────────────────────────────────────────
+
+type FirewallModeOption = { id: FirewallMode; label: string; description: string; icon: React.ReactNode; recommended?: boolean }
+
+const FIREWALL_OPTIONS: FirewallModeOption[] = [
+  {
+    id: 'gopher',
+    label: 'Gopher-managed firewall',
+    recommended: true,
+    icon: <ShieldCheck size={22} className="text-blue-500" />,
+    description: 'Gopher manages iptables directly. Ports are opened and closed automatically as tunnels are created or deleted. Existing UFW/firewalld/nftables services will be disabled.',
+  },
+  {
+    id: 'manual',
+    label: 'Keep existing firewall',
+    icon: <Shield size={22} className="text-amber-500" />,
+    description: 'Gopher will NOT modify firewall rules. You must manually open the rathole port for each tunnel. Gopher will show the required commands when needed.',
+  },
+  {
+    id: 'none',
+    label: 'No firewall management',
+    icon: <ShieldOff size={22} className="text-gray-400" />,
+    description: 'No firewall enforcement by Gopher. Only safe in isolated or already-locked-down environments.',
+  },
+]
+
+function FirewallPill({ label, active, installed }: { label: string; active: boolean; installed?: boolean }) {
+  if (!installed && installed !== undefined) {
+    return <span className="px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-400">{label}: not installed</span>
+  }
+  return (
+    <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${active ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>
+      {active ? <ShieldAlert size={11} /> : <Shield size={11} />}
+      {label}: {active ? 'active' : 'inactive'}
+    </span>
+  )
+}
+
+function FirewallStep({ onDone }: { onDone: () => void }) {
+  const [detected, setDetected] = useState<FirewallStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [selected, setSelected] = useState<FirewallMode>('gopher')
+  const [confirming, setConfirming] = useState(false)
+  const [showLogs, setShowLogs] = useState(false)
+  const [done, setDone] = useState(false)
+  const [skipping, setSkipping] = useState(false)
+
+  useEffect(() => {
+    localApi.detectFirewall()
+      .then(setDetected)
+      .catch(() => setDetected(null))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const handleContinue = () => {
+    if (selected === 'gopher') {
+      setConfirming(true)
+    } else {
+      // Manual/none: kick off configure (which just saves the setting) then advance.
+      setSkipping(true)
+      localApi.configureFirewall(selected)
+        .then(() => onDone())
+        .catch(() => {
+          toast.error('Failed to save firewall preference')
+          setSkipping(false)
+        })
+    }
+  }
+
+  if (done) {
+    return (
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-4">
+        <div className="flex items-center gap-2 text-blue-600">
+          <ShieldCheck size={18} />
+          <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 4 — Firewall</span>
+        </div>
+        <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-start gap-3">
+          <CheckCircle2 size={18} className="text-green-600 mt-0.5 shrink-0" />
+          <div className="text-sm text-green-800">
+            <div className="font-semibold">Firewall configured successfully</div>
+            <div className="text-xs mt-1">iptables rules are active and will persist across reboots.</div>
+          </div>
+        </div>
+        <button
+          onClick={onDone}
+          className="w-full bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors"
+        >
+          Continue →
+        </button>
+      </div>
+    )
+  }
+
+  if (confirming) {
+    const activeManagers = [
+      detected?.ufw.active && 'UFW',
+      detected?.firewalld.active && 'firewalld',
+      detected?.nftables.active && 'nftables',
+    ].filter(Boolean)
+
+    return (
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-5">
+        <div className="flex items-center gap-2 text-blue-600">
+          <ShieldCheck size={18} />
+          <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 4 — Firewall</span>
+        </div>
+
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 space-y-3 text-sm text-amber-900">
+          <div className="font-semibold flex items-center gap-2"><ShieldAlert size={16} /> Confirm firewall takeover</div>
+          <ul className="space-y-1.5 text-xs list-none">
+            {activeManagers.length > 0 && (
+              <li className="flex gap-2"><span>•</span><span><strong>{activeManagers.join(', ')}</strong> will be disabled (not uninstalled — you can re-enable manually)</span></li>
+            )}
+            <li className="flex gap-2"><span>•</span><span>Current iptables rules will be backed up to <code>/root/gopher-firewall-backup.rules</code></span></li>
+            <li className="flex gap-2"><span>•</span><span><strong>SSH (port 22) will remain open</strong> — you will not be locked out</span></li>
+            <li className="flex gap-2"><span>•</span><span>Ports 80, 443, 2333, and 8080 will be allowed</span></li>
+            <li className="flex gap-2"><span>•</span><span>All tunnel ports will be opened automatically going forward</span></li>
+          </ul>
+        </div>
+
+        <div className="flex gap-3">
+          <button
+            onClick={() => setConfirming(false)}
+            className="px-4 py-2.5 border border-gray-300 text-gray-600 rounded-lg text-sm hover:bg-gray-50 transition-colors"
+          >
+            ← Back
+          </button>
+          <button
+            onClick={() => setShowLogs(true)}
+            className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors"
+          >
+            Confirm & Apply
+          </button>
+        </div>
+
+        <DeployLogModal
+          isOpen={showLogs}
+          onClose={() => setShowLogs(false)}
+          onComplete={() => setDone(true)}
+          title="Configuring Firewall"
+          onStart={() => localApi.configureFirewall('gopher')}
+          wsPath="/api/local/logs/ws"
+          autoStart
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-6">
+      <div className="flex items-center gap-2 text-blue-600">
+        <Shield size={18} />
+        <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 4 — Firewall</span>
+      </div>
+
+      <p className="text-sm text-gray-600">
+        Choose how Gopher should handle firewall rules. This controls which ports are open on this server.
+      </p>
+
+      {/* Detection results */}
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-gray-400">
+          <Loader2 size={14} className="animate-spin" /> Detecting firewall state…
+        </div>
+      ) : detected ? (
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Detected on this system</p>
+          <div className="flex flex-wrap gap-2">
+            <FirewallPill label="UFW" installed={detected.ufw.installed} active={detected.ufw.active} />
+            <FirewallPill label="firewalld" installed={detected.firewalld.installed} active={detected.firewalld.active} />
+            <FirewallPill label="nftables" installed={detected.nftables.installed} active={detected.nftables.active} />
+            <FirewallPill label="iptables" installed={detected.iptables.available} active={false} />
+          </div>
+          {!detected.any_active && (
+            <p className="text-xs text-gray-400">No active firewall detected. Gopher-managed mode will set up a fresh iptables configuration.</p>
+          )}
+        </div>
+      ) : (
+        <p className="text-xs text-amber-600">Could not detect firewall state — detection may require sudo access.</p>
+      )}
+
+      {/* Mode selection */}
+      <div className="space-y-3">
+        {FIREWALL_OPTIONS.map(opt => (
+          <button
+            key={opt.id}
+            onClick={() => setSelected(opt.id)}
+            className={`w-full text-left p-4 rounded-xl border-2 transition-all ${
+              selected === opt.id
+                ? 'border-blue-400 bg-blue-50'
+                : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              {opt.icon}
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-sm text-gray-800">{opt.label}</span>
+                  {opt.recommended && (
+                    <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-xs rounded font-medium">Recommended</span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 mt-0.5">{opt.description}</p>
+              </div>
+              <div className={`w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center ${
+                selected === opt.id ? 'border-blue-500 bg-blue-500' : 'border-gray-300'
+              }`}>
+                {selected === opt.id && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+              </div>
+            </div>
+          </button>
+        ))}
+      </div>
+
+      <div className="flex gap-3">
+        <button
+          onClick={handleContinue}
+          disabled={skipping}
+          className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {skipping ? <span className="flex items-center justify-center gap-2"><Loader2 size={14} className="animate-spin" /> Saving…</span> : 'Continue →'}
+        </button>
+        <button
+          onClick={onDone}
+          className="flex items-center gap-1.5 px-4 py-2.5 border border-gray-300 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
+        >
+          <SkipForward size={15} /> Skip
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Step 4: SSH Key ─────────────────────────────────────────────────────────
 type KeyMode = 'choose' | 'generate' | 'upload'
 
 function SSHKeyStep({ onDone }: { onDone: () => void }) {
@@ -425,7 +658,7 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-6">
         <div className="flex items-center gap-2 text-blue-600">
           <Key size={18} />
-          <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 3 — SSH key</span>
+          <span className="font-semibold text-sm uppercase tracking-wide">Step 4 of 4 — SSH key</span>
         </div>
         <p className="text-sm text-gray-600">
           Gopher uses an SSH key pair to connect back into bootstrapped machines through their
@@ -482,7 +715,7 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-5">
         <div className="flex items-center gap-2 text-blue-600">
           <Key size={18} />
-          <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 3 — Key generated</span>
+          <span className="font-semibold text-sm uppercase tracking-wide">Step 4 of 4 — Key generated</span>
         </div>
         <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-start gap-3">
           <CheckCircle2 size={18} className="text-green-600 mt-0.5 shrink-0" />
@@ -524,7 +757,7 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-5">
       <div className="flex items-center gap-2 text-blue-600">
         <Upload size={18} />
-        <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 3 — Upload SSH key</span>
+        <span className="font-semibold text-sm uppercase tracking-wide">Step 4 of 4 — Upload SSH key</span>
       </div>
       <p className="text-sm text-gray-500">Paste your key contents or click Browse to select files.</p>
       <div>
@@ -598,7 +831,7 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
 }
 
 // ─── Main SetupPage ───────────────────────────────────────────────────────────
-type SetupStep = 1 | 2 | 3
+type SetupStep = 1 | 2 | 3 | 4
 
 export default function SetupPage({ initialStep = 1 }: { initialStep?: SetupStep }) {
   const { refetch } = useAuth()
@@ -607,6 +840,7 @@ export default function SetupPage({ initialStep = 1 }: { initialStep?: SetupStep
   const subtitle =
     step === 1 ? 'Create an admin password to get started'
     : step === 2 ? 'Set up local tunnel services'
+    : step === 3 ? 'Configure firewall rules'
     : 'Configure SSH key for machine access'
 
   return (
@@ -622,6 +856,8 @@ export default function SetupPage({ initialStep = 1 }: { initialStep?: SetupStep
           ? <PasswordStep onDone={() => setStep(2)} />
           : step === 2
           ? <ServicesStep onDone={() => setStep(3)} />
+          : step === 3
+          ? <FirewallStep onDone={() => setStep(4)} />
           : <SSHKeyStep onDone={refetch} />
         }
       </div>

@@ -10,7 +10,19 @@ export interface LocalServiceStatus {
   local_setup_done: boolean
   has_install_permission: boolean
   ssh_public_key: string
+  /** "gopher" | "manual" | "none" | "" (wizard not yet completed) */
+  firewall_mode: string
 }
+
+export interface FirewallStatus {
+  ufw: { installed: boolean; active: boolean }
+  firewalld: { installed: boolean; active: boolean }
+  nftables: { installed: boolean; active: boolean; has_config: boolean }
+  iptables: { available: boolean }
+  any_active: boolean
+}
+
+export type FirewallMode = 'gopher' | 'manual' | 'none'
 
 export interface DNSCheckResult {
   ok: boolean
@@ -40,4 +52,8 @@ export const localApi = {
     client.put(`/local/ssh-keys/${id}/default`).then(r => r.data),
   downloadSSHKey: (id: string) =>
     client.get(`/local/ssh-keys/${id}/download`, { responseType: 'blob' }).then(r => r.data as Blob),
+  detectFirewall: () =>
+    client.get<{ data: FirewallStatus }>('/local/firewall/detect').then(r => r.data.data),
+  configureFirewall: (mode: FirewallMode) =>
+    client.post('/local/firewall/configure', { mode }).then(r => r.data),
 }

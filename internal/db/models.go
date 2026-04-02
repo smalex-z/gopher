@@ -68,6 +68,9 @@ type AppSettings struct {
 	IsSetup        bool      `json:"is_setup"`
 	Domain         string    `json:"domain"`
 	LocalSetupDone bool      `json:"local_setup_done"`
+	// FirewallMode is one of "gopher" (Gopher manages iptables), "manual" (user manages),
+	// or "none" (no firewall). Empty string means the wizard step has not run yet.
+	FirewallMode   string    `json:"firewall_mode"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

@@ -240,5 +240,35 @@ func (h *LocalHandler) CheckDNS(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /api/local/firewall/detect
+// Public — called from the wizard before auth may be established.
+func (h *LocalHandler) DetectFirewall(w http.ResponseWriter, r *http.Request) {
+	status := h.svc.FirewallDetect()
+	response.Success(w, status)
+}
+
+// POST /api/local/firewall/configure
+// Body: {"mode": "gopher"|"manual"|"none"}
+// For "gopher" mode the takeover is async and streams logs to the log WebSocket.
+// For "manual" and "none" the mode is saved synchronously.
+func (h *LocalHandler) ConfigureFirewall(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.BadRequest(w, "invalid request body")
+		return
+	}
+	switch body.Mode {
+	case "gopher", "manual", "none":
+		// valid
+	default:
+		response.BadRequest(w, "mode must be one of: gopher, manual, none")
+		return
+	}
+	h.svc.FirewallConfigure(body.Mode)
+	response.Success(w, map[string]string{"message": "firewall configuration started"})
+}
+
 // validDomain matches a reasonable FQDN: labels of alphanumeric + hyphens separated by dots.
 var validDomain = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)
