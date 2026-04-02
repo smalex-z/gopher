@@ -11,6 +11,18 @@ import (
 	"github.com/smalex-z/gopher/internal/db"
 )
 
+// pkgManager detects the system package manager. Returns "apt", "dnf", or "yum".
+// Defaults to "apt" if none of the others are found.
+func pkgManager() string {
+	if isCommandAvailable("dnf") {
+		return "dnf"
+	}
+	if isCommandAvailable("yum") {
+		return "yum"
+	}
+	return "apt"
+}
+
 //go:embed templates/rathole-server.service
 var ratholeServerServiceTemplate string
 
@@ -77,7 +89,7 @@ func (s *LocalSetupService) doInstall(domain string, skipCaddy bool, logWriter i
 		fmt.Fprintln(logWriter, "Step 1: Skipping Caddy setup (reverse proxy disabled)")
 	} else {
 		if !isCommandAvailable("caddy") {
-			fmt.Fprintln(logWriter, "Step 1: Installing Caddy via apt...")
+			fmt.Fprintf(logWriter, "Step 1: Installing Caddy via %s...\n", pkgManager())
 			if err := installLocalCaddy(logWriter); err != nil {
 				return fmt.Errorf("failed to install Caddy: %w", err)
 			}
@@ -210,17 +222,32 @@ func (s *LocalSetupService) doInstall(domain string, skipCaddy bool, logWriter i
 
 func installLocalCaddy(logWriter io.Writer) error {
 	sudo := privilegedCmdPrefix()
-	steps := [][]string{
-		append(sudo, "apt-get", "update", "-y"),
-		append(sudo, "apt-get", "install", "-y", "debian-keyring", "debian-archive-keyring", "apt-transport-https", "curl"),
-		append(sudo, "bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --batch --yes --no-tty -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg`),
-		append(sudo, "bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list`),
-		append(sudo, "apt-get", "update", "-y"),
-		append(sudo, "apt-get", "install", "-y", "caddy"),
-	}
-	for _, args := range steps {
-		if err := runLocalCmd(logWriter, args[0], args[1:]...); err != nil {
-			return err
+	switch pkgManager() {
+	case "dnf", "yum":
+		pm := pkgManager()
+		steps := [][]string{
+			append(sudo, "bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --batch --yes --no-tty -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg`),
+			append(sudo, "bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/config.rpm.txt' | tee /etc/yum.repos.d/caddy-stable.repo`),
+			append(sudo, pm, "install", "-y", "caddy"),
+		}
+		for _, args := range steps {
+			if err := runLocalCmd(logWriter, args[0], args[1:]...); err != nil {
+				return err
+			}
+		}
+	default: // apt
+		steps := [][]string{
+			append(sudo, "apt-get", "update", "-y"),
+			append(sudo, "apt-get", "install", "-y", "debian-keyring", "debian-archive-keyring", "apt-transport-https", "curl"),
+			append(sudo, "bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --batch --yes --no-tty -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg`),
+			append(sudo, "bash", "-c", `curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list`),
+			append(sudo, "apt-get", "update", "-y"),
+			append(sudo, "apt-get", "install", "-y", "caddy"),
+		}
+		for _, args := range steps {
+			if err := runLocalCmd(logWriter, args[0], args[1:]...); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -242,14 +269,21 @@ func installLocalRathole(logWriter io.Writer) error {
 
 	// Ensure unzip is available before attempting to extract.
 	if !isCommandAvailable("unzip") {
-		fmt.Fprintln(logWriter, "  unzip not found, installing via apt...")
-		aptSudo := privilegedCmdPrefix()
-		aptUpdate := append(aptSudo, "apt-get", "update", "-qq")
-		aptInstall := append(aptSudo, "apt-get", "install", "-y", "-qq", "unzip")
-		if err := runLocalCmd(logWriter, aptUpdate[0], aptUpdate[1:]...); err != nil {
-			return fmt.Errorf("failed to run apt-get update: %w", err)
+		pm := pkgManager()
+		fmt.Fprintf(logWriter, "  unzip not found, installing via %s...\n", pm)
+		pkgSudo := privilegedCmdPrefix()
+		var installCmd []string
+		switch pm {
+		case "dnf", "yum":
+			installCmd = append(pkgSudo, pm, "install", "-y", "-q", "unzip")
+		default: // apt
+			update := append(pkgSudo, "apt-get", "update", "-qq")
+			if err := runLocalCmd(logWriter, update[0], update[1:]...); err != nil {
+				return fmt.Errorf("failed to run apt-get update: %w", err)
+			}
+			installCmd = append(pkgSudo, "apt-get", "install", "-y", "-qq", "unzip")
 		}
-		if err := runLocalCmd(logWriter, aptInstall[0], aptInstall[1:]...); err != nil {
+		if err := runLocalCmd(logWriter, installCmd[0], installCmd[1:]...); err != nil {
 			return fmt.Errorf("failed to install unzip: %w", err)
 		}
 	}

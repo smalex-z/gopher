@@ -116,8 +116,16 @@ if ! command -v rathole &>/dev/null && [ ! -f "$HOME/.local/bin/rathole" ]; then
     curl -fsSL "$RATHOLE_URL" -o /tmp/rathole-dl/rathole.zip || { echo "ERROR: Download failed"; exit 1; }
   fi
   if ! command -v unzip &>/dev/null; then
-    echo "  unzip not found, trying apt..."
-    sudo apt-get install -y unzip -qq || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
+    if command -v dnf &>/dev/null; then
+      echo "  unzip not found, installing via dnf..."
+      sudo dnf install -y -q unzip || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
+    elif command -v yum &>/dev/null; then
+      echo "  unzip not found, installing via yum..."
+      sudo yum install -y -q unzip || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
+    else
+      echo "  unzip not found, installing via apt..."
+      sudo apt-get install -y unzip -qq || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
+    fi
   fi
   unzip -q /tmp/rathole-dl/rathole.zip -d /tmp/rathole-dl/ || { echo "ERROR: unzip failed"; exit 1; }
 

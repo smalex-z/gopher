@@ -265,8 +265,14 @@ func buildSudoers(user, systemctlPath, teePath, mkdirPath, pkillPath string) str
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/chown, /bin/chown", user))
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/chmod, /usr/bin/chmod", user))
 	
-	// Allow apt operations for local service installation
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/apt-get, /bin/apt-get", user))
+	// Allow package manager operations for local service installation
+	if pkgMgrPath, err := exec.LookPath("dnf"); err == nil {
+		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, pkgMgrPath))
+	} else if pkgMgrPath, err := exec.LookPath("yum"); err == nil {
+		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, pkgMgrPath))
+	} else {
+		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/apt-get, /bin/apt-get", user))
+	}
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash", user))
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl", user))
 	
