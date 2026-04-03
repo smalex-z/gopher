@@ -29,6 +29,8 @@ func (s *LocalSetupService) FirewallConfigure(mode string) {
 		w := &hubWriter{hub: s.hub}
 		if err := doFirewallConfigure(mode, w); err != nil {
 			fmt.Fprintf(w, "ERROR: %v\n", err)
+			s.hub.Broadcast("\x00ERROR")
+			return
 		}
 		s.hub.Broadcast("\x00DONE")
 	}()
@@ -208,20 +210,36 @@ func firewallOpenExistingTunnelPorts(logWriter io.Writer) error {
 		if proto == "" {
 			proto = "tcp"
 		}
-		if err := iptablesOpenPort(t.RatholePort, proto); err != nil {
-			fmt.Fprintf(logWriter, "  WARN: port %d/%s (tunnel %s): %v\n", t.RatholePort, proto, t.ID, err)
+		if t.Private {
+			if err := iptablesMakePrivate(t.RatholePort, proto); err != nil {
+				fmt.Fprintf(logWriter, "  WARN: port %d/%s (tunnel %s, private): %v\n", t.RatholePort, proto, t.ID, err)
+			} else {
+				fmt.Fprintf(logWriter, "  Restricted port %d/%s to localhost (tunnel %s)\n", t.RatholePort, proto, t.ID)
+			}
 		} else {
-			fmt.Fprintf(logWriter, "  Opened port %d/%s (tunnel %s)\n", t.RatholePort, proto, t.ID)
+			if err := iptablesOpenPort(t.RatholePort, proto); err != nil {
+				fmt.Fprintf(logWriter, "  WARN: port %d/%s (tunnel %s): %v\n", t.RatholePort, proto, t.ID, err)
+			} else {
+				fmt.Fprintf(logWriter, "  Opened port %d/%s (tunnel %s)\n", t.RatholePort, proto, t.ID)
+			}
 		}
 	}
 	for _, m := range machines {
 		if m.TunnelPort == 0 {
 			continue
 		}
-		if err := iptablesOpenPort(m.TunnelPort, "tcp"); err != nil {
-			fmt.Fprintf(logWriter, "  WARN: port %d/tcp (machine %s SSH): %v\n", m.TunnelPort, m.ID, err)
+		if m.PublicSSH {
+			if err := iptablesOpenPort(m.TunnelPort, "tcp"); err != nil {
+				fmt.Fprintf(logWriter, "  WARN: port %d/tcp (machine %s SSH, public): %v\n", m.TunnelPort, m.ID, err)
+			} else {
+				fmt.Fprintf(logWriter, "  Opened port %d/tcp (machine %s SSH, public)\n", m.TunnelPort, m.ID)
+			}
 		} else {
-			fmt.Fprintf(logWriter, "  Opened port %d/tcp (machine %s SSH)\n", m.TunnelPort, m.ID)
+			if err := iptablesMakePrivate(m.TunnelPort, "tcp"); err != nil {
+				fmt.Fprintf(logWriter, "  WARN: port %d/tcp (machine %s SSH, private): %v\n", m.TunnelPort, m.ID, err)
+			} else {
+				fmt.Fprintf(logWriter, "  Restricted port %d/tcp to localhost (machine %s SSH)\n", m.TunnelPort, m.ID)
+			}
 		}
 	}
 	return nil
@@ -275,9 +293,10 @@ func firewallSaveRules(logWriter io.Writer, sudo []string) error {
 
 // -- Dynamic port management -------------------------------------------------
 
-// ApplyTunnelPort opens a firewall port for a new tunnel when in Gopher-managed mode.
+// ApplyTunnelPort opens or restricts a firewall port for a tunnel when in Gopher-managed mode.
+// Private tunnels are restricted to localhost (127.0.0.1) via iptablesMakePrivate.
 // Errors are non-fatal — tunnel creation is not blocked by firewall state.
-func ApplyTunnelPort(port int, transport string) {
+func ApplyTunnelPort(port int, transport string, private bool) {
 	settings, err := db.GetSettings()
 	if err != nil || settings.FirewallMode != "gopher" {
 		return
@@ -289,9 +308,16 @@ func ApplyTunnelPort(port int, transport string) {
 	if proto == "" {
 		proto = "tcp"
 	}
-	if err := iptablesOpenPort(port, proto); err != nil {
-		log.Printf("firewall: could not open port %d/%s: %v", port, proto, err)
-		return
+	if private {
+		if err := iptablesMakePrivate(port, proto); err != nil {
+			log.Printf("firewall: could not restrict port %d/%s: %v", port, proto, err)
+			return
+		}
+	} else {
+		if err := iptablesOpenPort(port, proto); err != nil {
+			log.Printf("firewall: could not open port %d/%s: %v", port, proto, err)
+			return
+		}
 	}
 	persistRules()
 }

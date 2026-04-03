@@ -245,7 +245,7 @@ WantedBy=multi-user.target
 func buildSudoers(user, systemctlPath, teePath, mkdirPath, pkillPath string) string {
 	var lines []string
 	lines = append(lines, "# Gopher server - limited sudo access")
-	
+
 	if systemctlPath != "" {
 		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, systemctlPath))
 	}
@@ -258,14 +258,20 @@ func buildSudoers(user, systemctlPath, teePath, mkdirPath, pkillPath string) str
 	if pkillPath != "" {
 		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, pkillPath))
 	}
-	
-	// Also allow common file operations needed for config management
+
+	// File operations needed for config management and binary updates.
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/mv, /usr/bin/mv", user))
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/rm, /usr/bin/rm", user))
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/chown, /bin/chown", user))
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/chmod, /usr/bin/chmod", user))
-	
-	// Allow package manager operations for local service installation
+
+	// Firewall management.
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/sbin/iptables, /sbin/iptables", user))
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/sbin/iptables-save, /sbin/iptables-save", user))
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/sbin/iptables-restore, /sbin/iptables-restore", user))
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/sbin/ufw, /usr/bin/ufw", user))
+
+	// Package manager for local service installation.
 	if pkgMgrPath, err := exec.LookPath("dnf"); err == nil {
 		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, pkgMgrPath))
 	} else if pkgMgrPath, err := exec.LookPath("yum"); err == nil {
@@ -275,6 +281,6 @@ func buildSudoers(user, systemctlPath, teePath, mkdirPath, pkillPath string) str
 	}
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash", user))
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl", user))
-	
+
 	return strings.Join(lines, "\n") + "\n"
 }

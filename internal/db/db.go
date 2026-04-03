@@ -4,6 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -142,7 +143,11 @@ func runMigrations() error {
 		}
 		log.Printf("Running migration: %s", name)
 		if err := DB.Exec(string(content)).Error; err != nil {
-			return fmt.Errorf("migration %s failed: %w", name, err)
+			if strings.Contains(err.Error(), "duplicate column name") {
+				log.Printf("Migration %s: column already exists, marking as applied", name)
+			} else {
+				return fmt.Errorf("migration %s failed: %w", name, err)
+			}
 		}
 		if err := DB.Exec("INSERT INTO schema_migrations (name) VALUES (?)", name).Error; err != nil {
 			return fmt.Errorf("failed to record migration %s: %w", name, err)

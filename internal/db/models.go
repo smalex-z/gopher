@@ -25,6 +25,7 @@ type Machine struct {
 	TunnelPort      int        `json:"tunnel_port"`
 	RatholeSSHToken string     `json:"rathole_ssh_token,omitempty"`
 	SSHKeyID        string     `json:"ssh_key_id" gorm:"index"`
+	PublicSSH       bool       `json:"public_ssh"`
 	Status          string     `json:"status"`
 	PublicIP        string     `json:"public_ip"`
 	LastSeen        *time.Time `json:"last_seen"`
@@ -44,6 +45,7 @@ type Tunnel struct {
 	Protocol     string    `json:"protocol"`
 	Transport    string    `json:"transport"`  // "tcp" (default) or "udp"
 	NoTLS        bool      `json:"no_tls"`     // skip Caddy HTTPS; use plain http://
+	Private      bool      `json:"private"`    // bind 127.0.0.1 (VPS-local only) instead of 0.0.0.0
 	Status       string    `json:"status"`
 	Managed      bool      `json:"managed,omitempty" gorm:"-"`
 	Kind         string    `json:"kind,omitempty" gorm:"-"`
@@ -59,6 +61,7 @@ type BootstrapToken struct {
 	MachineID  *string    `json:"machine_id"`
 	TunnelPort int        `json:"tunnel_port"`
 	SSHKeyID   string     `json:"ssh_key_id"`
+	PublicSSH  bool       `json:"public_ssh"`
 	CreatedAt  time.Time  `json:"created_at"`
 }
 

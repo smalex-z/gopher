@@ -63,8 +63,9 @@ func (s *LocalSetupService) Install(domain string, skipCaddy bool) {
 		w := &hubWriter{hub: s.hub}
 		if err := s.doInstall(domain, skipCaddy, w); err != nil {
 			fmt.Fprintf(w, "ERROR: %v\n", err)
+			s.hub.Broadcast("\x00ERROR")
+			return
 		}
-		// Sentinel tells the frontend the stream is done so it can close the modal.
 		s.hub.Broadcast("\x00DONE")
 	}()
 }

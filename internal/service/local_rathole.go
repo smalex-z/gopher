@@ -134,8 +134,8 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		return fmt.Errorf("failed to update server.toml: %w", err)
 	}
 
-	// --- 2. Update managed Caddy entry if subdomain is set (TCP only; UDP has no HTTP routing) ---
-	if tunnel.Subdomain != "" && settings.Domain != "" && tunnel.Transport != "udp" {
+	// --- 2. Update managed Caddy entry if subdomain is set (TCP only; UDP/private have no HTTP routing) ---
+	if tunnel.Subdomain != "" && settings.Domain != "" && tunnel.Transport != "udp" && !tunnel.Private {
 		if err := ensureManagedCaddyLayout(); err != nil {
 			return fmt.Errorf("failed to prepare Caddy managed layout: %w", err)
 		}

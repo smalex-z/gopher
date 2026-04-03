@@ -52,11 +52,15 @@ export default function DeployLogModal({ isOpen, onClose, title, onStart, onComp
     }
 
     ws.onmessage = (e: MessageEvent) => {
-      // Sentinel broadcast by the server when the operation is complete.
       if (e.data === '\x00DONE') {
         setStatus('complete')
         ws.close()
         onCompleteRef.current?.()
+        return
+      }
+      if (e.data === '\x00ERROR') {
+        setStatus('error')
+        ws.close()
         return
       }
       setLogs(prev => [...prev, e.data as string])

@@ -20,6 +20,7 @@ export interface Machine {
   tunnel_port: number
   rathole_ssh_token?: string
   ssh_key_id?: string
+  public_ssh: boolean
   status: string
   public_ip?: string
   last_seen: string | null
@@ -38,6 +39,7 @@ export interface Tunnel {
   protocol: string
   transport?: string   // "tcp" (default) | "udp"
   no_tls?: boolean     // skip Caddy TLS; use plain http://
+  private?: boolean    // bind 127.0.0.1 (VPS-local only)
   status: string
   managed?: boolean
   kind?: string

@@ -1,0 +1,1 @@
+ALTER TABLE bootstrap_tokens ADD COLUMN public_ssh INTEGER NOT NULL DEFAULT 0;

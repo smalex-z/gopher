@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	osuser "os/user"
 	"runtime"
 	"strings"
 	"time"
@@ -126,6 +128,12 @@ func (s *UpdateService) Apply() error {
 		return fmt.Errorf("failed to replace binary: %w — %s", err, strings.TrimSpace(string(out)))
 	}
 
+	// Patch sudoers to ensure any newly-required commands are present.
+	// Failures are non-fatal — the update still proceeds.
+	if err := patchSudoers(); err != nil {
+		log.Printf("WARN: could not patch sudoers: %v", err)
+	}
+
 	// Restart the service after a short delay so this HTTP response can be delivered
 	go func() {
 		time.Sleep(time.Second)
@@ -134,6 +142,53 @@ func (s *UpdateService) Apply() error {
 	}()
 
 	return nil
+}
+
+// patchSudoers rewrites /etc/sudoers.d/<user> with the full set of commands
+// the gopher service needs. Uses "sudo -n tee" which is already granted in the
+// existing sudoers file written by the initial install.
+func patchSudoers() error {
+	currentUser, err := osuser.Current()
+	if err != nil {
+		return fmt.Errorf("could not determine current user: %w", err)
+	}
+	username := currentUser.Username
+
+	content := buildServiceSudoers(username)
+	sudoersPath := "/etc/sudoers.d/" + username
+
+	cmd := exec.Command("sudo", "-n", "tee", sudoersPath) // #nosec G204
+	cmd.Stdin = strings.NewReader(content)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tee sudoers: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("sudo", "-n", "chmod", "0440", sudoersPath).CombinedOutput(); err != nil { // #nosec G204
+		return fmt.Errorf("chmod sudoers: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// buildServiceSudoers returns the complete sudoers content for the service user.
+func buildServiceSudoers(username string) string {
+	lines := []string{
+		"# Gopher server - limited sudo access",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/systemctl, /bin/systemctl",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/tee, /bin/tee",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/mkdir, /bin/mkdir",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/pkill, /bin/pkill",
+		username + " ALL=(ALL:ALL) NOPASSWD: /bin/mv, /usr/bin/mv",
+		username + " ALL=(ALL:ALL) NOPASSWD: /bin/rm, /usr/bin/rm",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/chown, /bin/chown",
+		username + " ALL=(ALL:ALL) NOPASSWD: /bin/chmod, /usr/bin/chmod",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/sbin/iptables, /sbin/iptables",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/sbin/iptables-save, /sbin/iptables-save",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/sbin/iptables-restore, /sbin/iptables-restore",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/sbin/ufw, /usr/bin/ufw",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/apt-get, /bin/apt-get",
+		username + " ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl",
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func fetchLatestRelease(currentVersion string) (*githubRelease, error) {
