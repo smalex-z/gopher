@@ -194,13 +194,16 @@ func firewallCreateChain(logWriter io.Writer, sudo []string) error {
 		fmt.Fprintf(logWriter, "  Chain %s created.\n", gopherChain)
 	}
 
-	// Jump from INPUT into GOPHER_TUNNELS (idempotent: check before adding).
-	checkArgs := append(append([]string{}, sudo...), "iptables", "-C", "INPUT", "-j", gopherChain)
-	if exec.Command(checkArgs[0], checkArgs[1:]...).Run() != nil { // #nosec G204
-		jumpArgs := append(sudo, "iptables", "-A", "INPUT", "-j", gopherChain)
-		if err := runLocalCmd(logWriter, jumpArgs[0], jumpArgs[1:]...); err != nil {
-			return fmt.Errorf("add INPUT -> %s jump: %w", gopherChain, err)
+	// Remove any duplicate INPUT → GOPHER_TUNNELS jumps, then add exactly one.
+	delArgs := append(append([]string{}, sudo...), "iptables", "-D", "INPUT", "-j", gopherChain)
+	for {
+		if exec.Command(delArgs[0], delArgs[1:]...).Run() != nil { // #nosec G204
+			break
 		}
+	}
+	jumpArgs := append(sudo, "iptables", "-A", "INPUT", "-j", gopherChain)
+	if err := runLocalCmd(logWriter, jumpArgs[0], jumpArgs[1:]...); err != nil {
+		return fmt.Errorf("add INPUT -> %s jump: %w", gopherChain, err)
 	}
 	return nil
 }

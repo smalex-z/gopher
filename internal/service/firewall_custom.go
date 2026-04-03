@@ -320,12 +320,18 @@ func (s *LocalSetupService) GetLiveRules() (map[string]string, error) {
 	return result, nil
 }
 
-// ReloadFirewall rebuilds both chains from scratch: re-runs the full
-// firewallTakeover sequence then reloads the custom chain.
+// ReloadFirewall rebuilds both chains from scratch: ensures chain/jump
+// exists (deduplicating any stale jumps), flushes both chains, then
+// re-applies all tunnel ports and custom rules.
 func (s *LocalSetupService) ReloadFirewall() error {
 	sudo := privilegedCmdPrefix()
 	if err := firewallCreateChain(nil, sudo); err != nil {
 		return err
+	}
+	// Flush GOPHER_TUNNELS so re-applying ports doesn't create duplicates.
+	flushArgs := append(append([]string{}, sudo...), "iptables", "-F", gopherChain)
+	if out, err := exec.Command(flushArgs[0], flushArgs[1:]...).CombinedOutput(); err != nil { // #nosec G204
+		return fmt.Errorf("flush %s: %w (%s)", gopherChain, err, strings.TrimSpace(string(out)))
 	}
 	if err := reloadCustomChain(); err != nil {
 		return err
