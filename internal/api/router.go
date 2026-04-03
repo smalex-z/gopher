@@ -33,6 +33,7 @@ func NewRouter(
 	bootstrapH := handlers.NewBootstrapHandler(bootstrapSvc)
 	authH := handlers.NewAuthHandler(authSvc)
 	localH := handlers.NewLocalHandler(localSvc)
+	firewallH := handlers.NewFirewallHandler(localSvc)
 	debugH := handlers.NewDebugHandler()
 	updateH := handlers.NewUpdateHandler(updateSvc)
 
@@ -66,6 +67,13 @@ func NewRouter(
 
 			r.Route("/local", func(r chi.Router) {
 				r.Post("/reconcile", localH.Reconcile)
+				r.Route("/firewall", func(r chi.Router) {
+					r.Get("/overview", firewallH.Overview)
+					r.Post("/rules", firewallH.CreateRule)
+					r.Delete("/rules/{id}", firewallH.DeleteRule)
+					r.Get("/live", firewallH.LiveRules)
+					r.Post("/reload", firewallH.Reload)
+				})
 				r.Route("/ssh-keys", func(r chi.Router) {
 					r.Get("/", localH.ListSSHKeys)
 					r.Post("/generate", localH.GenerateSSHKey)

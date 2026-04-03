@@ -272,3 +272,32 @@ func SaveSettings(s *AppSettings) error {
 	s.ID = "singleton"
 	return DB.Save(s).Error
 }
+
+// Firewall Rules Repository
+
+func GetFirewallRules() ([]FirewallRule, error) {
+	var rules []FirewallRule
+	if err := DB.Order("created_at ASC").Find(&rules).Error; err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+func GetFirewallRule(id string) (*FirewallRule, error) {
+	var rule FirewallRule
+	if err := DB.First(&rule, "id = ?", id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "firewall_rule", ID: id}
+		}
+		return nil, err
+	}
+	return &rule, nil
+}
+
+func CreateFirewallRule(rule *FirewallRule) error {
+	return DB.Create(rule).Error
+}
+
+func DeleteFirewallRule(id string) error {
+	return DB.Delete(&FirewallRule{}, "id = ?", id).Error
+}

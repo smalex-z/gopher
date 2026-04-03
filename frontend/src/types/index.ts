@@ -57,6 +57,30 @@ export interface SSHKey {
   updated_at: string
 }
 
+export interface FirewallRule {
+  id: string
+  description: string
+  raw: boolean
+  raw_spec: string
+  protocol: string
+  port_range: string
+  source: string
+  action: string
+  created_at: string
+}
+
+export interface FirewallEntry {
+  type: 'system' | 'tunnel' | 'machine-ssh' | 'custom'
+  id?: string
+  description: string
+  protocol: string
+  port_range: string
+  source: string
+  action: string
+  raw?: boolean
+  raw_spec?: string
+}
+
 export interface ApiResponse<T> {
   success: boolean
   data?: T

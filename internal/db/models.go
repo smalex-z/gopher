@@ -73,9 +73,27 @@ type AppSettings struct {
 	LocalSetupDone bool      `json:"local_setup_done"`
 	// FirewallMode is one of "gopher" (Gopher manages iptables), "manual" (user manages),
 	// or "none" (no firewall). Empty string means the wizard step has not run yet.
-	FirewallMode   string    `json:"firewall_mode"`
+	FirewallMode    string    `json:"firewall_mode"`
+	// CustomIPTables holds raw iptables rule specs (one per line, everything after
+	// "iptables ") that are applied to the GOPHER_CUSTOM chain. Flushed and
+	// re-applied whenever this field changes.
+	CustomIPTables  string    `json:"custom_iptables"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// FirewallRule is a user-defined rule applied to GOPHER_CUSTOM.
+// Either RawSpec is set (raw mode) or the structured fields are used.
+type FirewallRule struct {
+	ID          string    `json:"id" gorm:"primaryKey"`
+	Description string    `json:"description"`
+	Raw         bool      `json:"raw"`         // if true, RawSpec is used as-is
+	RawSpec     string    `json:"raw_spec"`    // e.g. "-s 1.2.3.4 -p tcp --dport 80 -j ACCEPT"
+	Protocol    string    `json:"protocol"`    // "tcp", "udp", "all", "icmp"
+	PortRange   string    `json:"port_range"`  // "80", "8000:9000", "" = any
+	Source      string    `json:"source"`      // CIDR, e.g. "0.0.0.0/0"
+	Action      string    `json:"action"`      // "ACCEPT", "DROP", "REJECT"
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type SSHKey struct {

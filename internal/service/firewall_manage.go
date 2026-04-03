@@ -82,10 +82,13 @@ func firewallTakeover(logWriter io.Writer) error {
 		return err
 	}
 
-	// Step 4: Create the GOPHER_TUNNELS chain.
-	fmt.Fprintf(logWriter, "Step 4: Creating %s chain...\n", gopherChain)
+	// Step 4: Create GOPHER_TUNNELS and GOPHER_CUSTOM chains.
+	fmt.Fprintf(logWriter, "Step 4: Creating %s and %s chains...\n", gopherChain, gopherCustomChain)
 	if err := firewallCreateChain(logWriter, sudo); err != nil {
 		return err
+	}
+	if err := ensureCustomChain(); err != nil {
+		fmt.Fprintf(logWriter, "  WARN: could not create %s chain: %v\n", gopherCustomChain, err)
 	}
 
 	// Step 5: Open ports for tunnels already in the DB.
@@ -175,6 +178,9 @@ func firewallInitRules(logWriter io.Writer, sudo []string) error {
 }
 
 func firewallCreateChain(logWriter io.Writer, sudo []string) error {
+	if logWriter == nil {
+		logWriter = io.Discard
+	}
 	createArgs := append(sudo, "iptables", "-N", gopherChain)
 	cmd := exec.Command(createArgs[0], createArgs[1:]...) // #nosec G204
 	out, err := cmd.CombinedOutput()
@@ -188,15 +194,21 @@ func firewallCreateChain(logWriter io.Writer, sudo []string) error {
 		fmt.Fprintf(logWriter, "  Chain %s created.\n", gopherChain)
 	}
 
-	// Jump from INPUT into GOPHER_TUNNELS.
-	jumpArgs := append(sudo, "iptables", "-A", "INPUT", "-j", gopherChain)
-	if err := runLocalCmd(logWriter, jumpArgs[0], jumpArgs[1:]...); err != nil {
-		return fmt.Errorf("add INPUT -> %s jump: %w", gopherChain, err)
+	// Jump from INPUT into GOPHER_TUNNELS (idempotent: check before adding).
+	checkArgs := append(append([]string{}, sudo...), "iptables", "-C", "INPUT", "-j", gopherChain)
+	if exec.Command(checkArgs[0], checkArgs[1:]...).Run() != nil { // #nosec G204
+		jumpArgs := append(sudo, "iptables", "-A", "INPUT", "-j", gopherChain)
+		if err := runLocalCmd(logWriter, jumpArgs[0], jumpArgs[1:]...); err != nil {
+			return fmt.Errorf("add INPUT -> %s jump: %w", gopherChain, err)
+		}
 	}
 	return nil
 }
 
 func firewallOpenExistingTunnelPorts(logWriter io.Writer) error {
+	if logWriter == nil {
+		logWriter = io.Discard
+	}
 	tunnels, err := db.GetTunnels()
 	if err != nil {
 		return err

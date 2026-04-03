@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { LayoutDashboard, Server, Monitor, Network, Activity, LogOut, Map, RefreshCw, Key } from 'lucide-react'
+import { LayoutDashboard, Server, Monitor, Network, Activity, LogOut, Map, RefreshCw, Key, Shield } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
 import ToastContainer from './components/ToastContainer'
 import DashboardPage from './pages/DashboardPage'
@@ -10,6 +10,7 @@ import TunnelsPage from './pages/TunnelsPage'
 import StatusPage from './pages/StatusPage'
 import NetworkMapPage from './pages/NetworkMapPage'
 import SSHKeysPage from './pages/SSHKeysPage'
+import FirewallPage from './pages/FirewallPage'
 import SetupPage from './pages/SetupPage'
 import LoginPage from './pages/LoginPage'
 import { AuthProvider, useAuth } from './lib/auth'
@@ -88,6 +89,7 @@ function AppShell() {
                 <NavLink to="/status" className={navClass}><Activity size={16} /> Status</NavLink>
                 <NavLink to="/network" className={navClass}><Map size={16} /> Network Map</NavLink>
                 <NavLink to="/keys" className={navClass}><Key size={16} /> Keys</NavLink>
+                <NavLink to="/firewall" className={navClass}><Shield size={16} /> Firewall</NavLink>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -121,6 +123,7 @@ function AppShell() {
           <Route path="/status" element={<StatusPage />} />
           <Route path="/network" element={<NetworkMapPage />} />
           <Route path="/keys" element={<SSHKeysPage />} />
+          <Route path="/firewall" element={<FirewallPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

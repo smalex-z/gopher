@@ -1,0 +1,1 @@
+ALTER TABLE firewall_rules ADD COLUMN raw_spec TEXT NOT NULL DEFAULT '';

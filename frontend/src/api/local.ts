@@ -1,5 +1,5 @@
 import client from './client'
-import type { SSHKey, ApiResponse } from '../types'
+import type { SSHKey, ApiResponse, FirewallRule, FirewallEntry } from '../types'
 
 export interface LocalServiceStatus {
   caddy_installed: boolean
@@ -56,4 +56,14 @@ export const localApi = {
     client.get<{ data: FirewallStatus }>('/local/firewall/detect').then(r => r.data.data),
   configureFirewall: (mode: FirewallMode) =>
     client.post('/local/firewall/configure', { mode }).then(r => r.data),
+  firewallOverview: () =>
+    client.get<ApiResponse<FirewallEntry[]>>('/local/firewall/overview').then(r => r.data),
+  createFirewallRule: (rule: { description?: string; raw?: boolean; raw_spec?: string; protocol?: string; port_range?: string; source?: string; action?: string }) =>
+    client.post<ApiResponse<FirewallRule>>('/local/firewall/rules', rule).then(r => r.data),
+  deleteFirewallRule: (id: string) =>
+    client.delete(`/local/firewall/rules/${id}`).then(r => r.data),
+  getLiveRules: () =>
+    client.get<ApiResponse<Record<string, string>>>('/local/firewall/live').then(r => r.data),
+  reloadFirewall: () =>
+    client.post('/local/firewall/reload').then(r => r.data),
 }
