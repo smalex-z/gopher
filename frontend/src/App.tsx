@@ -25,7 +25,7 @@ const navClass = ({ isActive }: { isActive: boolean }) =>
   }`
 
 function AppShell() {
-  const { isLoading, isSetup, isAuthenticated, localSetupDone, refetch } = useAuth()
+  const { isLoading, isSetup, isAuthenticated, localSetupDone, firewallConfigured, refetch } = useAuth()
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [isUpdating, setIsUpdating] = useState(false)
 
@@ -66,6 +66,7 @@ function AppShell() {
   if (!isSetup) return <SetupPage initialStep={1} />
   if (!isAuthenticated) return <LoginPage />
   if (!localSetupDone) return <SetupPage initialStep={2} />
+  if (!firewallConfigured) return <SetupPage initialStep={3} />
 
   const handleLogout = async () => {
     await client.post('/auth/logout').catch(() => {})

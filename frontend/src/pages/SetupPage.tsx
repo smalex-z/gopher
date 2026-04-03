@@ -857,7 +857,7 @@ export default function SetupPage({ initialStep = 1 }: { initialStep?: SetupStep
           : step === 2
           ? <ServicesStep onDone={() => setStep(3)} />
           : step === 3
-          ? <FirewallStep onDone={() => setStep(4)} />
+          ? <FirewallStep onDone={initialStep === 3 ? refetch : () => setStep(4)} />
           : <SSHKeyStep onDone={refetch} />
         }
       </div>
