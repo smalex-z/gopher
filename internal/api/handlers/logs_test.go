@@ -26,6 +26,7 @@ func TestWebSocketDuringSetup_RejectsAfterLocalSetupDone(t *testing.T) {
 		t.Fatalf("failed to read settings: %v", err)
 	}
 	settings.LocalSetupDone = true
+	settings.FirewallMode = "gopher"
 	if err := db.SaveSettings(settings); err != nil {
 		t.Fatalf("failed to save settings: %v", err)
 	}
