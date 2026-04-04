@@ -83,7 +83,11 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel) str
 		buf.WriteString(fmt.Sprintf("\n# gopher-machine-start: %s\n", m.ID))
 		buf.WriteString(fmt.Sprintf("[server.services.machine-%s-ssh]\n", m.ID))
 		buf.WriteString(fmt.Sprintf("token = \"%s\"\n", m.RatholeSSHToken))
-		buf.WriteString(fmt.Sprintf("bind_addr = \"0.0.0.0:%d\"\n", m.TunnelPort))
+		sshBindHost := "127.0.0.1"
+		if m.PublicSSH {
+			sshBindHost = "0.0.0.0"
+		}
+		buf.WriteString(fmt.Sprintf("bind_addr = \"%s:%d\"\n", sshBindHost, m.TunnelPort))
 		buf.WriteString(fmt.Sprintf("# gopher-machine-end: %s\n", m.ID))
 		managedEntries++
 	}
@@ -100,7 +104,11 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel) str
 		buf.WriteString(fmt.Sprintf("\n# gopher-tunnel-start: %s\n", t.ID))
 		buf.WriteString(fmt.Sprintf("[server.services.tunnel-%s]\n", t.ID))
 		buf.WriteString(fmt.Sprintf("token = \"%s\"\n", token))
-		buf.WriteString(fmt.Sprintf("bind_addr = \"0.0.0.0:%d\"\n", t.RatholePort))
+		bindHost := "0.0.0.0"
+		if t.Private {
+			bindHost = "127.0.0.1"
+		}
+		buf.WriteString(fmt.Sprintf("bind_addr = \"%s:%d\"\n", bindHost, t.RatholePort))
 		if t.Transport == "udp" {
 			buf.WriteString("type = \"udp\"\n")
 		}

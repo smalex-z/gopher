@@ -2,8 +2,12 @@ package service
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
 	"strings"
+
+	"github.com/smalex-z/gopher/internal/db"
 )
 
 const (
@@ -22,7 +26,25 @@ func managedTunnelCaddyPath(tunnelID string) string {
 }
 
 func buildRouterCaddyBlock(domain string) string {
-	return fmt.Sprintf("router.%s {\n    reverse_proxy localhost:8080\n}\n", domain)
+	return fmt.Sprintf("router.%s {\n    reverse_proxy localhost:%d\n}\n", domain, dashboardPort)
+}
+
+// ReconcileRouterCaddyBlock rewrites the managed router Caddy file to reflect
+// the current dashboardPort. Called at startup so binary updates that change
+// the default port don't leave a stale Caddy config pointing at the old port.
+func (s *LocalSetupService) ReconcileRouterCaddyBlock() {
+	if !isCommandAvailable("caddy") {
+		return
+	}
+	settings, err := db.GetSettings()
+	if err != nil || settings.Domain == "" || !settings.LocalSetupDone {
+		return
+	}
+	if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(settings.Domain)); err != nil {
+		log.Printf("startup: failed to reconcile router Caddy block: %v", err)
+		return
+	}
+	_ = exec.Command("sudo", "systemctl", "reload-or-restart", "caddy").Run() // #nosec G204
 }
 
 func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool) string {

@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 echo "Starting Gopher in development mode..."
 
 # Start backend
-echo "Starting Go backend on :8080..."
+echo "Starting Go backend on :4321..."
 (cd "$ROOT" && go run ./cmd/server/...) &
 BACKEND_PID=$!
 

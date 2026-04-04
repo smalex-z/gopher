@@ -25,6 +25,7 @@ type Machine struct {
 	TunnelPort      int        `json:"tunnel_port"`
 	RatholeSSHToken string     `json:"rathole_ssh_token,omitempty"`
 	SSHKeyID        string     `json:"ssh_key_id" gorm:"index"`
+	PublicSSH       bool       `json:"public_ssh"`
 	Status          string     `json:"status"`
 	PublicIP        string     `json:"public_ip"`
 	LastSeen        *time.Time `json:"last_seen"`
@@ -44,6 +45,7 @@ type Tunnel struct {
 	Protocol     string    `json:"protocol"`
 	Transport    string    `json:"transport"`  // "tcp" (default) or "udp"
 	NoTLS        bool      `json:"no_tls"`     // skip Caddy HTTPS; use plain http://
+	Private      bool      `json:"private"`    // bind 127.0.0.1 (VPS-local only) instead of 0.0.0.0
 	Status       string    `json:"status"`
 	Managed      bool      `json:"managed,omitempty" gorm:"-"`
 	Kind         string    `json:"kind,omitempty" gorm:"-"`
@@ -59,6 +61,7 @@ type BootstrapToken struct {
 	MachineID  *string    `json:"machine_id"`
 	TunnelPort int        `json:"tunnel_port"`
 	SSHKeyID   string     `json:"ssh_key_id"`
+	PublicSSH  bool       `json:"public_ssh"`
 	CreatedAt  time.Time  `json:"created_at"`
 }
 
@@ -68,8 +71,32 @@ type AppSettings struct {
 	IsSetup        bool      `json:"is_setup"`
 	Domain         string    `json:"domain"`
 	LocalSetupDone bool      `json:"local_setup_done"`
+	// FirewallMode is one of "gopher" (Gopher manages iptables), "manual" (user manages),
+	// or "none" (no firewall). Empty string means the wizard step has not run yet.
+	FirewallMode      string    `json:"firewall_mode"`
+	// DashboardPrivate restricts the dashboard port to localhost (VPS-only) when true.
+	// Zero value (false) keeps it publicly reachable — safe migration default.
+	DashboardPrivate  bool      `json:"dashboard_private"`
+	// CustomIPTables holds raw iptables rule specs (one per line, everything after
+	// "iptables ") that are applied to the GOPHER_CUSTOM chain. Flushed and
+	// re-applied whenever this field changes.
+	CustomIPTables  string    `json:"custom_iptables"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// FirewallRule is a user-defined rule applied to GOPHER_CUSTOM.
+// Either RawSpec is set (raw mode) or the structured fields are used.
+type FirewallRule struct {
+	ID          string    `json:"id" gorm:"primaryKey"`
+	Description string    `json:"description"`
+	Raw         bool      `json:"raw"`         // if true, RawSpec is used as-is
+	RawSpec     string    `json:"raw_spec"`    // e.g. "-s 1.2.3.4 -p tcp --dport 80 -j ACCEPT"
+	Protocol    string    `json:"protocol"`    // "tcp", "udp", "all", "icmp"
+	PortRange   string    `json:"port_range"`  // "80", "8000:9000", "" = any
+	Source      string    `json:"source"`      // CIDR, e.g. "0.0.0.0/0"
+	Action      string    `json:"action"`      // "ACCEPT", "DROP", "REJECT"
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type SSHKey struct {

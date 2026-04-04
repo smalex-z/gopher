@@ -23,7 +23,7 @@ func NewBootstrapService(local *LocalSetupService) *BootstrapService {
 // GenerateToken creates a one-time bootstrap token valid for 1 hour.
 // tunnelPort optionally pre-assigns the SSH tunnel port (0 = auto-allocate).
 // sshKeyID optionally pins the SSH key to install on the machine (empty = use default).
-func (s *BootstrapService) GenerateToken(tunnelPort int, sshKeyID string) (*db.BootstrapToken, error) {
+func (s *BootstrapService) GenerateToken(tunnelPort int, sshKeyID string, publicSSH bool) (*db.BootstrapToken, error) {
 	bt := &db.BootstrapToken{
 		ID:         shortToken(),
 		Token:      shortToken(),
@@ -31,6 +31,7 @@ func (s *BootstrapService) GenerateToken(tunnelPort int, sshKeyID string) (*db.B
 		CreatedAt:  time.Now(),
 		TunnelPort: tunnelPort,
 		SSHKeyID:   sshKeyID,
+		PublicSSH:  publicSSH,
 	}
 	if err := db.CreateBootstrapToken(bt); err != nil {
 		return nil, err
@@ -109,6 +110,7 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		TunnelPort:      tunnelPort,
 		RatholeSSHToken: ratholeToken,
 		SSHKeyID:        sshKey.ID,
+		PublicSSH:       bt.PublicSSH,
 		Status:          "pending",
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),

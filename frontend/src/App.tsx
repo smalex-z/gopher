@@ -1,7 +1,7 @@
-import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { LayoutDashboard, Server, Monitor, Network, Activity, LogOut, Map, RefreshCw, Key } from 'lucide-react'
-import { useState, useEffect, useCallback } from 'react'
+import { LayoutDashboard, Server, Monitor, Network, Activity, LogOut, Map, RefreshCw, Key, Shield, ChevronDown } from 'lucide-react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import ToastContainer from './components/ToastContainer'
 import DashboardPage from './pages/DashboardPage'
 import VPSPage from './pages/VPSPage' // repurposed as Server Info page
@@ -10,6 +10,7 @@ import TunnelsPage from './pages/TunnelsPage'
 import StatusPage from './pages/StatusPage'
 import NetworkMapPage from './pages/NetworkMapPage'
 import SSHKeysPage from './pages/SSHKeysPage'
+import FirewallPage from './pages/FirewallPage'
 import SetupPage from './pages/SetupPage'
 import LoginPage from './pages/LoginPage'
 import { AuthProvider, useAuth } from './lib/auth'
@@ -24,8 +25,58 @@ const navClass = ({ isActive }: { isActive: boolean }) =>
     isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
   }`
 
+function NavDropdown({ label, icon: Icon, items }: {
+  label: string
+  icon: React.ElementType
+  items: { to: string; icon: React.ElementType; label: string }[]
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const location = useLocation()
+  const isActive = items.some(i => location.pathname.startsWith(i.to))
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen(v => !v)}
+        className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+          isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+        }`}
+      >
+        <Icon size={16} /> {label} <ChevronDown size={13} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-lg py-1 z-50 min-w-[160px]">
+          {items.map(item => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              onClick={() => setOpen(false)}
+              className={({ isActive }) =>
+                `flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
+                  isActive ? 'text-blue-700 bg-blue-50' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+                }`
+              }
+            >
+              <item.icon size={15} /> {item.label}
+            </NavLink>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AppShell() {
-  const { isLoading, isSetup, isAuthenticated, localSetupDone, refetch } = useAuth()
+  const { isLoading, isSetup, isAuthenticated, localSetupDone, firewallConfigured, refetch } = useAuth()
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [isUpdating, setIsUpdating] = useState(false)
 
@@ -66,6 +117,7 @@ function AppShell() {
   if (!isSetup) return <SetupPage initialStep={1} />
   if (!isAuthenticated) return <LoginPage />
   if (!localSetupDone) return <SetupPage initialStep={2} />
+  if (!firewallConfigured) return <SetupPage initialStep={3} />
 
   const handleLogout = async () => {
     await client.post('/auth/logout').catch(() => {})
@@ -81,12 +133,25 @@ function AppShell() {
               <img src="/gopher_banner.png" alt="Gopher" className="h-8 w-auto" />
               <div className="flex gap-1">
                 <NavLink to="/" end className={navClass}><LayoutDashboard size={16} /> Dashboard</NavLink>
-                <NavLink to="/vps" className={navClass}><Server size={16} /> Server</NavLink>
-                <NavLink to="/machines" className={navClass}><Monitor size={16} /> Machines</NavLink>
-                <NavLink to="/tunnels" className={navClass}><Network size={16} /> Tunnels</NavLink>
-                <NavLink to="/status" className={navClass}><Activity size={16} /> Status</NavLink>
+                <NavDropdown
+                  label="Infrastructure"
+                  icon={Server}
+                  items={[
+                    { to: '/vps', icon: Server, label: 'Server' },
+                    { to: '/machines', icon: Monitor, label: 'Machines' },
+                    { to: '/tunnels', icon: Network, label: 'Tunnels' },
+                  ]}
+                />
                 <NavLink to="/network" className={navClass}><Map size={16} /> Network Map</NavLink>
-                <NavLink to="/keys" className={navClass}><Key size={16} /> Keys</NavLink>
+                <NavLink to="/firewall" className={navClass}><Shield size={16} /> Firewall</NavLink>
+                <NavDropdown
+                  label="More"
+                  icon={Activity}
+                  items={[
+                    { to: '/status', icon: Activity, label: 'Status' },
+                    { to: '/keys', icon: Key, label: 'SSH Keys' },
+                  ]}
+                />
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -120,6 +185,7 @@ function AppShell() {
           <Route path="/status" element={<StatusPage />} />
           <Route path="/network" element={<NetworkMapPage />} />
           <Route path="/keys" element={<SSHKeysPage />} />
+          <Route path="/firewall" element={<FirewallPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

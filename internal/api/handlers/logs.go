@@ -26,16 +26,16 @@ func (h *LogsHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	h.serveWebSocket(w, r)
 }
 
-// WebSocketDuringSetup allows websocket log streaming for setup flows before
-// local setup is complete (Step 2 in the setup wizard), where auth cookies may
-// not be available yet.
+// WebSocketDuringSetup allows websocket log streaming for setup flows where
+// auth cookies may not be available yet: Step 2 (local install) and Step 3
+// (firewall configuration, which runs after LocalSetupDone is set).
 func (h *LogsHandler) WebSocketDuringSetup(w http.ResponseWriter, r *http.Request) {
 	settings, err := db.GetSettings()
 	if err != nil {
 		response.InternalError(w, "failed to load settings")
 		return
 	}
-	if settings.LocalSetupDone {
+	if settings.LocalSetupDone && settings.FirewallMode != "" {
 		response.Error(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}

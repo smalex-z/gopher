@@ -68,6 +68,7 @@ func (s *TunnelService) List() ([]db.Tunnel, error) {
 			LocalPort:   22,
 			RatholePort: machine.TunnelPort,
 			Protocol:    "tcp",
+			Private:     !machine.PublicSSH,
 			Status:      machineTunnelStatus(machine.Status),
 			Managed:     true,
 			Kind:        "machine-ssh",
@@ -104,6 +105,11 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 	}
 	// UDP tunnels cannot have HTTP subdomain routing
 	if transport == "udp" {
+		req.Subdomain = ""
+		req.NoTLS = false
+	}
+	// Private tunnels have no public URL, so subdomain is meaningless
+	if req.Private {
 		req.Subdomain = ""
 		req.NoTLS = false
 	}
@@ -159,6 +165,7 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 		Protocol:     "tcp",
 		Transport:    transport,
 		NoTLS:        req.NoTLS,
+		Private:      req.Private,
 		Status:       "inactive",
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
@@ -167,6 +174,9 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 	if err := db.CreateTunnel(tunnel); err != nil {
 		return nil, err
 	}
+
+	// Open firewall port if Gopher manages the firewall (non-fatal).
+	ApplyTunnelPort(tunnel.RatholePort, tunnel.Transport, tunnel.Private)
 
 	// Push configs to server + client (non-fatal: tunnel is saved even if this fails)
 	machine, machErr := db.GetMachine(req.MachineID)
@@ -188,6 +198,12 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 }
 
 func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunnel, error) {
+	// Machine SSH tunnels are virtual (not in the tunnels table).
+	// Only the Private field can change — it maps to Machine.PublicSSH.
+	if machineID, ok := parseMachineSSHTunnelID(id); ok {
+		return s.updateMachineSSHPrivacy(machineID, req.Private)
+	}
+
 	tunnel, err := db.GetTunnel(id)
 	if err != nil {
 		return nil, err
@@ -217,14 +233,71 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 		tunnel.Subdomain = req.Subdomain
 	}
 
+	oldPrivate := tunnel.Private
 	tunnel.Name = req.Name
 	tunnel.LocalPort = req.LocalPort
+	tunnel.Private = req.Private
+	// Private tunnels cannot have a public subdomain URL
+	if req.Private {
+		tunnel.Subdomain = ""
+	}
 	tunnel.UpdatedAt = time.Now()
 
 	if err := db.UpdateTunnel(tunnel); err != nil {
 		return nil, err
 	}
+
+	// If privacy setting changed, update rathole bind_addr and firewall.
+	if oldPrivate != req.Private && s.local != nil {
+		log.Printf("tunnel update: privacy changed for %s (private=%v), reconciling server config", tunnel.ID, req.Private)
+		if err := s.local.ReconcileServerConfig(); err != nil {
+			log.Printf("tunnel update: reconcile failed: %v", err)
+		}
+		ApplyTunnelPort(tunnel.RatholePort, tunnel.Transport, tunnel.Private)
+	}
+
 	return tunnel, nil
+}
+
+// updateMachineSSHPrivacy toggles the SSH tunnel visibility for a bootstrapped machine.
+// Private=true → bind 127.0.0.1 (jumpbox only); Private=false → bind 0.0.0.0 (public).
+func (s *TunnelService) updateMachineSSHPrivacy(machineID string, private bool) (*db.Tunnel, error) {
+	machine, err := db.GetMachine(machineID)
+	if err != nil {
+		return nil, err
+	}
+	oldPublicSSH := machine.PublicSSH
+	machine.PublicSSH = !private
+	machine.UpdatedAt = time.Now()
+	if err := db.UpdateMachine(machine); err != nil {
+		return nil, err
+	}
+	if oldPublicSSH != machine.PublicSSH && s.local != nil {
+		log.Printf("tunnel update: machine %s SSH visibility changed (public=%v), reconciling", machineID, machine.PublicSSH)
+		if err := s.local.ReconcileServerConfig(); err != nil {
+			log.Printf("tunnel update: reconcile failed: %v", err)
+		}
+		if machine.PublicSSH {
+			ApplyTunnelPort(machine.TunnelPort, "tcp", false)
+		} else {
+			ApplyTunnelPort(machine.TunnelPort, "tcp", true)
+		}
+	}
+	// Return a synthetic tunnel matching what List() would emit.
+	return &db.Tunnel{
+		ID:          machineSSHTunnelID(machineID),
+		MachineID:   machineID,
+		Name:        machine.Name + " SSH",
+		LocalPort:   22,
+		RatholePort: machine.TunnelPort,
+		Protocol:    "tcp",
+		Private:     !machine.PublicSSH,
+		Status:      machineTunnelStatus(machine.Status),
+		Managed:     true,
+		Kind:        "machine-ssh",
+		CreatedAt:   machine.CreatedAt,
+		UpdatedAt:   machine.UpdatedAt,
+	}, nil
 }
 
 func (s *TunnelService) Delete(id string) error {
@@ -248,6 +321,9 @@ func (s *TunnelService) Delete(id string) error {
 	if err := db.DeleteTunnel(id); err != nil {
 		return err
 	}
+
+	// Close firewall port if Gopher manages the firewall (non-fatal).
+	RevokeTunnelPort(tunnel.RatholePort, tunnel.Transport)
 
 	if s.local != nil {
 		if err := s.local.ReconcileServerConfig(); err != nil {

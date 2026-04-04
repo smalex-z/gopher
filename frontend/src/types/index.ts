@@ -20,6 +20,7 @@ export interface Machine {
   tunnel_port: number
   rathole_ssh_token?: string
   ssh_key_id?: string
+  public_ssh: boolean
   status: string
   public_ip?: string
   last_seen: string | null
@@ -38,6 +39,7 @@ export interface Tunnel {
   protocol: string
   transport?: string   // "tcp" (default) | "udp"
   no_tls?: boolean     // skip Caddy TLS; use plain http://
+  private?: boolean    // bind 127.0.0.1 (VPS-local only)
   status: string
   managed?: boolean
   kind?: string
@@ -53,6 +55,30 @@ export interface SSHKey {
   machine_count?: number
   created_at: string
   updated_at: string
+}
+
+export interface FirewallRule {
+  id: string
+  description: string
+  raw: boolean
+  raw_spec: string
+  protocol: string
+  port_range: string
+  source: string
+  action: string
+  created_at: string
+}
+
+export interface FirewallEntry {
+  type: 'system' | 'tunnel' | 'machine-ssh' | 'custom'
+  id?: string
+  description: string
+  protocol: string
+  port_range: string
+  source: string
+  action: string
+  raw?: boolean
+  raw_spec?: string
 }
 
 export interface ApiResponse<T> {

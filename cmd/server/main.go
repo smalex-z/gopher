@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/smalex-z/gopher/internal/api"
 	"github.com/smalex-z/gopher/internal/db"
@@ -41,9 +42,13 @@ func runServer(args []string) {
 	}
 
 	flags := flag.NewFlagSet("gopher", flag.ExitOnError)
-	port := flags.String("port", "8080", "server port")
+	port := flags.String("port", "4321", "server port")
 	dbPath := flags.String("db", "./gopher.db", "database path")
 	_ = flags.Parse(args)
+
+	if p, err := strconv.Atoi(*port); err == nil {
+		service.SetDashboardPort(p)
+	}
 
 	if err := db.Initialize(*dbPath); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
@@ -59,6 +64,7 @@ func runServer(args []string) {
 	updateSvc := service.NewUpdateService()
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
+	localSvc.ReconcileRouterCaddyBlock()
 
 	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc)
 

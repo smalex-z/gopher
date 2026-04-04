@@ -53,11 +53,12 @@ func (h *BootstrapHandler) GenerateToken(w http.ResponseWriter, r *http.Request)
 	var req struct {
 		TunnelPort int    `json:"tunnel_port"`
 		SSHKeyID   string `json:"ssh_key_id"`
+		PublicSSH  bool   `json:"public_ssh"`
 	}
 	// Body is optional; ignore decode errors so a plain POST with no body still works.
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	bt, err := h.svc.GenerateToken(req.TunnelPort, req.SSHKeyID)
+	bt, err := h.svc.GenerateToken(req.TunnelPort, req.SSHKeyID, req.PublicSSH)
 	if err != nil {
 		response.InternalError(w, err.Error())
 		return

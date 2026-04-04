@@ -16,6 +16,7 @@ func TestGenerateRatholeServerConfig(t *testing.T) {
 			ID:              "test-mac",
 			TunnelPort:      10000,
 			RatholeSSHToken: "ssh-token-123",
+			PublicSSH:       true,
 			CreatedAt:       time.Now(),
 			UpdatedAt:       time.Now(),
 		},
@@ -342,9 +343,9 @@ bind_addr = "0.0.0.0:29999"
 // Test multiple machines generate without duplication
 func TestGenerateMultipleMachinesNoDuplicates(t *testing.T) {
 	machines := []db.Machine{
-		{ID: "mac1", TunnelPort: 10000, RatholeSSHToken: "tok1", CreatedAt: time.Now(), UpdatedAt: time.Now()},
-		{ID: "mac2", TunnelPort: 10001, RatholeSSHToken: "tok2", CreatedAt: time.Now(), UpdatedAt: time.Now()},
-		{ID: "mac3", TunnelPort: 10002, RatholeSSHToken: "tok3", CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{ID: "mac1", TunnelPort: 10000, RatholeSSHToken: "tok1", PublicSSH: true, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{ID: "mac2", TunnelPort: 10001, RatholeSSHToken: "tok2", PublicSSH: true, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{ID: "mac3", TunnelPort: 10002, RatholeSSHToken: "tok3", PublicSSH: true, CreatedAt: time.Now(), UpdatedAt: time.Now()},
 	}
 
 	cfg := config.GenerateRatholeServerConfig(machines, []db.Tunnel{})

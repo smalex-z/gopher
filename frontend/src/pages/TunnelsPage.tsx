@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { Network, ClipboardCopy, ArrowRight } from 'lucide-react'
+import { Network, ClipboardCopy, ArrowRight, Globe, Lock, Terminal } from 'lucide-react'
 import { tunnelsApi } from '../api/tunnels'
 import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
@@ -19,9 +19,10 @@ interface FormState {
   rathole_port: number
   transport: string
   no_tls: boolean
+  private: boolean
 }
 
-const defaultForm: FormState = { machine_id: '', name: '', subdomain: '', local_port: 3000, rathole_port: 0, transport: 'tcp', no_tls: false }
+const defaultForm: FormState = { machine_id: '', name: '', subdomain: '', local_port: 3000, rathole_port: 0, transport: 'tcp', no_tls: false, private: false }
 
 export default function TunnelsPage() {
   const qc = useQueryClient()
@@ -98,6 +99,26 @@ export default function TunnelsPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
+  const updateMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Partial<Tunnel> }) => tunnelsApi.update(id, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tunnels'] }),
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const togglePrivate = (t: Tunnel) => {
+    updateMutation.mutate({ id: t.id, data: { name: t.name, local_port: t.local_port, subdomain: t.subdomain, private: !t.private } })
+  }
+
+  // VPS config for jumpbox commands
+  const { data: vpsData } = useQuery({ queryKey: ['vps'], queryFn: () => import('../api/vps').then(m => m.vpsApi.get()) })
+  const vps = vpsData?.data
+
+  const jumpboxCmd = (t: Tunnel) => {
+    if (!vps) return ''
+    const vpsAddr = `${vps.username}@${vps.host}`
+    return `ssh -L ${t.local_port}:localhost:${t.rathole_port} ${vpsAddr} -N`
+  }
+
   const testTunnel = async (id: string) => {
     try {
       await tunnelsApi.test(id)
@@ -161,6 +182,7 @@ export default function TunnelsPage() {
                 <React.Fragment key={t.id}>
                   {(() => {
                     const isProtectedTunnel = Boolean(t.managed || t.kind === 'machine-ssh' || t.local_port === 22)
+                    const isPrivate = Boolean(t.private)
                     return (
                   <tr className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-gray-900">{t.name}</td>
@@ -168,25 +190,38 @@ export default function TunnelsPage() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2 font-mono text-xs text-gray-700">
                         <div className="flex flex-col gap-0.5">
-                          {t.subdomain && domain && (
-                            <a href={`https://${t.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
-                              className="text-blue-600 hover:underline">{t.subdomain}.{domain}</a>
+                          {isPrivate ? (
+                            <span className="text-gray-400">VPS-local <span className="text-gray-500">:{t.rathole_port}</span></span>
+                          ) : (
+                            <>
+                              {t.subdomain && domain && (
+                                <a href={`https://${t.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
+                                  className="text-blue-600 hover:underline">{t.subdomain}.{domain}</a>
+                              )}
+                              <span className="text-gray-500">
+                                {t.transport === 'udp' && <span className="text-purple-600 font-semibold mr-0.5">UDP</span>}
+                                {displayHost ?? 'server'}:{t.rathole_port}
+                              </span>
+                            </>
                           )}
-                          <span className="text-gray-500">
-                            {t.transport === 'udp' && <span className="text-purple-600 font-semibold mr-0.5">UDP</span>}
-                            {displayHost ?? 'server'}:{t.rathole_port}
-                          </span>
                         </div>
                         <ArrowRight size={12} className="text-gray-400 shrink-0" />
                         <span>localhost:{t.local_port}</span>
-                        <button onClick={() => copyUrl(t)} className="text-gray-300 hover:text-gray-600 ml-1">
-                          <ClipboardCopy size={12} />
-                        </button>
+                        {!isPrivate && (
+                          <button onClick={() => copyUrl(t)} className="text-gray-300 hover:text-gray-600 ml-1">
+                            <ClipboardCopy size={12} />
+                          </button>
+                        )}
                       </div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1.5">
                         <StatusBadge status={t.status} />
+                        {isPrivate && (
+                          <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200 flex items-center gap-0.5">
+                            <Lock size={10} /> Private
+                          </span>
+                        )}
                         {t.transport === 'udp' && (
                           <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200">UDP</span>
                         )}
@@ -197,9 +232,19 @@ export default function TunnelsPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex gap-2">
-                        {isProtectedTunnel ? (
-                          <span className="px-2 py-1 text-xs bg-gray-50 text-gray-500 border border-gray-200 rounded">Managed</span>
-                        ) : (
+                        {/* Privacy toggle — available on all tunnels including managed machine-ssh */}
+                        <button
+                          onClick={() => togglePrivate(t)}
+                          disabled={updateMutation.isPending}
+                          title={isPrivate ? 'Make public' : 'Make private'}
+                          className={`px-2 py-1 text-xs border rounded flex items-center gap-1 ${isPrivate
+                            ? 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                            : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+                        >
+                          {isPrivate ? <Globe size={11} /> : <Lock size={11} />}
+                          {isPrivate ? 'Public' : 'Private'}
+                        </button>
+                        {!isProtectedTunnel && (
                           <>
                             <button onClick={() => testTunnel(t.id)} className="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50">Test</button>
                             <button onClick={() => handleDelete(t.id)} className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100">Delete</button>
@@ -216,6 +261,20 @@ export default function TunnelsPage() {
                         <span className={`text-xs px-2 py-1 rounded ${testResults[t.id].ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
                           {testResults[t.id].ok ? '✅' : '❌'} {testResults[t.id].message}
                         </span>
+                      </td>
+                    </tr>
+                  )}
+                  {t.private && jumpboxCmd(t) && (
+                    <tr className="bg-slate-50 border-t-0">
+                      <td colSpan={5} className="px-4 pb-2 pt-0">
+                        <div className="flex items-center gap-2 text-xs text-slate-600">
+                          <Terminal size={11} className="shrink-0" />
+                          <span className="font-medium">Jumpbox:</span>
+                          <code className="font-mono text-slate-700 bg-slate-100 px-2 py-0.5 rounded select-all">{jumpboxCmd(t)}</code>
+                          <button onClick={() => { navigator.clipboard.writeText(jumpboxCmd(t)); toast.success('Copied!') }} className="text-slate-400 hover:text-slate-600">
+                            <ClipboardCopy size={11} />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   )}
@@ -264,24 +323,45 @@ export default function TunnelsPage() {
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Transport</label>
-                <div className="flex gap-2">
-                  {(['tcp', 'udp'] as const).map(t => (
-                    <button key={t} type="button"
-                      onClick={() => setForm(f => ({ ...f, transport: t, ...(t === 'udp' ? { subdomain: '', no_tls: false } : {}) }))}
-                      className={`px-4 py-1.5 rounded-lg text-sm font-semibold border transition-colors ${
-                        form.transport === t
-                          ? t === 'udp' ? 'bg-purple-600 text-white border-purple-600' : 'bg-blue-600 text-white border-blue-600'
-                          : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
-                      }`}>
-                      {t.toUpperCase()}
-                    </button>
-                  ))}
+              <div className="flex gap-4">
+                <div className="flex-1">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Transport</label>
+                  <div className="flex gap-2">
+                    {(['tcp', 'udp'] as const).map(t => (
+                      <button key={t} type="button"
+                        onClick={() => setForm(f => ({ ...f, transport: t, ...(t === 'udp' ? { subdomain: '', no_tls: false } : {}) }))}
+                        className={`px-4 py-1.5 rounded-lg text-sm font-semibold border transition-colors ${
+                          form.transport === t
+                            ? t === 'udp' ? 'bg-purple-600 text-white border-purple-600' : 'bg-blue-600 text-white border-blue-600'
+                            : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                        }`}>
+                        {t.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                  {form.transport === 'udp' && (
+                    <p className="text-xs text-purple-600 mt-1">UDP tunnels don't support HTTP subdomain routing.</p>
+                  )}
                 </div>
-                {form.transport === 'udp' && (
-                  <p className="text-xs text-purple-600 mt-1">UDP tunnels don't support HTTP subdomain routing.</p>
-                )}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Visibility</label>
+                  <div className="flex gap-2">
+                    {([false, true] as const).map(priv => (
+                      <button key={String(priv)} type="button"
+                        onClick={() => setForm(f => ({ ...f, private: priv, ...(priv ? { subdomain: '', no_tls: false } : {}) }))}
+                        className={`px-3 py-1.5 rounded-lg text-sm font-semibold border transition-colors flex items-center gap-1 ${
+                          form.private === priv
+                            ? priv ? 'bg-slate-700 text-white border-slate-700' : 'bg-green-600 text-white border-green-600'
+                            : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                        }`}>
+                        {priv ? <><Lock size={12} /> Private</> : <><Globe size={12} /> Public</>}
+                      </button>
+                    ))}
+                  </div>
+                  {form.private && (
+                    <p className="text-xs text-slate-600 mt-1">Binds 127.0.0.1 — VPS-local only.</p>
+                  )}
+                </div>
               </div>
 
               <div>
@@ -296,7 +376,7 @@ export default function TunnelsPage() {
                 </div>
               </div>
 
-              {routingEnabled && form.transport !== 'udp' ? (
+              {routingEnabled && form.transport !== 'udp' && !form.private ? (
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Subdomain
