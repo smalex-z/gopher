@@ -91,7 +91,7 @@ You can verify your download against the checksums file on the [releases page](h
 ### Run
 
 ```bash
-# Start the web UI (listens on :8080)
+# Start the web UI (listens on :4321)
 ./gopher
 
 # Install as a systemd service (runs on boot, survives reboots)
@@ -105,7 +105,7 @@ sudo systemctl restart gopher
 sudo ./gopher uninstall
 ```
 
-On first start, visit `http://<your-vps-ip>:8080` and complete the setup wizard:
+On first start, visit `http://<your-vps-ip>:4321` and complete the setup wizard:
 
 1. **Password** — set your admin password
 2. **Local services** — install Caddy and rathole on this machine (or skip for rathole-only)
@@ -179,49 +179,20 @@ media.example.com    → Friend's shared Plex
 
 ## Firewall Setup
 
-Gopher needs four ports reachable on your VPS: **22** (SSH), **80** (HTTP), **443** (HTTPS), and **2333** (rathole control).
+### OS-level firewall
 
-> **Note:** Automatic firewall management is planned for a future release. For now, open the required ports manually using the instructions below.
+Gopher can manage iptables rules automatically. During the setup wizard, choose **Gopher-managed** firewall mode and Gopher will:
 
-### OS-level firewall (on the VPS itself)
+- Create a dedicated `GOPHER_TUNNELS` iptables chain
+- Keep ports 22, 80, 443, and 2333 permanently open
+- Open the dashboard port (default 4321) — or restrict it to localhost if Caddy is configured
+- Automatically open/close tunnel ports as you add or remove tunnels
 
-If your VPS is running UFW:
-
-```bash
-sudo ufw allow 22/tcp
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-sudo ufw allow 2333/tcp
-sudo ufw enable
-```
-
-If it's running firewalld (RHEL/CentOS):
-
-```bash
-sudo firewall-cmd --permanent --add-port=22/tcp
-sudo firewall-cmd --permanent --add-port=80/tcp
-sudo firewall-cmd --permanent --add-port=443/tcp
-sudo firewall-cmd --permanent --add-port=2333/tcp
-sudo firewall-cmd --reload
-```
-
-Or with raw iptables:
-
-```bash
-sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT
-sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT
-sudo iptables -A INPUT -p tcp --dport 2333 -j ACCEPT
-# Save rules so they persist after reboot
-sudo iptables-save | sudo tee /etc/iptables/rules.v4   # Debian/Ubuntu
-# sudo iptables-save | sudo tee /etc/sysconfig/iptables  # RHEL/CentOS
-```
-
-Each tunnel you create also gets its own port (starting around 20000). You'll need to open those too as you add tunnels — Gopher shows the assigned port when you create one.
+If you prefer to manage firewall rules yourself, choose **Manual** mode and open the required ports yourself. Each tunnel you create gets its own port (starting around 20000) — Gopher shows the assigned port when you create one.
 
 ### Cloud-level firewall / security groups
 
-Most cloud providers have a firewall that sits in front of the VM and blocks traffic before it ever reaches the OS. You need to open ports there as well.
+Most cloud providers have a firewall that sits in front of the VM and blocks traffic before it ever reaches the OS. You need to open ports there as well — Gopher cannot manage these.
 
 **Oracle Cloud (OCI)** — the most common gotcha, since the default security list blocks almost everything:
 
@@ -302,7 +273,7 @@ gopher/
 # Dev mode (hot reload on both frontend and backend)
 ./scripts/dev.sh
 # Frontend: http://localhost:5173
-# Backend:  http://localhost:8080
+# Backend:  http://localhost:4321
 
 # Production build
 ./scripts/build.sh
