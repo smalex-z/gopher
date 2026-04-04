@@ -191,7 +191,7 @@ export default function TunnelsPage() {
                       <div className="flex items-center gap-2 font-mono text-xs text-gray-700">
                         <div className="flex flex-col gap-0.5">
                           {isPrivate ? (
-                            <span className="text-gray-400 italic">VPS-local only</span>
+                            <span className="text-gray-400">VPS-local <span className="text-gray-500">:{t.rathole_port}</span></span>
                           ) : (
                             <>
                               {t.subdomain && domain && (

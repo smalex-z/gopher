@@ -29,19 +29,23 @@ export default function MachinesPage() {
   const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
   const { data: keysRes } = useQuery({ queryKey: ['ssh-keys'], queryFn: () => localApi.listSSHKeys() })
   const { data: vpsRes } = useQuery({ queryKey: ['vps'], queryFn: () => vpsApi.get() })
+  const { data: firewallRes } = useQuery({ queryKey: ['firewall-overview'], queryFn: () => localApi.firewallOverview() })
   const machines: Machine[] = data?.data ?? []
   const sshKeys: SSHKey[] = keysRes?.data ?? []
   const vps = vpsRes?.data
   const domain = localStatus?.domain ?? ''
+  const vps22Open = (firewallRes?.data ?? []).some(e => e.port_range === '22' && e.action === 'ACCEPT')
 
-  const machineSSHCmd = (m: Machine) => {
-    if (m.tunnel_port === 0) return ''
+  const machineSSHCmd = (m: Machine, keyName?: string): { cmd: string; label: string } | null => {
+    if (m.tunnel_port === 0) return null
+    const vpsHost = displayHost || vps?.host || '<vps-host>'
+    const vpsUser = vps?.username ?? '<vps-user>'
+    const keyFlag = keyName ? ` -i ~/.ssh/${keyName}` : ''
     if (m.public_ssh) {
-      const host = vps?.host ?? '<vps-host>'
-      return `ssh -p ${m.tunnel_port} ${m.username}@${host}`
+      return { cmd: `ssh${keyFlag} -p ${m.tunnel_port} ${m.username}@${vpsHost}`, label: 'SSH:' }
     }
-    if (!vps) return ''
-    return `ssh -J ${vps.username}@${vps.host} -p ${m.tunnel_port} ${m.username}@localhost`
+    if (!vps22Open) return null
+    return { cmd: `ssh -J ${vpsUser}@${vpsHost}${keyFlag} -p ${m.tunnel_port} ${m.username}@localhost`, label: 'Jumpbox:' }
   }
 
   const { data: domainIPData } = useQuery({
@@ -270,11 +274,26 @@ export default function MachinesPage() {
                               </>
                             )}
                           </div>
+                          {/* SSH command — shown right below the key */}
+                          {(() => {
+                            const keyName = sshKeys.find(k => k.id === m.ssh_key_id)?.name
+                            const ssh = machineSSHCmd(m, keyName)
+                            if (!ssh) return null
+                            return (
+                              <div className="flex items-center gap-2 mt-1 mb-3 px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
+                                <Terminal size={10} className="shrink-0 text-slate-400" />
+                                <span className="font-medium text-slate-500">{ssh.label}</span>
+                                <code className="font-mono text-slate-700 bg-white border border-slate-200 px-2 py-0.5 rounded select-all flex-1 min-w-0 truncate">{ssh.cmd}</code>
+                                <button onClick={() => { navigator.clipboard.writeText(ssh.cmd); toast.success('Copied!') }} className="text-slate-400 hover:text-slate-600 shrink-0">
+                                  <ClipboardCopy size={10} />
+                                </button>
+                              </div>
+                            )
+                          })()}
                           <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Tunnels</div>
                           <div className="space-y-1">
                             {/* Built-in SSH tunnel */}
                             {m.tunnel_port > 0 && (() => {
-                              const cmd = machineSSHCmd(m)
                               const isPublic = m.public_ssh
                               return (
                                 <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
@@ -295,16 +314,6 @@ export default function MachinesPage() {
                                     )}
                                     <StatusBadge status={m.status === 'connected' ? 'active' : m.status} />
                                   </div>
-                                  {cmd && (
-                                    <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border-t border-gray-100 text-xs text-slate-600">
-                                      <Terminal size={10} className="shrink-0" />
-                                      <span className="font-medium">{isPublic ? 'SSH:' : 'Jumpbox:'}</span>
-                                      <code className="font-mono text-slate-700 bg-slate-100 px-2 py-0.5 rounded select-all">{cmd}</code>
-                                      <button onClick={() => { navigator.clipboard.writeText(cmd); toast.success('Copied!') }} className="text-slate-400 hover:text-slate-600">
-                                        <ClipboardCopy size={10} />
-                                      </button>
-                                    </div>
-                                  )}
                                 </div>
                               )
                             })()}
