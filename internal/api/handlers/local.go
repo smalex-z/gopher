@@ -270,5 +270,21 @@ func (h *LocalHandler) ConfigureFirewall(w http.ResponseWriter, r *http.Request)
 	response.Success(w, map[string]string{"message": "firewall configuration started"})
 }
 
+// PUT /api/local/server-ports — toggle dashboard port 8080 visibility
+func (h *LocalHandler) SetServerPorts(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		DashboardPrivate bool `json:"dashboard_private"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.BadRequest(w, "invalid request body")
+		return
+	}
+	if err := h.svc.SetDashboardPrivate(body.DashboardPrivate); err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]bool{"dashboard_private": body.DashboardPrivate})
+}
+
 // validDomain matches a reasonable FQDN: labels of alphanumeric + hyphens separated by dots.
 var validDomain = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)

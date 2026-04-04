@@ -232,21 +232,20 @@ export default function TunnelsPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex gap-2">
-                        {isProtectedTunnel ? (
-                          <span className="px-2 py-1 text-xs bg-gray-50 text-gray-500 border border-gray-200 rounded">Managed</span>
-                        ) : (
+                        {/* Privacy toggle — available on all tunnels including managed machine-ssh */}
+                        <button
+                          onClick={() => togglePrivate(t)}
+                          disabled={updateMutation.isPending}
+                          title={isPrivate ? 'Make public' : 'Make private'}
+                          className={`px-2 py-1 text-xs border rounded flex items-center gap-1 ${isPrivate
+                            ? 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                            : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+                        >
+                          {isPrivate ? <Globe size={11} /> : <Lock size={11} />}
+                          {isPrivate ? 'Public' : 'Private'}
+                        </button>
+                        {!isProtectedTunnel && (
                           <>
-                            <button
-                              onClick={() => togglePrivate(t)}
-                              disabled={updateMutation.isPending}
-                              title={isPrivate ? 'Make public' : 'Make private'}
-                              className={`px-2 py-1 text-xs border rounded flex items-center gap-1 ${isPrivate
-                                ? 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-                                : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
-                            >
-                              {isPrivate ? <Globe size={11} /> : <Lock size={11} />}
-                              {isPrivate ? 'Public' : 'Private'}
-                            </button>
                             <button onClick={() => testTunnel(t.id)} className="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50">Test</button>
                             <button onClick={() => handleDelete(t.id)} className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100">Delete</button>
                           </>

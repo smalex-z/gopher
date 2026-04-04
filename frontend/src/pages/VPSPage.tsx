@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { Copy, Check, ExternalLink, RefreshCw } from 'lucide-react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Copy, Check, ExternalLink, RefreshCw, Globe, Lock, ShieldAlert } from 'lucide-react'
 import { localApi } from '../api/local'
 import StatusBadge from '../components/StatusBadge'
+import { toast } from '../lib/toast'
 
 function ServiceRow({ label, active }: { label: string; active: string }) {
   const color =
@@ -19,12 +20,19 @@ function ServiceRow({ label, active }: { label: string; active: string }) {
 }
 
 export default function ServerPage() {
+  const qc = useQueryClient()
   const [keyCopied, setKeyCopied] = useState(false)
 
   const { data: status, refetch, isLoading } = useQuery({
     queryKey: ['local-status'],
     queryFn: () => localApi.status(),
     refetchInterval: 15000,
+  })
+
+  const dashboardMutation = useMutation({
+    mutationFn: (dashboardPrivate: boolean) => localApi.setServerPorts(dashboardPrivate),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['local-status'] }),
+    onError: (e: Error) => toast.error(e.message),
   })
 
   const copyKey = () => {
@@ -81,6 +89,79 @@ export default function ServerPage() {
         <div className="divide-y">
           <ServiceRow label="caddy.service (reverse proxy)" active={status?.caddy_installed ? (status.caddy_active || 'unknown') : 'not-installed'} />
           <ServiceRow label="rathole-server.service (tunnel server)" active={status?.rathole_installed ? (status.rathole_active || 'unknown') : 'not-installed'} />
+        </div>
+      </div>
+
+      {/* Port access */}
+      <div className="bg-white rounded-xl shadow-sm border p-6">
+        <h2 className="text-base font-semibold text-gray-900 mb-4">Port Access</h2>
+        <div className="space-y-4">
+          {/* Port 22 — always open */}
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="text-sm font-medium text-gray-800">Port 22 — VPS SSH</div>
+              <div className="text-xs text-gray-500 mt-0.5">
+                Always open. Required for server management — closing it via iptables risks permanent lockout.
+                To restrict by IP, use the Firewall tab custom rules (e.g. <code className="bg-gray-100 px-1 rounded">-s 1.2.3.4 -p tcp --dport 22 -j ACCEPT</code> then drop all others).
+              </div>
+            </div>
+            <span className="shrink-0 text-xs font-medium px-2 py-1 rounded-full bg-green-100 text-green-700 flex items-center gap-1">
+              <Globe size={11} /> Public
+            </span>
+          </div>
+
+          {/* Port 80/443 — Caddy */}
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="text-sm font-medium text-gray-800">Ports 80 / 443 — HTTP/HTTPS</div>
+              <div className="text-xs text-gray-500 mt-0.5">Always open when Caddy is configured.</div>
+            </div>
+            <span className="shrink-0 text-xs font-medium px-2 py-1 rounded-full bg-green-100 text-green-700 flex items-center gap-1">
+              <Globe size={11} /> Public
+            </span>
+          </div>
+
+          {/* Port 8080 — dashboard, toggleable */}
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="text-sm font-medium text-gray-800">Port 8080 — Gopher dashboard</div>
+              <div className="text-xs text-gray-500 mt-0.5">
+                {status?.dashboard_private
+                  ? <>Restricted to localhost. Access via <code className="bg-gray-100 px-1 rounded">router.{status.domain}</code>.</>
+                  : 'Publicly accessible. Anyone who knows the port can reach the dashboard login.'}
+              </div>
+              {!status?.domain && (
+                <div className="text-xs text-amber-600 mt-0.5 flex items-center gap-1">
+                  <ShieldAlert size={11} /> No domain configured — port 8080 must stay public.
+                </div>
+              )}
+            </div>
+            <div className="shrink-0 flex gap-1.5">
+              <button
+                onClick={() => dashboardMutation.mutate(false)}
+                disabled={dashboardMutation.isPending || !status?.dashboard_private}
+                className={`text-xs font-medium px-2.5 py-1 rounded-lg border transition-colors flex items-center gap-1 ${
+                  !status?.dashboard_private
+                    ? 'bg-green-600 text-white border-green-600'
+                    : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50 disabled:opacity-50'
+                }`}
+              >
+                <Globe size={11} /> Public
+              </button>
+              <button
+                onClick={() => dashboardMutation.mutate(true)}
+                disabled={dashboardMutation.isPending || status?.dashboard_private || !status?.domain || status?.firewall_mode !== 'gopher'}
+                title={!status?.domain ? 'Requires domain + Caddy' : status?.firewall_mode !== 'gopher' ? 'Requires Gopher-managed firewall' : undefined}
+                className={`text-xs font-medium px-2.5 py-1 rounded-lg border transition-colors flex items-center gap-1 ${
+                  status?.dashboard_private
+                    ? 'bg-slate-700 text-white border-slate-700'
+                    : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed'
+                }`}
+              >
+                <Lock size={11} /> Caddy only
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 

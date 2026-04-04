@@ -198,6 +198,12 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 }
 
 func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunnel, error) {
+	// Machine SSH tunnels are virtual (not in the tunnels table).
+	// Only the Private field can change — it maps to Machine.PublicSSH.
+	if machineID, ok := parseMachineSSHTunnelID(id); ok {
+		return s.updateMachineSSHPrivacy(machineID, req.Private)
+	}
+
 	tunnel, err := db.GetTunnel(id)
 	if err != nil {
 		return nil, err
@@ -251,6 +257,47 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 	}
 
 	return tunnel, nil
+}
+
+// updateMachineSSHPrivacy toggles the SSH tunnel visibility for a bootstrapped machine.
+// Private=true → bind 127.0.0.1 (jumpbox only); Private=false → bind 0.0.0.0 (public).
+func (s *TunnelService) updateMachineSSHPrivacy(machineID string, private bool) (*db.Tunnel, error) {
+	machine, err := db.GetMachine(machineID)
+	if err != nil {
+		return nil, err
+	}
+	oldPublicSSH := machine.PublicSSH
+	machine.PublicSSH = !private
+	machine.UpdatedAt = time.Now()
+	if err := db.UpdateMachine(machine); err != nil {
+		return nil, err
+	}
+	if oldPublicSSH != machine.PublicSSH && s.local != nil {
+		log.Printf("tunnel update: machine %s SSH visibility changed (public=%v), reconciling", machineID, machine.PublicSSH)
+		if err := s.local.ReconcileServerConfig(); err != nil {
+			log.Printf("tunnel update: reconcile failed: %v", err)
+		}
+		if machine.PublicSSH {
+			ApplyTunnelPort(machine.TunnelPort, "tcp", false)
+		} else {
+			ApplyTunnelPort(machine.TunnelPort, "tcp", true)
+		}
+	}
+	// Return a synthetic tunnel matching what List() would emit.
+	return &db.Tunnel{
+		ID:          machineSSHTunnelID(machineID),
+		MachineID:   machineID,
+		Name:        machine.Name + " SSH",
+		LocalPort:   22,
+		RatholePort: machine.TunnelPort,
+		Protocol:    "tcp",
+		Private:     !machine.PublicSSH,
+		Status:      machineTunnelStatus(machine.Status),
+		Managed:     true,
+		Kind:        "machine-ssh",
+		CreatedAt:   machine.CreatedAt,
+		UpdatedAt:   machine.UpdatedAt,
+	}, nil
 }
 
 func (s *TunnelService) Delete(id string) error {

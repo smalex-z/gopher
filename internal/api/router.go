@@ -67,6 +67,7 @@ func NewRouter(
 
 			r.Route("/local", func(r chi.Router) {
 				r.Post("/reconcile", localH.Reconcile)
+				r.Put("/server-ports", localH.SetServerPorts)
 				r.Route("/firewall", func(r chi.Router) {
 					r.Get("/overview", firewallH.Overview)
 					r.Post("/rules", firewallH.CreateRule)

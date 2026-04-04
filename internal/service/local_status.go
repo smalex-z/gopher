@@ -25,6 +25,8 @@ type LocalServiceStatus struct {
 	SSHPublicKey         string `json:"ssh_public_key"`
 	// FirewallMode is the persisted firewall strategy: "gopher", "manual", "none", or "" (not configured).
 	FirewallMode         string `json:"firewall_mode"`
+	// DashboardPrivate is true when port 8080 is restricted to localhost (Caddy-only access).
+	DashboardPrivate     bool   `json:"dashboard_private"`
 }
 
 type LocalSetupService struct {
@@ -49,6 +51,7 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 		LocalSetupDone:       settings.LocalSetupDone,
 		HasInstallPermission: hasInstallPermission(),
 		FirewallMode:         settings.FirewallMode,
+		DashboardPrivate:     settings.DashboardPrivate,
 	}
 	if key, kerr := db.GetDefaultSSHKey(); kerr == nil {
 		status.SSHPublicKey = key.PublicKey
@@ -275,4 +278,19 @@ func systemctlStatus(service string) string {
 		return s
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// SetDashboardPrivate persists the dashboard port visibility setting and applies
+// the corresponding iptables rule when in Gopher-managed firewall mode.
+func (s *LocalSetupService) SetDashboardPrivate(private bool) error {
+	settings, err := db.GetSettings()
+	if err != nil {
+		return err
+	}
+	settings.DashboardPrivate = private
+	if err := db.SaveSettings(settings); err != nil {
+		return err
+	}
+	ApplyDashboardPort(private)
+	return nil
 }

@@ -97,6 +97,22 @@ func firewallTakeover(logWriter io.Writer) error {
 		fmt.Fprintf(logWriter, "  WARN: could not open some tunnel ports: %v\n", err)
 	}
 
+	// Step 5b: Apply dashboard port visibility per saved setting.
+	settings, err := db.GetSettings()
+	if err == nil {
+		if settings.DashboardPrivate {
+			fmt.Fprintln(logWriter, "  Dashboard port 8080: restricting to localhost (DashboardPrivate=true)")
+			if dErr := iptablesMakePrivate(8080, "tcp"); dErr != nil {
+				fmt.Fprintf(logWriter, "  WARN: could not restrict dashboard port: %v\n", dErr)
+			}
+		} else {
+			fmt.Fprintln(logWriter, "  Dashboard port 8080: opening publicly")
+			if dErr := iptablesOpenPort(8080, "tcp"); dErr != nil {
+				fmt.Fprintf(logWriter, "  WARN: could not open dashboard port: %v\n", dErr)
+			}
+		}
+	}
+
 	// Step 6: Persist rules across reboots.
 	fmt.Fprintln(logWriter, "Step 6: Saving iptables rules for persistence...")
 	if err := firewallSaveRules(logWriter, sudo); err != nil {
@@ -167,7 +183,7 @@ func firewallInitRules(logWriter io.Writer, sudo []string) error {
 		append(sudo, "iptables", "-A", "INPUT", "-p", "tcp", "--dport", "80", "-j", "ACCEPT"),                                      // HTTP
 		append(sudo, "iptables", "-A", "INPUT", "-p", "tcp", "--dport", "443", "-j", "ACCEPT"),                                     // HTTPS
 		append(sudo, "iptables", "-A", "INPUT", "-p", "tcp", "--dport", "2333", "-j", "ACCEPT"),                                    // rathole control
-		append(sudo, "iptables", "-A", "INPUT", "-p", "tcp", "--dport", "8080", "-j", "ACCEPT"),                                    // Gopher dashboard
+		// Port 8080 (Gopher dashboard) is handled via GOPHER_TUNNELS by ApplyDashboardPort, not hardcoded here.
 	}
 	for _, args := range steps {
 		if err := runLocalCmd(logWriter, args[0], args[1:]...); err != nil {
@@ -331,6 +347,30 @@ func ApplyTunnelPort(port int, transport string, private bool) {
 	} else {
 		if err := iptablesOpenPort(port, proto); err != nil {
 			log.Printf("firewall: could not open port %d/%s: %v", port, proto, err)
+			return
+		}
+	}
+	persistRules()
+}
+
+// ApplyDashboardPort opens or restricts port 8080 (Gopher dashboard) based on the
+// DashboardPrivate setting. No-op if not in Gopher-managed firewall mode.
+func ApplyDashboardPort(private bool) {
+	settings, err := db.GetSettings()
+	if err != nil || settings.FirewallMode != "gopher" {
+		return
+	}
+	if !firewallChainExists() {
+		return
+	}
+	if private {
+		if err := iptablesMakePrivate(8080, "tcp"); err != nil {
+			log.Printf("firewall: could not restrict dashboard port 8080: %v", err)
+			return
+		}
+	} else {
+		if err := iptablesOpenPort(8080, "tcp"); err != nil {
+			log.Printf("firewall: could not open dashboard port 8080: %v", err)
 			return
 		}
 	}

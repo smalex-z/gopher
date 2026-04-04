@@ -12,6 +12,8 @@ export interface LocalServiceStatus {
   ssh_public_key: string
   /** "gopher" | "manual" | "none" | "" (wizard not yet completed) */
   firewall_mode: string
+  /** true when port 8080 is restricted to localhost (use router.domain instead) */
+  dashboard_private: boolean
 }
 
 export interface FirewallStatus {
@@ -66,4 +68,6 @@ export const localApi = {
     client.get<ApiResponse<Record<string, string>>>('/local/firewall/live').then(r => r.data),
   reloadFirewall: () =>
     client.post('/local/firewall/reload').then(r => r.data),
+  setServerPorts: (dashboardPrivate: boolean) =>
+    client.put('/local/server-ports', { dashboard_private: dashboardPrivate }).then(r => r.data),
 }
