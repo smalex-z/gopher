@@ -157,7 +157,7 @@ func (s *LocalSetupService) FirewallOverview() ([]FirewallEntry, error) {
 
 	// 1. Base system rules that gopher sets up on takeover.
 	for _, e := range []struct{ port int; desc string }{
-		{22, "SSH"}, {80, "HTTP"}, {443, "HTTPS"}, {2333, "Rathole control"}, {8080, "Gopher dashboard"},
+		{22, "SSH"}, {80, "HTTP"}, {443, "HTTPS"}, {2333, "Rathole control"}, {dashboardPort, "Gopher dashboard"},
 	} {
 		entries = append(entries, FirewallEntry{
 			Type: "system", Description: e.desc,

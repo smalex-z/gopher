@@ -17,7 +17,7 @@ This builds the full binary (frontend + Go), stops the running systemd service, 
 
 ### Development mode (local, no systemd):
 ```bash
-./scripts/dev.sh            # Go backend on :8080, Vite dev server on :5173
+./scripts/dev.sh            # Go backend on :4321, Vite dev server on :5173
 ```
 
 ### Frontend only:
@@ -108,7 +108,7 @@ The `localOps` interface (`local_ops.go`) is what `TunnelService` and `MachineSe
 
 **Machine SSH tunnels are virtual** — they don't exist in the `tunnels` table. `TunnelService.List()` synthesizes them from `Machine` records (`TunnelPort > 0`). Their IDs are `machine-{id}-ssh`. `TunnelService.Update()` detects this ID pattern and routes to `updateMachineSSHPrivacy()` instead of the normal update path.
 
-**Firewall rules use a dedicated chain** — `GOPHER_TUNNELS` chain is jumped from `INPUT`. Tunnel ports are added/removed from this chain dynamically as tunnels are created/deleted. Only active when `AppSettings.FirewallMode == "gopher"`. Port 8080 is also managed through this chain (controlled by `AppSettings.DashboardPrivate`). Port 22/80/443/2333 are hardcoded in `INPUT` and never touched dynamically.
+**Firewall rules use a dedicated chain** — `GOPHER_TUNNELS` chain is jumped from `INPUT`. Tunnel ports are added/removed from this chain dynamically as tunnels are created/deleted. Only active when `AppSettings.FirewallMode == "gopher"`. The dashboard port (default 4321, configurable via `--port`) is also managed through this chain (controlled by `AppSettings.DashboardPrivate`). Port 22/80/443/2333 are hardcoded in `INPUT` and never touched dynamically.
 
 **Long-running ops stream logs** — install, firewall takeover, and deploy operations run in goroutines and broadcast to `LogHub`. The frontend connects via WebSocket (`/api/local/logs/ws`) and displays a live log modal. Sentinel `\x00DONE` or `\x00ERROR` closes the stream.
 

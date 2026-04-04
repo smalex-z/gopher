@@ -74,8 +74,8 @@ type AppSettings struct {
 	// FirewallMode is one of "gopher" (Gopher manages iptables), "manual" (user manages),
 	// or "none" (no firewall). Empty string means the wizard step has not run yet.
 	FirewallMode      string    `json:"firewall_mode"`
-	// DashboardPrivate restricts port 8080 to localhost (VPS-only) when true.
-	// Zero value (false) keeps port 8080 publicly reachable — safe migration default.
+	// DashboardPrivate restricts the dashboard port to localhost (VPS-only) when true.
+	// Zero value (false) keeps it publicly reachable — safe migration default.
 	DashboardPrivate  bool      `json:"dashboard_private"`
 	// CustomIPTables holds raw iptables rule specs (one per line, everything after
 	// "iptables ") that are applied to the GOPHER_CUSTOM chain. Flushed and

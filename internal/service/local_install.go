@@ -204,16 +204,16 @@ func (s *LocalSetupService) doInstall(domain string, skipCaddy bool, logWriter i
 	}
 	if skipCaddy {
 		settings.Domain = ""
-		settings.DashboardPrivate = false // no Caddy — must keep :8080 public
+		settings.DashboardPrivate = false // no Caddy — must keep dashboard port public
 	} else {
 		settings.Domain = domain
-		settings.DashboardPrivate = true // Caddy is set up; restrict :8080, use router.domain
+		settings.DashboardPrivate = true // Caddy is set up; restrict dashboard port, use router.domain
 	}
 	settings.LocalSetupDone = true
 	if err := db.SaveSettings(settings); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
-	// Apply 8080 visibility to firewall now that settings are persisted.
+	// Apply dashboard port visibility to firewall now that settings are persisted.
 	ApplyDashboardPort(settings.DashboardPrivate)
 
 	fmt.Fprintln(logWriter, "=== Local Setup Complete ===")

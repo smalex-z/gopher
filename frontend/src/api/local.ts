@@ -12,8 +12,10 @@ export interface LocalServiceStatus {
   ssh_public_key: string
   /** "gopher" | "manual" | "none" | "" (wizard not yet completed) */
   firewall_mode: string
-  /** true when port 8080 is restricted to localhost (use router.domain instead) */
+  /** true when the dashboard port is restricted to localhost (use router.domain instead) */
   dashboard_private: boolean
+  /** the port the Gopher HTTP server listens on */
+  dashboard_port: number
 }
 
 export interface FirewallStatus {

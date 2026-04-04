@@ -476,7 +476,7 @@ function FirewallStep({ onDone }: { onDone: () => void }) {
             )}
             <li className="flex gap-2"><span>•</span><span>Current iptables rules will be backed up to <code>/root/gopher-firewall-backup.rules</code></span></li>
             <li className="flex gap-2"><span>•</span><span><strong>SSH (port 22) will remain open</strong> — you will not be locked out</span></li>
-            <li className="flex gap-2"><span>•</span><span>Ports 80, 443, 2333, and 8080 will be allowed</span></li>
+            <li className="flex gap-2"><span>•</span><span>Ports 80, 443, 2333, and the dashboard port will be allowed</span></li>
             <li className="flex gap-2"><span>•</span><span>All tunnel ports will be opened automatically going forward</span></li>
           </ul>
         </div>

@@ -121,10 +121,10 @@ export default function ServerPage() {
             </span>
           </div>
 
-          {/* Port 8080 — dashboard, toggleable */}
+          {/* Dashboard port — toggleable */}
           <div className="flex items-start justify-between gap-4">
             <div>
-              <div className="text-sm font-medium text-gray-800">Port 8080 — Gopher dashboard</div>
+              <div className="text-sm font-medium text-gray-800">Port {status?.dashboard_port ?? 4321} — Gopher dashboard</div>
               <div className="text-xs text-gray-500 mt-0.5">
                 {status?.dashboard_private
                   ? <>Restricted to localhost. Access via <code className="bg-gray-100 px-1 rounded">router.{status.domain}</code>.</>
@@ -132,7 +132,7 @@ export default function ServerPage() {
               </div>
               {!status?.domain && (
                 <div className="text-xs text-amber-600 mt-0.5 flex items-center gap-1">
-                  <ShieldAlert size={11} /> No domain configured — port 8080 must stay public.
+                  <ShieldAlert size={11} /> No domain configured — dashboard port must stay public.
                 </div>
               )}
             </div>

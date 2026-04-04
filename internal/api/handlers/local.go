@@ -270,7 +270,7 @@ func (h *LocalHandler) ConfigureFirewall(w http.ResponseWriter, r *http.Request)
 	response.Success(w, map[string]string{"message": "firewall configuration started"})
 }
 
-// PUT /api/local/server-ports — toggle dashboard port 8080 visibility
+// PUT /api/local/server-ports — toggle dashboard port visibility
 func (h *LocalHandler) SetServerPorts(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		DashboardPrivate bool `json:"dashboard_private"`

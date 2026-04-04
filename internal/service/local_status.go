@@ -13,6 +13,16 @@ import (
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
+// dashboardPort is the port Gopher's HTTP server is listening on.
+// Set once at startup via SetDashboardPort; defaults to 4321.
+var dashboardPort = 4321
+
+// SetDashboardPort stores the runtime listen port so firewall and Caddy config
+// functions can reference it without hardcoding.
+func SetDashboardPort(port int) {
+	dashboardPort = port
+}
+
 // LocalServiceStatus is returned by GET /api/local/status.
 type LocalServiceStatus struct {
 	CaddyInstalled       bool   `json:"caddy_installed"`
@@ -25,8 +35,10 @@ type LocalServiceStatus struct {
 	SSHPublicKey         string `json:"ssh_public_key"`
 	// FirewallMode is the persisted firewall strategy: "gopher", "manual", "none", or "" (not configured).
 	FirewallMode         string `json:"firewall_mode"`
-	// DashboardPrivate is true when port 8080 is restricted to localhost (Caddy-only access).
+	// DashboardPrivate is true when the dashboard port is restricted to localhost (Caddy-only access).
 	DashboardPrivate     bool   `json:"dashboard_private"`
+	// DashboardPort is the port Gopher's HTTP server listens on.
+	DashboardPort        int    `json:"dashboard_port"`
 }
 
 type LocalSetupService struct {
@@ -52,6 +64,7 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 		HasInstallPermission: hasInstallPermission(),
 		FirewallMode:         settings.FirewallMode,
 		DashboardPrivate:     settings.DashboardPrivate,
+		DashboardPort:        dashboardPort,
 	}
 	if key, kerr := db.GetDefaultSSHKey(); kerr == nil {
 		status.SSHPublicKey = key.PublicKey
@@ -281,7 +294,7 @@ func systemctlStatus(service string) string {
 }
 
 // SetDashboardPrivate persists the dashboard port visibility setting and applies
-// the corresponding iptables rule when in Gopher-managed firewall mode.
+// the iptables rule for dashboardPort when in Gopher-managed firewall mode.
 func (s *LocalSetupService) SetDashboardPrivate(private bool) error {
 	settings, err := db.GetSettings()
 	if err != nil {
