@@ -155,14 +155,31 @@ type FirewallEntry struct {
 func (s *LocalSetupService) FirewallOverview() ([]FirewallEntry, error) {
 	var entries []FirewallEntry
 
+	settings, err := db.GetSettings()
+	if err != nil {
+		return nil, err
+	}
+
 	// 1. Base system rules that gopher sets up on takeover.
-	for _, e := range []struct{ port int; desc string }{
-		{22, "SSH"}, {80, "HTTP"}, {443, "HTTPS"}, {2333, "Rathole control"}, {dashboardPort, "Gopher dashboard"},
+	dashboardSource := "0.0.0.0/0"
+	if settings.DashboardPrivate {
+		dashboardSource = "127.0.0.1"
+	}
+	for _, e := range []struct {
+		port   int
+		desc   string
+		source string
+	}{
+		{22, "SSH", "0.0.0.0/0"},
+		{80, "HTTP", "0.0.0.0/0"},
+		{443, "HTTPS", "0.0.0.0/0"},
+		{2333, "Rathole control", "0.0.0.0/0"},
+		{dashboardPort, "Gopher dashboard", dashboardSource},
 	} {
 		entries = append(entries, FirewallEntry{
 			Type: "system", Description: e.desc,
 			Protocol: "tcp", PortRange: fmt.Sprintf("%d", e.port),
-			Source: "0.0.0.0/0", Action: "ACCEPT",
+			Source: e.source, Action: "ACCEPT",
 		})
 	}
 

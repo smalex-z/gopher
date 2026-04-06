@@ -190,24 +190,22 @@ export default function TunnelsPage() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2 font-mono text-xs text-gray-700">
                         <div className="flex flex-col gap-0.5">
+                          {t.subdomain && domain && (
+                            <a href={`https://${t.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
+                              className="text-blue-600 hover:underline">{t.subdomain}.{domain}</a>
+                          )}
                           {isPrivate ? (
                             <span className="text-gray-400">VPS-local <span className="text-gray-500">:{t.rathole_port}</span></span>
                           ) : (
-                            <>
-                              {t.subdomain && domain && (
-                                <a href={`https://${t.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
-                                  className="text-blue-600 hover:underline">{t.subdomain}.{domain}</a>
-                              )}
-                              <span className="text-gray-500">
-                                {t.transport === 'udp' && <span className="text-purple-600 font-semibold mr-0.5">UDP</span>}
-                                {displayHost ?? 'server'}:{t.rathole_port}
-                              </span>
-                            </>
+                            <span className="text-gray-500">
+                              {t.transport === 'udp' && <span className="text-purple-600 font-semibold mr-0.5">UDP</span>}
+                              {displayHost ?? 'server'}:{t.rathole_port}
+                            </span>
                           )}
                         </div>
                         <ArrowRight size={12} className="text-gray-400 shrink-0" />
                         <span>localhost:{t.local_port}</span>
-                        {!isPrivate && (
+                        {(!isPrivate || (t.subdomain && domain)) && (
                           <button onClick={() => copyUrl(t)} className="text-gray-300 hover:text-gray-600 ml-1">
                             <ClipboardCopy size={12} />
                           </button>
