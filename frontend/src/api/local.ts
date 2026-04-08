@@ -16,6 +16,8 @@ export interface LocalServiceStatus {
   dashboard_private: boolean
   /** the port the Gopher HTTP server listens on */
   dashboard_port: number
+  /** OS username Gopher runs as (e.g. "ubuntu") — used to pre-fill VPS jump-host user */
+  os_user: string
 }
 
 export interface FirewallStatus {

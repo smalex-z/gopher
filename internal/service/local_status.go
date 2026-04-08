@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -39,6 +40,9 @@ type LocalServiceStatus struct {
 	DashboardPrivate     bool   `json:"dashboard_private"`
 	// DashboardPort is the port Gopher's HTTP server listens on.
 	DashboardPort        int    `json:"dashboard_port"`
+	// OSUser is the OS username Gopher runs as (e.g. "ubuntu"). Used to pre-fill
+	// the VPS jump-host username in SSH jumpbox commands.
+	OSUser               string `json:"os_user"`
 }
 
 type LocalSetupService struct {
@@ -54,6 +58,10 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	osUser := ""
+	if u, err := user.Current(); err == nil {
+		osUser = u.Username
+	}
 	status := &LocalServiceStatus{
 		CaddyInstalled:       isCommandAvailable("caddy"),
 		CaddyActive:          systemctlStatus("caddy"),
@@ -65,6 +73,7 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 		FirewallMode:         settings.FirewallMode,
 		DashboardPrivate:     settings.DashboardPrivate,
 		DashboardPort:        dashboardPort,
+		OSUser:               osUser,
 	}
 	if key, kerr := db.GetDefaultSSHKey(); kerr == nil {
 		status.SSHPublicKey = key.PublicKey
