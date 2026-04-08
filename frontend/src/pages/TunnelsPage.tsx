@@ -346,7 +346,7 @@ export default function TunnelsPage() {
                   <div className="flex gap-2">
                     {([false, true] as const).map(priv => (
                       <button key={String(priv)} type="button"
-                        onClick={() => setForm(f => ({ ...f, private: priv, ...(priv ? { subdomain: '', no_tls: false } : {}) }))}
+                        onClick={() => setForm(f => ({ ...f, private: priv }))}
                         className={`px-3 py-1.5 rounded-lg text-sm font-semibold border transition-colors flex items-center gap-1 ${
                           form.private === priv
                             ? priv ? 'bg-slate-700 text-white border-slate-700' : 'bg-green-600 text-white border-green-600'
@@ -374,7 +374,7 @@ export default function TunnelsPage() {
                 </div>
               </div>
 
-              {routingEnabled && form.transport !== 'udp' && !form.private ? (
+              {routingEnabled && form.transport !== 'udp' ? (
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Subdomain
@@ -384,9 +384,14 @@ export default function TunnelsPage() {
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                   {domain && form.subdomain ? (
                     <>
-                      <div className="mt-1 text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded font-mono">
+                      <div className={`mt-1 text-xs px-2 py-1 rounded font-mono ${form.private ? 'bg-slate-50 text-slate-700' : 'bg-blue-50 text-blue-700'}`}>
                         {form.no_tls ? 'http' : 'https'}://{form.subdomain}.{domain} → localhost:{form.local_port}
                       </div>
+                      {form.private && (
+                        <p className="text-xs text-slate-500 mt-1">
+                          Subdomain routes through Caddy — accessible publicly via reverse proxy even though the tunnel port is localhost-only.
+                        </p>
+                      )}
                       <label className="flex items-center gap-2 mt-2 text-sm text-gray-700 cursor-pointer select-none">
                         <input type="checkbox" checked={form.no_tls}
                           onChange={e => setForm(f => ({ ...f, no_tls: e.target.checked }))}
@@ -396,7 +401,9 @@ export default function TunnelsPage() {
                     </>
                   ) : (
                     <p className="text-xs text-gray-400 mt-1">
-                      Leave blank to use raw TCP port only (e.g. {displayHost ?? 'server'}:20000).
+                      {form.private
+                        ? 'Subdomain routes via Caddy reverse proxy. Leave blank for localhost-only access.'
+                        : `Leave blank to use raw TCP port only (e.g. ${displayHost ?? 'server'}:20000).`}
                     </p>
                   )}
                 </div>
