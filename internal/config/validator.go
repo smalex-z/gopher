@@ -17,10 +17,11 @@ func ValidateSubdomain(s string) error {
 	return nil
 }
 
-// ValidatePort checks if a port number is valid
+// ValidatePort checks if a port number is valid for use as a tunnel server port.
+// Ports below 1024 are privileged and typically require root — we reject them.
 func ValidatePort(p int) error {
-	if p < 1 || p > 65535 {
-		return fmt.Errorf("invalid port: must be between 1 and 65535")
+	if p < 1024 || p > 65535 {
+		return fmt.Errorf("invalid port: must be between 1024 and 65535 (ports below 1024 are privileged)")
 	}
 	return nil
 }

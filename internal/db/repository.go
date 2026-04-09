@@ -106,18 +106,45 @@ func DeleteTunnel(id string) error {
 	return DB.Delete(&Tunnel{}, "id = ?", id).Error
 }
 
-func NextRatholePort() (int, error) {
-	var tunnel Tunnel
-	if err := DB.Order("rathole_port DESC").First(&tunnel).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return 20000, nil
+// allUsedPorts returns every port currently assigned across both service tunnels
+// and machine SSH tunnels. Used by port-assignment and conflict-check functions
+// so neither table is blind to the other.
+func allUsedPorts() (map[int]bool, error) {
+	used := make(map[int]bool)
+	var tunnels []Tunnel
+	if err := DB.Select("rathole_port").Find(&tunnels).Error; err != nil {
+		return nil, err
+	}
+	for _, t := range tunnels {
+		if t.RatholePort > 0 {
+			used[t.RatholePort] = true
 		}
+	}
+	var machines []Machine
+	if err := DB.Select("tunnel_port").Find(&machines).Error; err != nil {
+		return nil, err
+	}
+	for _, m := range machines {
+		if m.TunnelPort > 0 {
+			used[m.TunnelPort] = true
+		}
+	}
+	return used, nil
+}
+
+// NextRatholePort returns the next available port for a service tunnel,
+// guaranteed free across both service tunnels and machine SSH tunnels.
+// Starts from 1024 (first non-privileged port) and finds the first gap.
+func NextRatholePort() (int, error) {
+	used, err := allUsedPorts()
+	if err != nil {
 		return 0, err
 	}
-	if tunnel.RatholePort < 20000 {
-		return 20000, nil
+	port := 1024
+	for used[port] {
+		port++
 	}
-	return tunnel.RatholePort + 1, nil
+	return port, nil
 }
 
 func CheckSubdomainExists(subdomain string) (bool, error) {
@@ -128,9 +155,17 @@ func CheckSubdomainExists(subdomain string) (bool, error) {
 	return count > 0, nil
 }
 
+// CheckRatholePortExists returns true if port is already in use by any service
+// tunnel or machine SSH tunnel.
 func CheckRatholePortExists(port int) (bool, error) {
 	var count int64
 	if err := DB.Model(&Tunnel{}).Where("rathole_port = ?", port).Count(&count).Error; err != nil {
+		return false, err
+	}
+	if count > 0 {
+		return true, nil
+	}
+	if err := DB.Model(&Machine{}).Where("tunnel_port = ?", port).Count(&count).Error; err != nil {
 		return false, err
 	}
 	return count > 0, nil
@@ -241,18 +276,19 @@ func MarkTokenUsed(tokenID, machineID string) error {
 	}).Error
 }
 
+// NextSSHTunnelPort returns the next available port for a machine SSH tunnel,
+// guaranteed free across both machine SSH tunnels and service tunnels.
+// Starts from 1024 (first non-privileged port) and finds the first gap.
 func NextSSHTunnelPort() (int, error) {
-	var m Machine
-	if err := DB.Order("tunnel_port DESC").First(&m).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return 10000, nil
-		}
+	used, err := allUsedPorts()
+	if err != nil {
 		return 0, err
 	}
-	if m.TunnelPort == 0 {
-		return 10000, nil
+	port := 1024
+	for used[port] {
+		port++
 	}
-	return m.TunnelPort + 1, nil
+	return port, nil
 }
 
 // App Settings Repository
