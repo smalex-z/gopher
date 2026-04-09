@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Copy, Check, ExternalLink, RefreshCw, Globe, Lock, ShieldAlert } from 'lucide-react'
 import { localApi } from '../api/local'
+import { updateApi } from '../api/update'
 import StatusBadge from '../components/StatusBadge'
 import { toast } from '../lib/toast'
 
@@ -27,6 +28,12 @@ export default function ServerPage() {
     queryKey: ['local-status'],
     queryFn: () => localApi.status(),
     refetchInterval: 15000,
+  })
+
+  const { data: updateInfo } = useQuery({
+    queryKey: ['update-check'],
+    queryFn: () => updateApi.check(),
+    staleTime: 60_000,
   })
 
   const dashboardMutation = useMutation({
@@ -164,6 +171,21 @@ export default function ServerPage() {
           </div>
         </div>
       </div>
+
+      {/* Version */}
+      {updateInfo && (
+        <div className="bg-white rounded-xl shadow-sm border p-6">
+          <h2 className="text-base font-semibold text-gray-900 mb-3">Gopher Version</h2>
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-mono text-gray-700">{updateInfo.current_version}</span>
+            {updateInfo.update_available && (
+              <span className="text-xs text-emerald-600 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                {updateInfo.latest_version} available
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* SSH public key */}
       <div className="bg-white rounded-xl shadow-sm border p-6">
