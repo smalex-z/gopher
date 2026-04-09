@@ -320,7 +320,9 @@ func parseSemver(tag string) *semverParts {
 	}
 
 	if len(mainAndPre) == 2 {
-		parsed.prerelease = strings.ToLower(mainAndPre[1])
+		// Normalize dashes to dots so "alpha-5.1" and "alpha.5.1" compare equally,
+		// and git-describe suffixes like "-6-gabcdef-dirty" parse as extra dot-separated identifiers.
+		parsed.prerelease = strings.ToLower(strings.ReplaceAll(mainAndPre[1], "-", "."))
 	}
 
 	return parsed
