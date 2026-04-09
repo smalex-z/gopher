@@ -302,15 +302,16 @@ export default function TunnelsPage() {
               return (
             <>
             <div className="p-4 space-y-4">
-              {routingEnabled ? (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
-                  <strong>HTTP traffic only via subdomain.</strong> Caddy proxies subdomain → local port over plain HTTP.
-                  For raw TCP (SSH, databases), use the server port directly — no subdomain needed.
-                </div>
-              ) : (
+              {!routingEnabled && (
                 <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-800">
                   <strong>URL routing is disabled.</strong> Caddy/reverse-proxy setup was skipped, so tunnels are exposed
                   by server port only.
+                </div>
+              )}
+              {routingEnabled && form.subdomain && form.transport !== 'udp' && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
+                  <strong>HTTP traffic only via subdomain.</strong> Caddy proxies subdomain → local port over plain HTTP.
+                  For raw TCP (SSH, databases), use the server port directly — no subdomain needed.
                 </div>
               )}
 
