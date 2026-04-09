@@ -36,16 +36,17 @@ export default function MachinesPage() {
   const domain = localStatus?.domain ?? ''
   const vps22Open = (firewallRes?.data ?? []).some(e => e.port_range === '22' && e.action === 'ACCEPT')
 
-  const machineSSHCmd = (m: Machine, keyName?: string): { cmd: string; label: string } | null => {
+  const machineSSHCmd = (m: Machine, keyExists: boolean): { cmd: string; label: string; keyMissing: boolean } | null => {
     if (m.tunnel_port === 0) return null
     const vpsHost = displayHost || vps?.host || '<vps-host>'
-    const vpsUser = vps?.username ?? '<vps-user>'
-    const keyFlag = keyName ? ` -i ~/.ssh/${keyName}` : ''
+    const vpsUser = vps?.username ?? localStatus?.os_user ?? '<vps-user>'
+    // The download endpoint always names the file gopher_id_rsa; suggest that path.
+    const keyFlag = keyExists ? ' -i ~/.ssh/gopher_id_rsa' : ''
     if (m.public_ssh) {
-      return { cmd: `ssh${keyFlag} -p ${m.tunnel_port} ${m.username}@${vpsHost}`, label: 'SSH:' }
+      return { cmd: `ssh${keyFlag} -p ${m.tunnel_port} ${m.username}@${vpsHost}`, label: 'SSH:', keyMissing: !keyExists }
     }
     if (!vps22Open) return null
-    return { cmd: `ssh -J ${vpsUser}@${vpsHost}${keyFlag} -p ${m.tunnel_port} ${m.username}@localhost`, label: 'Jumpbox:' }
+    return { cmd: `ssh -J ${vpsUser}@${vpsHost}${keyFlag} -p ${m.tunnel_port} ${m.username}@localhost`, label: 'Jumpbox:', keyMissing: !keyExists }
   }
 
   const { data: domainIPData } = useQuery({
@@ -276,17 +277,29 @@ export default function MachinesPage() {
                           </div>
                           {/* SSH command — shown right below the key */}
                           {(() => {
-                            const keyName = sshKeys.find(k => k.id === m.ssh_key_id)?.name
-                            const ssh = machineSSHCmd(m, keyName)
+                            const keyExists = sshKeys.some(k => k.id === m.ssh_key_id)
+                            const ssh = machineSSHCmd(m, keyExists)
                             if (!ssh) return null
                             return (
-                              <div className="flex items-center gap-2 mt-1 mb-3 px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
-                                <Terminal size={10} className="shrink-0 text-slate-400" />
-                                <span className="font-medium text-slate-500">{ssh.label}</span>
-                                <code className="font-mono text-slate-700 bg-white border border-slate-200 px-2 py-0.5 rounded select-all flex-1 min-w-0 truncate">{ssh.cmd}</code>
-                                <button onClick={() => { navigator.clipboard.writeText(ssh.cmd); toast.success('Copied!') }} className="text-slate-400 hover:text-slate-600 shrink-0">
-                                  <ClipboardCopy size={10} />
-                                </button>
+                              <div className="mt-1 mb-3 space-y-1">
+                                <div className="flex items-center gap-2 px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
+                                  <Terminal size={10} className="shrink-0 text-slate-400" />
+                                  <span className="font-medium text-slate-500">{ssh.label}</span>
+                                  <code className="font-mono text-slate-700 bg-white border border-slate-200 px-2 py-0.5 rounded select-all flex-1 min-w-0 truncate">{ssh.cmd}</code>
+                                  <button onClick={() => { navigator.clipboard.writeText(ssh.cmd); toast.success('Copied!') }} className="text-slate-400 hover:text-slate-600 shrink-0">
+                                    <ClipboardCopy size={10} />
+                                  </button>
+                                </div>
+                                {ssh.keyMissing && (
+                                  <p className="text-xs text-amber-600 px-1">
+                                    SSH key deleted from Gopher — private key may no longer be available. The machine's <code>authorized_keys</code> still has the old public key.
+                                  </p>
+                                )}
+                                {keyExists && (
+                                  <p className="text-xs text-gray-400 px-1">
+                                    Uses <code>~/.ssh/gopher_id_rsa</code> — download from SSH Keys if needed.
+                                  </p>
+                                )}
                               </div>
                             )
                           })()}

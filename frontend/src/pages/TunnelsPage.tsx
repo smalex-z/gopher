@@ -290,13 +290,19 @@ export default function TunnelsPage() {
               <h2 className="text-lg font-semibold">Add Tunnel</h2>
               <button onClick={() => setModal({ isOpen: false })} className="text-gray-400 hover:text-gray-600 text-xl">×</button>
             </div>
+            {(() => {
+              const serverPortConflict = form.rathole_port > 0 && (
+                tunnels.some(t => t.rathole_port === form.rathole_port) ||
+                machines.some(m => m.tunnel_port === form.rathole_port)
+              )
+              const localPortConflict = form.local_port > 0 && form.machine_id !== '' &&
+                tunnels.some(t => t.machine_id === form.machine_id && t.local_port === form.local_port)
+              const canCreate = form.machine_id !== '' && form.name.trim() !== '' &&
+                form.rathole_port > 0 && !serverPortConflict && !localPortConflict && !createMutation.isPending
+              return (
+            <>
             <div className="p-4 space-y-4">
-              {routingEnabled ? (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
-                  <strong>HTTP traffic only via subdomain.</strong> Caddy proxies subdomain → local port over plain HTTP.
-                  For raw TCP (SSH, databases), use the server port directly — no subdomain needed.
-                </div>
-              ) : (
+              {!routingEnabled && (
                 <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-800">
                   <strong>URL routing is disabled.</strong> Caddy/reverse-proxy setup was skipped, so tunnels are exposed
                   by server port only.
@@ -346,7 +352,7 @@ export default function TunnelsPage() {
                   <div className="flex gap-2">
                     {([false, true] as const).map(priv => (
                       <button key={String(priv)} type="button"
-                        onClick={() => setForm(f => ({ ...f, private: priv, ...(priv ? { subdomain: '', no_tls: false } : {}) }))}
+                        onClick={() => setForm(f => ({ ...f, private: priv }))}
                         className={`px-3 py-1.5 rounded-lg text-sm font-semibold border transition-colors flex items-center gap-1 ${
                           form.private === priv
                             ? priv ? 'bg-slate-700 text-white border-slate-700' : 'bg-green-600 text-white border-green-600'
@@ -370,11 +376,47 @@ export default function TunnelsPage() {
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-gray-500 font-mono shrink-0">localhost:</span>
                   <input type="number" value={form.local_port} onChange={e => setForm(f => ({ ...f, local_port: Number(e.target.value) }))}
-                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                    className={`flex-1 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 border ${
+                      localPortConflict
+                        ? 'border-amber-400 focus:ring-amber-400 bg-amber-50'
+                        : 'border-gray-300 focus:ring-blue-500'
+                    }`} />
                 </div>
+                {localPortConflict && (
+                  <p className="text-xs text-amber-600 mt-1 flex items-center gap-1">
+                    ⚠ Port {form.local_port} is already used by another tunnel on this machine.
+                  </p>
+                )}
               </div>
 
-              {routingEnabled && form.transport !== 'udp' && !form.private ? (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Server Port
+                  <span className="ml-1 font-normal text-gray-400 text-xs">(port on your VPS — 1024–65535)</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-500 font-mono shrink-0 truncate max-w-[160px]" title={displayHost ?? 'server'}>{displayHost ?? 'server'}:</span>
+                  <input
+                    type="number"
+                    min={1024}
+                    max={65535}
+                    value={form.rathole_port || ''}
+                    onChange={e => setForm(f => ({ ...f, rathole_port: Number(e.target.value) }))}
+                    className={`flex-1 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 border ${
+                      serverPortConflict
+                        ? 'border-red-400 focus:ring-red-400 bg-red-50'
+                        : 'border-gray-300 focus:ring-blue-500'
+                    }`}
+                  />
+                </div>
+                {serverPortConflict && (
+                  <p className="text-xs text-red-600 mt-1 flex items-center gap-1">
+                    ⚠ Port {form.rathole_port} is already in use.
+                  </p>
+                )}
+              </div>
+
+              {routingEnabled && form.transport !== 'udp' ? (
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Subdomain
@@ -382,11 +424,22 @@ export default function TunnelsPage() {
                   </label>
                   <input type="text" value={form.subdomain} onChange={e => setForm(f => ({ ...f, subdomain: e.target.value }))} placeholder="photos"
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  {form.subdomain && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800 mt-2">
+                      <strong>HTTP traffic only via subdomain.</strong> Caddy proxies subdomain → local port over plain HTTP.
+                      For raw TCP (SSH, databases), use the server port directly — no subdomain needed.
+                    </div>
+                  )}
                   {domain && form.subdomain ? (
                     <>
-                      <div className="mt-1 text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded font-mono">
+                      <div className={`mt-1 text-xs px-2 py-1 rounded font-mono ${form.private ? 'bg-slate-50 text-slate-700' : 'bg-blue-50 text-blue-700'}`}>
                         {form.no_tls ? 'http' : 'https'}://{form.subdomain}.{domain} → localhost:{form.local_port}
                       </div>
+                      {form.private && (
+                        <p className="text-xs text-slate-500 mt-1">
+                          Subdomain routes through Caddy — accessible publicly via reverse proxy even though the tunnel port is localhost-only.
+                        </p>
+                      )}
                       <label className="flex items-center gap-2 mt-2 text-sm text-gray-700 cursor-pointer select-none">
                         <input type="checkbox" checked={form.no_tls}
                           onChange={e => setForm(f => ({ ...f, no_tls: e.target.checked }))}
@@ -396,41 +449,26 @@ export default function TunnelsPage() {
                     </>
                   ) : (
                     <p className="text-xs text-gray-400 mt-1">
-                      Leave blank to use raw TCP port only (e.g. {displayHost ?? 'server'}:20000).
+                      {form.private
+                        ? 'Subdomain routes via Caddy reverse proxy. Leave blank for localhost-only access.'
+                        : 'Leave blank to skip HTTP subdomain routing.'}
                     </p>
                   )}
                 </div>
               ) : null}
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Server Port
-                  <span className="ml-1 font-normal text-gray-400 text-xs">(port on your VPS — must be 20000–65535)</span>
-                </label>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-500 font-mono shrink-0 truncate max-w-[160px]" title={displayHost ?? 'server'}>{displayHost ?? 'server'}:</span>
-                  <input
-                    type="number"
-                    min={20000}
-                    max={65535}
-                    value={form.rathole_port || ''}
-                    onChange={e => setForm(f => ({ ...f, rathole_port: Number(e.target.value) }))}
-                    placeholder="80"
-                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-                <p className="text-xs text-gray-400 mt-1">Leave at 0 to auto-assign the next available port.</p>
-              </div>
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
               <button onClick={() => setModal({ isOpen: false })} className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm">Cancel</button>
               <button
                 onClick={() => createMutation.mutate({ ...form, subdomain: routingEnabled && form.transport !== 'udp' ? form.subdomain : '' })}
-                disabled={createMutation.isPending}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-50">
+                disabled={!canCreate}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-50 disabled:cursor-not-allowed">
                 {createMutation.isPending ? 'Creating...' : 'Create Tunnel'}
               </button>
             </div>
+            </>
+          )
+        })()}
           </div>
         </div></div>
       )}

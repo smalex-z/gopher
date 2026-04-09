@@ -126,6 +126,9 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 	if err := s.local.AddMachineSSHTunnel(machine); err != nil {
 		fmt.Printf("WARN: failed to add rathole tunnel for machine %s: %v\n", machine.ID, err)
 	}
+	// Open (or restrict) the SSH tunnel port in the firewall.
+	// No-op when firewall mode is not "gopher"; safe to call unconditionally.
+	ApplyTunnelPort(machine.TunnelPort, "tcp", !machine.PublicSSH)
 
 	// Derive rathole server address from the request host (strip port if present).
 	ratholeHost := serverHost

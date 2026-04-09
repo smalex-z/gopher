@@ -108,11 +108,6 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 		req.Subdomain = ""
 		req.NoTLS = false
 	}
-	// Private tunnels have no public URL, so subdomain is meaningless
-	if req.Private {
-		req.Subdomain = ""
-		req.NoTLS = false
-	}
 	if req.Subdomain != "" && settings.Domain == "" {
 		return nil, &apperrors.ValidationError{Field: "subdomain", Message: "URL routing is disabled; leave subdomain empty"}
 	}
