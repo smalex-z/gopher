@@ -308,12 +308,6 @@ export default function TunnelsPage() {
                   by server port only.
                 </div>
               )}
-              {routingEnabled && form.subdomain && form.transport !== 'udp' && (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
-                  <strong>HTTP traffic only via subdomain.</strong> Caddy proxies subdomain → local port over plain HTTP.
-                  For raw TCP (SSH, databases), use the server port directly — no subdomain needed.
-                </div>
-              )}
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Machine</label>
@@ -430,6 +424,12 @@ export default function TunnelsPage() {
                   </label>
                   <input type="text" value={form.subdomain} onChange={e => setForm(f => ({ ...f, subdomain: e.target.value }))} placeholder="photos"
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  {form.subdomain && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800 mt-2">
+                      <strong>HTTP traffic only via subdomain.</strong> Caddy proxies subdomain → local port over plain HTTP.
+                      For raw TCP (SSH, databases), use the server port directly — no subdomain needed.
+                    </div>
+                  )}
                   {domain && form.subdomain ? (
                     <>
                       <div className={`mt-1 text-xs px-2 py-1 rounded font-mono ${form.private ? 'bg-slate-50 text-slate-700' : 'bg-blue-50 text-blue-700'}`}>
