@@ -145,14 +145,20 @@ function AppShell() {
                   ]}
                 />
                 <NavLink to="/network" className={navClass}><Map size={16} /> Network Map</NavLink>
-                <NavLink to="/firewall" className={navClass}><Shield size={16} /> Firewall</NavLink>
+                <NavDropdown
+                  label="Security"
+                  icon={ShieldCheck}
+                  items={[
+                    { to: '/firewall', icon: Shield, label: 'Firewall' },
+                    { to: '/security', icon: ShieldCheck, label: 'Access Control' },
+                  ]}
+                />
                 <NavDropdown
                   label="More"
                   icon={Activity}
                   items={[
                     { to: '/status', icon: Activity, label: 'Status' },
                     { to: '/keys', icon: Key, label: 'SSH Keys' },
-                    { to: '/security', icon: ShieldCheck, label: 'Security' },
                   ]}
                 />
               </div>

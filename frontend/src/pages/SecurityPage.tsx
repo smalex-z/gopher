@@ -693,8 +693,8 @@ export default function SecurityPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Security</h1>
-        <p className="text-sm text-gray-500 mt-1">Authentication, access control, and intrusion monitoring.</p>
+        <h1 className="text-2xl font-bold text-gray-900">Access Control</h1>
+        <p className="text-sm text-gray-500 mt-1">Authentication, rate limiting, and intrusion monitoring.</p>
       </div>
 
       {/* 2FA card */}
