@@ -11,7 +11,7 @@ bash "$ROOT/scripts/build.sh"
 
 echo "→ Patching sudoers for gopher service user..."
 SUDOERS_FILE="/etc/sudoers.d/gopher"
-for cmd in /usr/sbin/iptables /sbin/iptables /usr/sbin/iptables-save /sbin/iptables-save /usr/sbin/iptables-restore /sbin/iptables-restore /usr/sbin/ufw /usr/bin/ufw; do
+for cmd in /usr/sbin/iptables /sbin/iptables /usr/sbin/iptables-save /sbin/iptables-save /usr/sbin/iptables-restore /sbin/iptables-restore /usr/sbin/ufw /usr/bin/ufw /usr/bin/fail2ban-client /usr/local/bin/fail2ban-client; do
   if [ -f "$cmd" ] && ! sudo grep -q "$cmd" "$SUDOERS_FILE" 2>/dev/null; then
     echo "gopher ALL=(ALL:ALL) NOPASSWD: $cmd" | sudo tee -a "$SUDOERS_FILE" > /dev/null
   fi

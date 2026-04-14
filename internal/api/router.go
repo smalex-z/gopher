@@ -18,6 +18,7 @@ func NewRouter(
 	authSvc *service.AuthService,
 	localSvc *service.LocalSetupService,
 	updateSvc *service.UpdateService,
+	secSvc *service.SecurityService,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -34,6 +35,7 @@ func NewRouter(
 	authH := handlers.NewAuthHandler(authSvc)
 	localH := handlers.NewLocalHandler(localSvc)
 	firewallH := handlers.NewFirewallHandler(localSvc)
+	securityH := handlers.NewSecurityHandler(authSvc, secSvc)
 	debugH := handlers.NewDebugHandler()
 	updateH := handlers.NewUpdateHandler(updateSvc)
 
@@ -48,6 +50,7 @@ func NewRouter(
 		r.Get("/auth/status", authH.Status)
 		r.Post("/auth/setup", authH.Setup)
 		r.Post("/auth/login", authH.Login)
+		r.Post("/auth/login/2fa", authH.LoginTOTP)
 		r.Get("/local/status", localH.Status)
 		r.Post("/local/install", localH.Install)
 		r.Post("/local/skip", localH.Skip)
@@ -63,6 +66,24 @@ func NewRouter(
 			r.Use(AuthMiddleware(authSvc))
 
 			r.Post("/auth/logout", authH.Logout)
+
+			r.Route("/security", func(r chi.Router) {
+				r.Get("/logs", securityH.AuditLog)
+				r.Get("/fail2ban", securityH.Fail2banStatus)
+				r.Post("/fail2ban/unban", securityH.UnbanIP)
+				r.Get("/fail2ban/config", securityH.GetFail2banConfig)
+				r.Put("/fail2ban/config", securityH.SaveFail2banConfig)
+				r.Post("/fail2ban/whitelist", securityH.AddWhitelistIP)
+				r.Delete("/fail2ban/whitelist/{ip}", securityH.RemoveWhitelistIP)
+			})
+
+			r.Route("/auth/2fa", func(r chi.Router) {
+				r.Get("/status", authH.TOTPStatus)
+				r.Post("/enroll", authH.TOTPEnroll)
+				r.Post("/confirm", authH.TOTPConfirm)
+				r.Post("/disable", authH.TOTPDisable)
+				r.Post("/backup-codes/regenerate", authH.TOTPRegenerateBackupCodes)
+			})
 
 			r.Post("/bootstrap/token", bootstrapH.GenerateToken)
 

@@ -73,7 +73,8 @@ func buildBootstrapSudoers(username string) string {
 %s ALL=(ALL:ALL) NOPASSWD: `+pkgMgrLine+`
 %s ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash
 %s ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl
-`, username, username, username, username, username, username, username, username, username, username)
+%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/fail2ban-client, /usr/local/bin/fail2ban-client
+`, username, username, username, username, username, username, username, username, username, username, username)
 }
 
 func runWithSudo(subcommand string, args []string) error {
