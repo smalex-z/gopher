@@ -282,5 +282,8 @@ func buildSudoers(user, systemctlPath, teePath, mkdirPath, pkillPath string) str
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash", user))
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl", user))
 
+	// Fail2ban management.
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/fail2ban-client, /usr/local/bin/fail2ban-client", user))
+
 	return strings.Join(lines, "\n") + "\n"
 }

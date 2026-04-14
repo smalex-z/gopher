@@ -30,6 +30,7 @@ func TestBuildSudoers(t *testing.T) {
 		"gopher ALL=(ALL:ALL) NOPASSWD: /bin/mv, /usr/bin/mv",
 		"gopher ALL=(ALL:ALL) NOPASSWD: /bin/rm, /usr/bin/rm",
 		"gopher ALL=(ALL:ALL) NOPASSWD: /usr/bin/chown, /bin/chown",
+		"gopher ALL=(ALL:ALL) NOPASSWD: /usr/bin/fail2ban-client, /usr/local/bin/fail2ban-client",
 	}
 
 	for _, line := range required {

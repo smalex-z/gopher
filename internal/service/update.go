@@ -187,6 +187,7 @@ func buildServiceSudoers(username string) string {
 		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/apt-get, /bin/apt-get",
 		username + " ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash",
 		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/fail2ban-client, /usr/local/bin/fail2ban-client",
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
