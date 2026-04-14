@@ -136,16 +136,23 @@ func (s *SecurityService) Fail2banStatus() (*Fail2banStatus, error) {
 	}
 	result.Available = true
 
-	out, err := runPrivilegedOutput("fail2ban-client", "status")
-	if err != nil {
-		// Not running — try to start it, then re-check once.
+	// Use systemctl to reliably determine if the service is active, independent
+	// of whether the fail2ban socket is ready yet.
+	if !isFail2banActive() {
 		_ = s.StartFail2ban()
-		out, err = runPrivilegedOutput("fail2ban-client", "status")
-		if err != nil {
+		if !isFail2banActive() {
 			return result, nil
 		}
 	}
 	result.Running = true
+
+	// Best-effort: get jail details via fail2ban-client. If the socket isn't
+	// ready yet (e.g. still initializing after a fresh start), skip jail data
+	// rather than marking the service as not running.
+	out, err := runPrivilegedOutput("fail2ban-client", "status")
+	if err != nil {
+		return result, nil
+	}
 
 	jailNames := parseJailList(out)
 	for _, name := range jailNames {
@@ -156,6 +163,14 @@ func (s *SecurityService) Fail2banStatus() (*Fail2banStatus, error) {
 		result.Jails = append(result.Jails, parseJailStatus(name, jailOut))
 	}
 	return result, nil
+}
+
+// isFail2banActive returns true when the fail2ban systemd unit is active.
+func isFail2banActive() bool {
+	prefix := privilegedCmdPrefix()
+	args := append(prefix, "systemctl", "is-active", "--quiet", "fail2ban")
+	err := exec.Command(args[0], args[1:]...).Run() // #nosec G204
+	return err == nil
 }
 
 // UnbanIP removes a ban for the given IP from the given jail.
