@@ -119,6 +119,19 @@ func firewallTakeover(logWriter io.Writer) error {
 		fmt.Fprintf(logWriter, "  WARN: could not persist rules: %v\n", err)
 	}
 
+	// Step 7: Reload fail2ban so it recreates its chains on top of the fresh ruleset.
+	// iptables -F/-X above wiped fail2ban's f2b-* chains; without a reload, active
+	// bans remain in fail2ban's internal state but are no longer enforced in iptables.
+	if isCommandAvailable("fail2ban-client") {
+		fmt.Fprintln(logWriter, "Step 7: Reloading fail2ban to restore ban rules...")
+		reloadCmd := append(sudo, "fail2ban-client", "reload")
+		if err := exec.Command(reloadCmd[0], reloadCmd[1:]...).Run(); err != nil { // #nosec G204
+			fmt.Fprintf(logWriter, "  WARN: fail2ban reload failed: %v\n", err)
+		} else {
+			fmt.Fprintln(logWriter, "  fail2ban reloaded ✓")
+		}
+	}
+
 	return nil
 }
 
