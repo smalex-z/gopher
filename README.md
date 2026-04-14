@@ -1,12 +1,42 @@
 # 🐹 Gopher
 
-Public router for private services. Self-hosted reverse tunnel system with automatic HTTPS and subdomain routing. Expose homelab services, research servers, or any private machine via clean URLs — no port forwarding needed.
+**Public router for private services.** A self-hosted edge server that exposes homelab services to the internet without opening ports.
+
+Gopher turns your VPS into a personal edge server. Services running on private networks (homelab NAS, university servers, Raspberry Pi) become accessible via clean URLs with automatic HTTPS — while keeping your home IP and origin machines completely hidden.
+
+**Self-hosted alternative to ngrok and Cloudflare Tunnel.**
 
 **Example:**
 ```
 photos.yourdomain.com → Immich on home NAS (192.168.1.50:2283)
 lab.yourdomain.com    → Jupyter on university server (no public IP)
 vault.yourdomain.com  → Bitwarden on Raspberry Pi (behind NAT)
+```
+
+---
+
+## Use Cases
+
+**Homelab:**
+```
+photos.home.com   → Jellyfin media server
+vault.home.com    → Bitwarden password manager
+files.home.com    → Nextcloud file sync
+monitor.home.com  → Grafana dashboards
+```
+
+**Research Lab:**
+```
+jupyter.lab.edu   → Jupyter notebook server
+vnc1.lab.edu      → VNC to lab workstation
+data.lab.edu      → Dataset browser
+```
+
+**Multi-site:**
+```
+nas.example.com      → Home NAS (Maryland)
+jupyter.example.com  → Lab server (UCLA)
+media.example.com    → Friend's shared Plex
 ```
 
 ---
@@ -25,38 +55,60 @@ If you find Gopher useful, please consider starring those projects too.
 
 ## How It Works
 
-Run Gopher on a VPS. It manages Caddy (reverse proxy) and rathole (tunnel server). Private machines establish outbound tunnels. Gopher routes incoming traffic by subdomain.
+**Setup:** Run Gopher on a public VPS. Point `*.yourdomain.com` DNS to it.
 
+**Bootstrap machines:** Run a one-liner on any private machine to install rathole client and establish an outbound tunnel to your VPS.
+
+**Create tunnels:** In Gopher's web UI, map subdomains to services: `photos.yourdomain.com` → `machine-name:2283`
+
+**Traffic flow:**
 ```
-Internet
-   │
-   ▼
-┌─────────────────────────────────────────────────┐
-│  Public VPS (Gopher runs here)                  │
-│                                                 │
-│  ┌─────────────────┐   ┌─────────────────────┐  │
-│  │  Caddy (80/443) │   │  rathole server     │  │
-│  │  auto-HTTPS     │──▶│  (port 2333)        │  │
-│  │  subdomain→port │   │  tunnels listening  │  │
-│  └─────────────────┘   └────────┬────────────┘  │
-└────────────────────────────────-│───────────────┘
-                                  │  outbound TCP tunnel
-                   ───────────────┘
-                  │
-         ┌────────┴──────────────────────────────────┐
-         │  Private network (home/lab/office)        │
-         │                                           │
-         │  ┌──────────────┐  ┌──────────────────┐  │
-         │  │  Immich VM   │  │  Bitwarden VM    │  │
-         │  │  rathole cli │  │  rathole cli     │  │
-         │  │  :2283       │  │  :80             │  │
-         │  └──────────────┘  └──────────────────┘  │
-         └───────────────────────────────────────────┘
+User visits photos.yourdomain.com
+  ↓
+DNS resolves to your VPS IP
+  ↓
+Caddy terminates TLS on VPS
+  ↓
+Gopher routes by subdomain
+  ↓
+rathole tunnel forwards to private machine
+  ↓
+Service responds back through tunnel
 ```
 
-**Traffic flow:** `photos.yourdomain.com` → Caddy (VPS) → rathole tunnel → rathole client → `localhost:2283` (Immich)
+Key advantage: Machines connect outbound to the VPS, bypassing NAT and firewalls. The VPS routes incoming internet traffic back through those established tunnels. Your origin IPs are never exposed.
 
-**Key insight:** Machines connect *outbound* to the VPS, bypassing NAT and firewalls. The VPS routes incoming traffic back through those established tunnels.
+---
+
+## Architecture
+
+Gopher is a **self-hosted edge server** that sits between the internet and your private services:
+
+```
+Internet → Gopher VPS (your edge) → Private networks (your origins)
+```
+
+What makes it an edge server:
+
+- DNS points to Gopher, not your origins
+- TLS terminates at Gopher (via Caddy)
+- Origin IPs never exposed to the internet
+- All traffic flows through Gopher
+- Full control over routing and security
+
+Components managed by Gopher:
+
+- **Caddy** — Automatic HTTPS + reverse proxy
+- **rathole** — Secure tunnel client/server
+- **Web UI** — Tunnel and machine management
+
+Similar to Cloudflare, but:
+
+- ✅ You own the infrastructure
+- ✅ No vendor lock-in
+- ✅ No traffic limits or file size caps
+- ✅ Support for TCP/UDP (not just HTTP)
+- ✅ Full privacy (your traffic never touches third parties)
 
 ---
 
@@ -72,21 +124,28 @@ Gopher ships as a single self-contained binary for Linux. No runtime dependencie
 
 ### Download
 
-**Latest stable release:**
+**Quick install (recommended):**
 ```bash
-ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-TAG=$(curl -fsSL https://api.github.com/repos/smalex-z/gopher/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-curl -fsSL "https://github.com/smalex-z/gopher/releases/download/${TAG}/gopher-linux-${ARCH}" -o gopher && chmod +x gopher
+curl -fsSL https://raw.githubusercontent.com/smalex-z/gopher/main/scripts/install.sh | bash
 ```
 
-**Latest pre-release** (recommended for now — no stable release yet):
+Or for pre-releases (may be buggy):
 ```bash
-ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-TAG=$(curl -fsSL https://api.github.com/repos/smalex-z/gopher/releases | grep -m1 '"tag_name"' | cut -d'"' -f4)
-curl -fsSL "https://github.com/smalex-z/gopher/releases/download/${TAG}/gopher-linux-${ARCH}" -o gopher && chmod +x gopher
+# Include pre-releases (recommended for now — no stable release yet):
+curl -fsSL https://raw.githubusercontent.com/smalex-z/gopher/main/scripts/install.sh | bash -s -- --prerelease
 ```
 
-You can verify your download against the checksums file on the [releases page](https://github.com/smalex-z/gopher/releases).
+Or
+
+**Manual download:**
+```bash
+# Check releases page for latest version
+wget https://github.com/smalex-z/gopher/releases/latest/download/gopher-linux-amd64
+chmod +x gopher-linux-amd64
+sudo mv gopher-linux-amd64 /usr/local/bin/gopher
+```
+
+Verify your download against checksums on the [releases page](https://github.com/smalex-z/gopher/releases).
 
 ### Run
 
@@ -132,48 +191,30 @@ Gopher supports **HTTP, raw TCP, and UDP** tunnels.
 
 ---
 
-## Use Cases
-
-**Homelab:**
-```
-photos.home.com   → Jellyfin media server
-vault.home.com    → Bitwarden password manager
-files.home.com    → Nextcloud file sync
-monitor.home.com  → Grafana dashboards
-```
-
-**Research Lab:**
-```
-jupyter.lab.edu   → Jupyter notebook server
-vnc1.lab.edu      → VNC to lab workstation
-data.lab.edu      → Dataset browser
-```
-
-**Multi-site:**
-```
-nas.example.com      → Home NAS (Maryland)
-jupyter.example.com  → Lab server (UCLA)
-media.example.com    → Friend's shared Plex
-```
-
----
-
 ## Comparison
 
-|  | Gopher | ngrok | Cloudflare Tunnel | Port Forwarding |
-|---|--------|-------|-------------------|-----------------|
-| **Cost** | VPS (~$3–5/mo) | $8–20/mo | Free* | None |
-| **Custom domain** | ✅ | 💰 Paid tier | ⚠️ CF DNS required | ✅ |
-| **Permanent URLs** | ✅ | ❌ Ephemeral | ✅ | ✅ |
-| **Self-hosted** | ✅ | ❌ | ❌ | N/A |
-| **Vendor lock-in** | ❌ | ✅ | ✅ | ❌ |
-| **Protocol support** | HTTP / TCP / UDP | HTTP / TCP | HTTP only** | All |
-| **Works behind NAT** | ✅ | ✅ | ✅ | ❌ |
-| **Automatic HTTPS** | ✅ | ✅ | ✅ | ❌ |
-| **Traffic privacy** | ✅ You control | ❌ ngrok sees all | ❌ CF sees all | ✅ |
+Gopher sits between DIY solutions (manual tunnels + nginx configs) and commercial services (ngrok, Cloudflare, Tailscale):
 
-\* Free with limitations  
-\*\* Non-HTTP protocols require Cloudflare Access (paid)
+|  | Gopher | ngrok | Cloudflare Tunnel | Tailscale Funnel | Port Forwarding |
+|---|--------|-------|-------------------|------------------|-----------------|
+| **Cost** | Free† | Free* / $8–20/mo | Free* | Free* / $6/mo | None |
+| **Origin IP hidden** | ✅ | ✅ | ✅ | ✅ | ❌ Exposes home IP |
+| **Traffic privacy** | ✅ You control | ❌ ngrok sees all | ❌ CF sees all | ❌ Tailscale sees all | ✅ |
+| **File size limits** | ✅ None | ⚠️ Plan-dependent | ❌ 100MB (free) | ⚠️ Plan-dependent | ✅ None |
+| **Custom domain** | ✅ | 💰 Paid only | ⚠️ CF DNS required | ❌ `*.ts.net` only | ✅ |
+| **Any DNS registrar** | ✅ | ✅ | ❌ Must use CF DNS | ❌ Tailscale subdomain | ✅ |
+| **Permanent URLs** | ✅ | ❌ Ephemeral (free) | ✅ | ✅ | ✅ |
+| **Tunnel count** | ✅ Unlimited | ❌ 1 (free) | ✅ Unlimited | ✅ Unlimited | ✅ Unlimited |
+| **Protocol support** | HTTP / TCP / UDP | HTTP / TCP | HTTP only** | HTTPS only*** | All |
+| **Works behind NAT/CGNAT** | ✅ | ✅ | ✅ | ✅ | ❌ |
+| **Automatic HTTPS** | ✅ | ✅ | ✅ | ✅ | ❌ Manual |
+| **Self-hosted** | ✅ | ❌ | ❌ | ❌ | N/A |
+| **No vendor lock-in** | ✅ | ❌ | ❌ | ❌ | ✅ |
+
+† Gopher is free and open source. You need a machine with a public IP — a VPS (~$3–5/mo) is the easiest option, but any server with a public IP works, including one you already own.  
+\* Free with significant limitations  
+\*\* Non-HTTP requires Cloudflare Spectrum (enterprise pricing)  
+\*\*\* Tailscale Funnel is HTTPS-only on port 443; no TCP/UDP, no raw port exposure
 
 ---
 
