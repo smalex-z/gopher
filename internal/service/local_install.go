@@ -29,6 +29,12 @@ var ratholeServerServiceTemplate string
 //go:embed templates/rathole-server-initial.toml
 var ratholeServerInitialConfig string
 
+//go:embed templates/fail2ban-filter.conf
+var fail2banFilterConfig string
+
+//go:embed templates/fail2ban-jail.conf
+var fail2banJailConfig string
+
 func buildRatholeServiceUnit(binaryPath string) string {
 	unit := ratholeServerServiceTemplate
 	unit = strings.ReplaceAll(unit, "{{.BinaryPath}}", binaryPath)
@@ -65,6 +71,26 @@ func (s *LocalSetupService) Install(domain, serverHost string, skipCaddy bool) {
 			fmt.Fprintf(w, "ERROR: %v\n", err)
 			s.hub.Broadcast("\x00ERROR")
 			return
+		}
+		s.hub.Broadcast("\x00DONE")
+	}()
+}
+
+// SetupFail2ban installs and configures fail2ban in a background goroutine,
+// streaming logs to the deploy hub. Marks Fail2banSetupDone in the DB on success.
+func (s *LocalSetupService) SetupFail2ban() {
+	go func() {
+		w := &hubWriter{hub: s.hub}
+		fmt.Fprintln(w, "=== Configuring fail2ban ===")
+		if err := installFail2ban(w); err != nil {
+			fmt.Fprintf(w, "ERROR: %v\n", err)
+			s.hub.Broadcast("\x00ERROR")
+			return
+		}
+		settings, err := db.GetSettings()
+		if err == nil {
+			settings.Fail2banSetupDone = true
+			_ = db.SaveSettings(settings)
 		}
 		s.hub.Broadcast("\x00DONE")
 	}()
@@ -197,7 +223,15 @@ func (s *LocalSetupService) doInstall(domain, serverHost string, skipCaddy bool,
 		_ = runLocalCmd(logWriter, "sudo", "systemctl", "reload", "caddy")
 	}
 
-	// Step 10: Persist settings
+	// Step 10: fail2ban — install and configure (best-effort; non-fatal)
+	fmt.Fprintln(logWriter, "Step 10: Configuring fail2ban...")
+	fail2banOK := true
+	if err := installFail2ban(logWriter); err != nil {
+		fmt.Fprintf(logWriter, "  WARN: fail2ban setup failed (non-fatal): %v\n", err)
+		fail2banOK = false
+	}
+
+	// Step 11: Persist settings
 	settings, err := db.GetSettings()
 	if err != nil {
 		return err
@@ -212,6 +246,7 @@ func (s *LocalSetupService) doInstall(domain, serverHost string, skipCaddy bool,
 		settings.DashboardPrivate = true // Caddy is set up; restrict dashboard port, use router.domain
 	}
 	settings.LocalSetupDone = true
+	settings.Fail2banSetupDone = fail2banOK
 	if err := db.SaveSettings(settings); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
@@ -224,6 +259,49 @@ func (s *LocalSetupService) doInstall(domain, serverHost string, skipCaddy bool,
 	} else {
 		fmt.Fprintf(logWriter, "Dashboard: https://router.%s\n", domain)
 	}
+	return nil
+}
+
+func installFail2ban(logWriter io.Writer) error {
+	if !isCommandAvailable("fail2ban-client") {
+		fmt.Fprintf(logWriter, "  Installing fail2ban via %s...\n", pkgManager())
+		sudo := privilegedCmdPrefix()
+		var installCmd []string
+		switch pkgManager() {
+		case "dnf", "yum":
+			installCmd = append(sudo, pkgManager(), "install", "-y", "-q", "fail2ban")
+		default:
+			update := append(sudo, "apt-get", "update", "-qq")
+			if err := runLocalCmd(logWriter, update[0], update[1:]...); err != nil {
+				return err
+			}
+			installCmd = append(sudo, "apt-get", "install", "-y", "-qq", "fail2ban")
+		}
+		if err := runLocalCmd(logWriter, installCmd[0], installCmd[1:]...); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintln(logWriter, "  fail2ban already installed ✓")
+	}
+
+	if err := writeLocalFile("/etc/fail2ban/filter.d/gopher-auth.conf", fail2banFilterConfig); err != nil {
+		return fmt.Errorf("failed to write fail2ban filter: %w", err)
+	}
+	if err := writeLocalFile("/etc/fail2ban/jail.d/gopher.conf", fail2banJailConfig); err != nil {
+		return fmt.Errorf("failed to write fail2ban jail: %w", err)
+	}
+
+	sudo := privilegedCmdPrefix()
+	enableCmd := append(sudo, "systemctl", "enable", "--now", "fail2ban")
+	if err := runLocalCmd(logWriter, enableCmd[0], enableCmd[1:]...); err != nil {
+		return err
+	}
+	reloadCmd := append(sudo, "fail2ban-client", "reload")
+	if err := runLocalCmd(logWriter, reloadCmd[0], reloadCmd[1:]...); err != nil {
+		// Reload failure is non-fatal — service may need a moment to start.
+		fmt.Fprintf(logWriter, "  WARN: fail2ban reload failed (may start correctly on its own): %v\n", err)
+	}
+	fmt.Fprintln(logWriter, "  fail2ban configured ✓")
 	return nil
 }
 

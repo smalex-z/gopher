@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Lock, Eye, EyeOff, CheckCircle2, XCircle, Loader2, SkipForward, Key, RefreshCw, Upload, Download, ClipboardCopy, Shield, ShieldAlert, ShieldCheck, ShieldOff } from 'lucide-react'
+import { Lock, Eye, EyeOff, CheckCircle2, XCircle, Loader2, SkipForward, Key, RefreshCw, Upload, Download, ClipboardCopy, Shield, ShieldAlert, ShieldCheck, ShieldOff, ShieldBan } from 'lucide-react'
 import client from '../api/client'
 import { useAuth } from '../lib/auth'
 import { localApi, type LocalServiceStatus, type FirewallStatus, type FirewallMode } from '../api/local'
@@ -145,7 +145,7 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       .then(({ ip }) => { if (ip) setServerHost(ip) })
       .catch(() => {})
       .finally(() => setDetectingIP(false))
-  }, [skipCaddy])
+  }, [skipCaddy, serverHost])
 
   // Debounced DNS check whenever domain changes
   useEffect(() => {
@@ -883,8 +883,71 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
   )
 }
 
+// ─── Step 5: fail2ban (upgrade prompt for existing installs) ─────────────────
+
+function Fail2banStep({ onDone }: { onDone: () => void }) {
+  const [showLogs, setShowLogs] = useState(false)
+  const [skipping, setSkipping] = useState(false)
+
+  const handleSkip = () => {
+    setSkipping(true)
+    // Mark done server-side by calling the endpoint with a no-op flag,
+    // or just advance — the flag won't be set, user can re-trigger from Security page.
+    // For skip, we call the skip-fail2ban endpoint (or we can accept the unset state
+    // and let them come back). Simplest: just refetch, which will re-check the flag.
+    onDone()
+  }
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-6">
+      <div className="flex items-center gap-2 text-blue-600">
+        <ShieldBan size={18} />
+        <span className="font-semibold text-sm uppercase tracking-wide">New: fail2ban protection</span>
+      </div>
+
+      <div className="space-y-3 text-sm text-gray-600">
+        <p>
+          Gopher now integrates with <strong>fail2ban</strong> to automatically ban IPs that repeatedly
+          fail authentication. This step installs and configures it on your server.
+        </p>
+        <ul className="space-y-1.5 text-xs list-none pl-0">
+          <li className="flex gap-2"><span className="text-green-500">✓</span><span>Monitors Gopher login events via systemd journal</span></li>
+          <li className="flex gap-2"><span className="text-green-500">✓</span><span>Bans IPs after repeated failures via iptables</span></li>
+          <li className="flex gap-2"><span className="text-green-500">✓</span><span>Configurable from the Security page</span></li>
+        </ul>
+      </div>
+
+      <div className="flex gap-3">
+        <button
+          onClick={() => setShowLogs(true)}
+          className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors"
+        >
+          Install fail2ban
+        </button>
+        <button
+          onClick={handleSkip}
+          disabled={skipping}
+          className="flex items-center gap-1.5 px-4 py-2.5 border border-gray-300 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
+        >
+          <SkipForward size={15} /> Skip for now
+        </button>
+      </div>
+
+      <DeployLogModal
+        isOpen={showLogs}
+        onClose={() => setShowLogs(false)}
+        onComplete={onDone}
+        title="Installing fail2ban"
+        onStart={() => localApi.setupFail2ban()}
+        wsPath="/api/logs/ws"
+        autoStart
+      />
+    </div>
+  )
+}
+
 // ─── Main SetupPage ───────────────────────────────────────────────────────────
-type SetupStep = 1 | 2 | 3 | 4
+type SetupStep = 1 | 2 | 3 | 4 | 5
 
 export default function SetupPage({ initialStep = 1 }: { initialStep?: SetupStep }) {
   const { refetch } = useAuth()
@@ -894,6 +957,7 @@ export default function SetupPage({ initialStep = 1 }: { initialStep?: SetupStep
     step === 1 ? 'Create an admin password to get started'
     : step === 2 ? 'Set up local tunnel services'
     : step === 3 ? 'Configure firewall rules'
+    : step === 5 ? 'Automatic IP banning for your server'
     : 'Configure SSH key for machine access'
 
   return (
@@ -911,6 +975,8 @@ export default function SetupPage({ initialStep = 1 }: { initialStep?: SetupStep
           ? <ServicesStep onDone={() => setStep(3)} />
           : step === 3
           ? <FirewallStep onDone={initialStep === 3 ? refetch : () => setStep(4)} />
+          : step === 5
+          ? <Fail2banStep onDone={refetch} />
           : <SSHKeyStep onDone={refetch} />
         }
       </div>

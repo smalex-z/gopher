@@ -44,6 +44,9 @@ type LocalServiceStatus struct {
 	// OSUser is the OS username Gopher runs as (e.g. "ubuntu"). Used to pre-fill
 	// the VPS jump-host username in SSH jumpbox commands.
 	OSUser               string `json:"os_user"`
+	// Fail2banSetupDone is true once fail2ban has been installed and configured
+	// by Gopher. Used to prompt existing installs to run the fail2ban setup step.
+	Fail2banSetupDone    bool   `json:"fail2ban_setup_done"`
 }
 
 type LocalSetupService struct {
@@ -76,6 +79,7 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 		DashboardPrivate:     settings.DashboardPrivate,
 		DashboardPort:        dashboardPort,
 		OSUser:               osUser,
+		Fail2banSetupDone:    settings.Fail2banSetupDone,
 	}
 	if key, kerr := db.GetDefaultSSHKey(); kerr == nil {
 		status.SSHPublicKey = key.PublicKey

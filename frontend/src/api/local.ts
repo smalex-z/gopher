@@ -19,6 +19,8 @@ export interface LocalServiceStatus {
   dashboard_port: number
   /** OS username Gopher runs as (e.g. "ubuntu") — used to pre-fill VPS jump-host user */
   os_user: string
+  /** true once fail2ban has been installed and configured by Gopher */
+  fail2ban_setup_done: boolean
 }
 
 export interface FirewallStatus {
@@ -77,4 +79,6 @@ export const localApi = {
     client.post('/local/firewall/reload').then(r => r.data),
   setServerPorts: (dashboardPrivate: boolean) =>
     client.put('/local/server-ports', { dashboard_private: dashboardPrivate }).then(r => r.data),
+  setupFail2ban: () =>
+    client.post('/local/setup-fail2ban').then(r => r.data),
 }

@@ -58,6 +58,12 @@ func (h *LocalHandler) Install(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, map[string]string{"message": "install started"})
 }
 
+// POST /api/local/setup-fail2ban
+func (h *LocalHandler) SetupFail2ban(w http.ResponseWriter, r *http.Request) {
+	h.svc.SetupFail2ban()
+	response.Success(w, map[string]string{"message": "fail2ban setup started"})
+}
+
 // POST /api/local/skip
 func (h *LocalHandler) Skip(w http.ResponseWriter, r *http.Request) {
 	var body struct {

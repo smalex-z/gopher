@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { LayoutDashboard, Server, Monitor, Network, Activity, LogOut, Map, RefreshCw, Key, Shield, ChevronDown } from 'lucide-react'
+import { LayoutDashboard, Server, Monitor, Network, Activity, LogOut, Map, RefreshCw, Key, Shield, ShieldCheck, ChevronDown } from 'lucide-react'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import ToastContainer from './components/ToastContainer'
 import DashboardPage from './pages/DashboardPage'
@@ -11,6 +11,7 @@ import StatusPage from './pages/StatusPage'
 import NetworkMapPage from './pages/NetworkMapPage'
 import SSHKeysPage from './pages/SSHKeysPage'
 import FirewallPage from './pages/FirewallPage'
+import SecurityPage from './pages/SecurityPage'
 import SetupPage from './pages/SetupPage'
 import LoginPage from './pages/LoginPage'
 import { AuthProvider, useAuth } from './lib/auth'
@@ -76,7 +77,7 @@ function NavDropdown({ label, icon: Icon, items }: {
 }
 
 function AppShell() {
-  const { isLoading, isSetup, isAuthenticated, localSetupDone, firewallConfigured, refetch } = useAuth()
+  const { isLoading, isSetup, isAuthenticated, localSetupDone, firewallConfigured, fail2banSetupDone, refetch } = useAuth()
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [isUpdating, setIsUpdating] = useState(false)
 
@@ -118,6 +119,7 @@ function AppShell() {
   if (!isAuthenticated) return <LoginPage />
   if (!localSetupDone) return <SetupPage initialStep={2} />
   if (!firewallConfigured) return <SetupPage initialStep={3} />
+  if (!fail2banSetupDone) return <SetupPage initialStep={5} />
 
   const handleLogout = async () => {
     await client.post('/auth/logout').catch(() => {})
@@ -143,7 +145,14 @@ function AppShell() {
                   ]}
                 />
                 <NavLink to="/network" className={navClass}><Map size={16} /> Network Map</NavLink>
-                <NavLink to="/firewall" className={navClass}><Shield size={16} /> Firewall</NavLink>
+                <NavDropdown
+                  label="Security"
+                  icon={ShieldCheck}
+                  items={[
+                    { to: '/firewall', icon: Shield, label: 'Firewall' },
+                    { to: '/security', icon: ShieldCheck, label: 'Access Control' },
+                  ]}
+                />
                 <NavDropdown
                   label="More"
                   icon={Activity}
@@ -186,6 +195,7 @@ function AppShell() {
           <Route path="/network" element={<NetworkMapPage />} />
           <Route path="/keys" element={<SSHKeysPage />} />
           <Route path="/firewall" element={<FirewallPage />} />
+          <Route path="/security" element={<SecurityPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

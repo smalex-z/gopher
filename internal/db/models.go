@@ -86,6 +86,16 @@ type AppSettings struct {
 	// "iptables ") that are applied to the GOPHER_CUSTOM chain. Flushed and
 	// re-applied whenever this field changes.
 	CustomIPTables  string    `json:"custom_iptables"`
+	// TOTP 2FA fields
+	TOTPSecret      string    `json:"-"`            // base32-encoded TOTP secret; empty means not enrolled
+	TOTPEnabled     bool      `json:"totp_enabled"` // true once confirmed via first successful code
+	TOTPBackupCodes string    `json:"-"`            // JSON array of bcrypt-hashed one-time codes
+	// Fail2ban configuration (written to /etc/fail2ban/jail.d/gopher.conf on save)
+	Fail2banSetupDone bool   `json:"fail2ban_setup_done"` // true once fail2ban has been installed and configured
+	Fail2banMaxRetry  int    `json:"fail2ban_max_retry"`  // default 5
+	Fail2banFindTime  int    `json:"fail2ban_find_time"`  // seconds, default 300
+	Fail2banBanTime   int    `json:"fail2ban_ban_time"`   // seconds, default 3600
+	Fail2banIgnoreIPs string `json:"fail2ban_ignore_ips"` // JSON array of whitelisted CIDRs/IPs
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
