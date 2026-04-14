@@ -104,6 +104,8 @@ function ServicePill({ state, label }: { state: string; label: string }) {
 
 function ServicesStep({ onDone }: { onDone: () => void }) {
   const [domain, setDomain] = useState('')
+  const [serverHost, setServerHost] = useState('')
+  const [detectingIP, setDetectingIP] = useState(false)
   const [skipCaddy, setSkipCaddy] = useState(false)
   const [status, setStatus] = useState<LocalServiceStatus | null>(null)
   const [showLogs, setShowLogs] = useState(false)
@@ -121,9 +123,11 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       setStatus(s)
       if (s.domain) {
         setDomain(s.domain)
+        setServerHost(s.domain)
         setSkipCaddy(false)
       } else if (s.local_setup_done) {
         setSkipCaddy(true)
+        if (s.server_host) setServerHost(s.server_host)
       }
     }).catch(() => {})
   }, [])
@@ -132,6 +136,16 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
     const t = setInterval(load, 5000)
     return () => clearInterval(t)
   }, [])
+
+  // Auto-detect public IP when switching to rathole-only mode
+  useEffect(() => {
+    if (!skipCaddy || serverHost) return
+    setDetectingIP(true)
+    localApi.detectIP()
+      .then(({ ip }) => { if (ip) setServerHost(ip) })
+      .catch(() => {})
+      .finally(() => setDetectingIP(false))
+  }, [skipCaddy])
 
   // Debounced DNS check whenever domain changes
   useEffect(() => {
@@ -188,7 +202,7 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
   }
 
   const canInstall = skipCaddy
-    ? (status == null || status.has_install_permission)
+    ? Boolean(serverHost.trim() && (status == null || status.has_install_permission))
     : Boolean(domain && dnsStatus === 'ok' && (status == null || status.has_install_permission))
 
   return (
@@ -216,6 +230,45 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
           </span>
         </span>
       </label>
+
+      {/* VPS host input (rathole-only mode) */}
+      {skipCaddy && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            VPS hostname or IP <span className="text-red-500">*</span>
+          </label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={serverHost}
+              onChange={e => setServerHost(e.target.value)}
+              placeholder={detectingIP ? 'Detecting…' : '203.0.113.10 or vps.example.com'}
+              disabled={detectingIP}
+              className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-50 disabled:text-gray-400"
+              autoFocus
+            />
+            <button
+              type="button"
+              onClick={() => {
+                setServerHost('')
+                setDetectingIP(true)
+                localApi.detectIP()
+                  .then(({ ip }) => { if (ip) setServerHost(ip) })
+                  .catch(() => {})
+                  .finally(() => setDetectingIP(false))
+              }}
+              disabled={detectingIP}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+              title="Re-detect public IP"
+            >
+              {detectingIP ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+            </button>
+          </div>
+          <p className="text-xs text-gray-400 mt-1">
+            Used as the rathole server address in client configs — must be reachable from your private machines.
+          </p>
+        </div>
+      )}
 
       {/* Permission warning */}
       {status && !status.has_install_permission && (
@@ -353,7 +406,7 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
         onClose={() => { setShowLogs(false); load() }}
         onComplete={() => setInstallComplete(true)}
         title="Installing Local Services"
-        onStart={() => localApi.install(skipCaddy ? '' : domain, skipCaddy)}
+        onStart={() => localApi.install(skipCaddy ? '' : domain, skipCaddy ? serverHost.trim() : domain, skipCaddy)}
         wsPath="/api/local/logs/ws"
         autoStart
       />

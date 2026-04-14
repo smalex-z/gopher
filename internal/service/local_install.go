@@ -58,10 +58,10 @@ func privilegedCmdPrefix() []string {
 
 // Install runs the full local setup in a background goroutine, streaming logs
 // to the shared deploy hub so the frontend WebSocket log viewer can follow along.
-func (s *LocalSetupService) Install(domain string, skipCaddy bool) {
+func (s *LocalSetupService) Install(domain, serverHost string, skipCaddy bool) {
 	go func() {
 		w := &hubWriter{hub: s.hub}
-		if err := s.doInstall(domain, skipCaddy, w); err != nil {
+		if err := s.doInstall(domain, serverHost, skipCaddy, w); err != nil {
 			fmt.Fprintf(w, "ERROR: %v\n", err)
 			s.hub.Broadcast("\x00ERROR")
 			return
@@ -82,7 +82,7 @@ func (s *LocalSetupService) Skip(domain string) error {
 	return db.SaveSettings(settings)
 }
 
-func (s *LocalSetupService) doInstall(domain string, skipCaddy bool, logWriter io.Writer) error {
+func (s *LocalSetupService) doInstall(domain, serverHost string, skipCaddy bool, logWriter io.Writer) error {
 	fmt.Fprintln(logWriter, "=== Installing Local Services ===")
 
 	// Step 1: Caddy (optional)
@@ -204,9 +204,11 @@ func (s *LocalSetupService) doInstall(domain string, skipCaddy bool, logWriter i
 	}
 	if skipCaddy {
 		settings.Domain = ""
+		settings.ServerHost = serverHost
 		settings.DashboardPrivate = false // no Caddy — must keep dashboard port public
 	} else {
 		settings.Domain = domain
+		settings.ServerHost = domain // domain doubles as the rathole host when Caddy is active
 		settings.DashboardPrivate = true // Caddy is set up; restrict dashboard port, use router.domain
 	}
 	settings.LocalSetupDone = true

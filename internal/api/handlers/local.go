@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"regexp"
@@ -37,8 +38,9 @@ func (h *LocalHandler) Status(w http.ResponseWriter, r *http.Request) {
 // POST /api/local/install
 func (h *LocalHandler) Install(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Domain    string `json:"domain"`
-		SkipCaddy bool   `json:"skip_caddy"`
+		Domain     string `json:"domain"`
+		ServerHost string `json:"server_host"`
+		SkipCaddy  bool   `json:"skip_caddy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		response.BadRequest(w, "invalid request body")
@@ -48,7 +50,11 @@ func (h *LocalHandler) Install(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "domain is required")
 		return
 	}
-	h.svc.Install(body.Domain, body.SkipCaddy)
+	if body.SkipCaddy && body.ServerHost == "" {
+		response.BadRequest(w, "server_host is required when skipping Caddy")
+		return
+	}
+	h.svc.Install(body.Domain, body.ServerHost, body.SkipCaddy)
 	response.Success(w, map[string]string{"message": "install started"})
 }
 
@@ -238,6 +244,35 @@ func (h *LocalHandler) CheckDNS(w http.ResponseWriter, r *http.Request) {
 		"resolved_to": ips[0],
 		"host":        host,
 	})
+}
+
+// GET /api/local/detect-ip
+// Public — called during setup to auto-populate the VPS hostname field.
+// Tries a sequence of well-known IP echo services and returns the first success.
+func (h *LocalHandler) DetectIP(w http.ResponseWriter, r *http.Request) {
+	services := []string{
+		"https://api.ipify.org",
+		"https://checkip.amazonaws.com",
+		"https://ifconfig.me/ip",
+	}
+	httpClient := &http.Client{Timeout: 4 * time.Second}
+	for _, svc := range services {
+		resp, err := httpClient.Get(svc) // #nosec G107 — URL is a hardcoded constant
+		if err != nil {
+			continue
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+		resp.Body.Close()
+		if err != nil || resp.StatusCode != http.StatusOK {
+			continue
+		}
+		ip := strings.TrimSpace(string(body))
+		if net.ParseIP(ip) != nil {
+			response.Success(w, map[string]string{"ip": ip})
+			return
+		}
+	}
+	response.InternalError(w, "could not detect public IP")
 }
 
 // GET /api/local/firewall/detect

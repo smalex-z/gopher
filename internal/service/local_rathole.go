@@ -180,7 +180,11 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	if err != nil {
 		return fmt.Errorf("failed to load machine tunnels: %w", err)
 	}
-	updated, err := mergeClientManagedConfig(existing, machine, machineTunnels, settings.Domain)
+	ratholeHost := settings.ServerHost
+	if ratholeHost == "" {
+		ratholeHost = settings.Domain
+	}
+	updated, err := mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost)
 	if err != nil {
 		return err
 	}

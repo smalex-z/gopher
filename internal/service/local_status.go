@@ -31,6 +31,7 @@ type LocalServiceStatus struct {
 	RatholeInstalled     bool   `json:"rathole_installed"`
 	RatholeActive        string `json:"rathole_active"`
 	Domain               string `json:"domain"`
+	ServerHost           string `json:"server_host"`
 	LocalSetupDone       bool   `json:"local_setup_done"`
 	HasInstallPermission bool   `json:"has_install_permission"`
 	SSHPublicKey         string `json:"ssh_public_key"`
@@ -68,6 +69,7 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 		RatholeInstalled:     isCommandAvailable("rathole"),
 		RatholeActive:        systemctlStatus("rathole-server"),
 		Domain:               settings.Domain,
+		ServerHost:           settings.ServerHost,
 		LocalSetupDone:       settings.LocalSetupDone,
 		HasInstallPermission: hasInstallPermission(),
 		FirewallMode:         settings.FirewallMode,

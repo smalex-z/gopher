@@ -70,6 +70,11 @@ type AppSettings struct {
 	PasswordHash   string    `json:"-"`
 	IsSetup        bool      `json:"is_setup"`
 	Domain         string    `json:"domain"`
+	// ServerHost is the hostname or IP used as the rathole remote_addr in client
+	// configs. When Caddy is enabled this equals Domain. When Caddy is skipped it
+	// holds the manually-provided VPS hostname/IP so client configs can still be
+	// generated even though Domain is empty.
+	ServerHost     string    `json:"server_host"`
 	LocalSetupDone bool      `json:"local_setup_done"`
 	// FirewallMode is one of "gopher" (Gopher manages iptables), "manual" (user manages),
 	// or "none" (no firewall). Empty string means the wizard step has not run yet.
