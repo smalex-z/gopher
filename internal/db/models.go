@@ -91,6 +91,7 @@ type AppSettings struct {
 	TOTPEnabled     bool      `json:"totp_enabled"` // true once confirmed via first successful code
 	TOTPBackupCodes string    `json:"-"`            // JSON array of bcrypt-hashed one-time codes
 	// Fail2ban configuration (written to /etc/fail2ban/jail.d/gopher.conf on save)
+	Fail2banSetupDone bool   `json:"fail2ban_setup_done"` // true once fail2ban has been installed and configured
 	Fail2banMaxRetry  int    `json:"fail2ban_max_retry"`  // default 5
 	Fail2banFindTime  int    `json:"fail2ban_find_time"`  // seconds, default 300
 	Fail2banBanTime   int    `json:"fail2ban_ban_time"`   // seconds, default 3600

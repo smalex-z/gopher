@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	loginRateLimit  = 5               // max attempts
+	loginRateLimit  = 10              // max attempts
 	loginRateWindow = 5 * time.Minute // per window
 )
 

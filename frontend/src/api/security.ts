@@ -1,9 +1,8 @@
 import client from './client'
 
 export interface AuditEvent {
-  type: string
+  event: string
   ip: string
-  message: string
   time: string
 }
 

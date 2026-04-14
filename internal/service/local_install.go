@@ -76,6 +76,26 @@ func (s *LocalSetupService) Install(domain, serverHost string, skipCaddy bool) {
 	}()
 }
 
+// SetupFail2ban installs and configures fail2ban in a background goroutine,
+// streaming logs to the deploy hub. Marks Fail2banSetupDone in the DB on success.
+func (s *LocalSetupService) SetupFail2ban() {
+	go func() {
+		w := &hubWriter{hub: s.hub}
+		fmt.Fprintln(w, "=== Configuring fail2ban ===")
+		if err := installFail2ban(w); err != nil {
+			fmt.Fprintf(w, "ERROR: %v\n", err)
+			s.hub.Broadcast("\x00ERROR")
+			return
+		}
+		settings, err := db.GetSettings()
+		if err == nil {
+			settings.Fail2banSetupDone = true
+			_ = db.SaveSettings(settings)
+		}
+		s.hub.Broadcast("\x00DONE")
+	}()
+}
+
 func (s *LocalSetupService) Skip(domain string) error {
 	settings, err := db.GetSettings()
 	if err != nil {
@@ -205,8 +225,10 @@ func (s *LocalSetupService) doInstall(domain, serverHost string, skipCaddy bool,
 
 	// Step 10: fail2ban — install and configure (best-effort; non-fatal)
 	fmt.Fprintln(logWriter, "Step 10: Configuring fail2ban...")
+	fail2banOK := true
 	if err := installFail2ban(logWriter); err != nil {
 		fmt.Fprintf(logWriter, "  WARN: fail2ban setup failed (non-fatal): %v\n", err)
+		fail2banOK = false
 	}
 
 	// Step 11: Persist settings
@@ -224,6 +246,7 @@ func (s *LocalSetupService) doInstall(domain, serverHost string, skipCaddy bool,
 		settings.DashboardPrivate = true // Caddy is set up; restrict dashboard port, use router.domain
 	}
 	settings.LocalSetupDone = true
+	settings.Fail2banSetupDone = fail2banOK
 	if err := db.SaveSettings(settings); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}

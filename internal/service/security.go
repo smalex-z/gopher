@@ -128,6 +128,7 @@ func (s *SecurityService) RemoveIgnoreIP(ip string) error {
 }
 
 // Fail2banStatus queries fail2ban-client for status of all managed jails.
+// If fail2ban is installed but not running, it is started automatically.
 func (s *SecurityService) Fail2banStatus() (*Fail2banStatus, error) {
 	result := &Fail2banStatus{}
 	if !isCommandAvailable("fail2ban-client") {
@@ -137,7 +138,12 @@ func (s *SecurityService) Fail2banStatus() (*Fail2banStatus, error) {
 
 	out, err := runPrivilegedOutput("fail2ban-client", "status")
 	if err != nil {
-		return result, nil
+		// Not running — try to start it, then re-check once.
+		_ = s.StartFail2ban()
+		out, err = runPrivilegedOutput("fail2ban-client", "status")
+		if err != nil {
+			return result, nil
+		}
 	}
 	result.Running = true
 
@@ -156,6 +162,17 @@ func (s *SecurityService) Fail2banStatus() (*Fail2banStatus, error) {
 func (s *SecurityService) UnbanIP(jail, ip string) error {
 	_, err := runPrivilegedOutput("fail2ban-client", "set", jail, "unbanip", ip)
 	return err
+}
+
+// StartFail2ban enables and starts the fail2ban service.
+func (s *SecurityService) StartFail2ban() error {
+	sudo := privilegedCmdPrefix()
+	cmd := append(sudo, "systemctl", "enable", "--now", "fail2ban")
+	out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput() // #nosec G204
+	if err != nil {
+		return fmt.Errorf("failed to start fail2ban: %w: %s", err, string(out))
+	}
+	return nil
 }
 
 // ─── Jail config generation ──────────────────────────────────────────────────

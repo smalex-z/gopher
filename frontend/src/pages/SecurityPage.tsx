@@ -312,22 +312,22 @@ function RegeneratePanel({ onDone }: { onDone: () => void }) {
 
 // ─── Audit log section ────────────────────────────────────────────────────────
 
-function eventBadge(type: string) {
-  switch (type) {
-    case 'LOGIN_OK':
+function eventBadge(event: string) {
+  switch (event) {
+    case 'LOGIN_SUCCESS':
       return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">Login OK</span>
+    case 'LOGIN_SUCCESS_BACKUP_CODE':
+      return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">Login OK (backup code)</span>
     case 'LOGIN_FAILED':
       return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">Login failed</span>
     case 'LOGIN_RATE_LIMITED':
       return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-700">Rate limited</span>
-    case 'TOTP_OK':
-      return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">2FA OK</span>
-    case 'TOTP_FAILED':
+    case 'LOGIN_FAILED_TOTP':
       return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">2FA failed</span>
-    case 'LOGOUT':
-      return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">Logout</span>
+    case 'LOGIN_FAILED_2FA_EXPIRED':
+      return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-700">2FA expired</span>
     default:
-      return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">{type}</span>
+      return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">{event}</span>
   }
 }
 
@@ -372,7 +372,7 @@ function AuditLogSection() {
               {events.map((ev, i) => (
                 <tr key={i} className="hover:bg-gray-50">
                   <td className="py-2 pr-4 text-gray-400 text-xs whitespace-nowrap font-mono">{formatTime(ev.time)}</td>
-                  <td className="py-2 pr-4">{eventBadge(ev.type)}</td>
+                  <td className="py-2 pr-4">{eventBadge(ev.event)}</td>
                   <td className="py-2 font-mono text-xs text-gray-600">{ev.ip || '—'}</td>
                 </tr>
               ))}
@@ -437,7 +437,7 @@ function Fail2banSection() {
           <AlertTriangle size={16} className="text-amber-500" />
           <h2 className="font-semibold text-gray-900">Fail2ban</h2>
         </div>
-        <p className="text-sm text-amber-600">fail2ban is installed but not running.</p>
+        <p className="text-sm text-amber-600">fail2ban is installed but could not be started. Check system logs for details.</p>
       </div>
     )
   }
@@ -752,7 +752,7 @@ export default function SecurityPage() {
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
         <h2 className="font-semibold text-gray-900 mb-1">Login protection</h2>
         <p className="text-sm text-gray-500">
-          Login attempts are rate-limited to <strong>5 per IP per 5 minutes</strong>. The counter resets on
+          Login attempts are rate-limited to <strong>10 per IP per 5 minutes</strong>. The counter resets on
           successful login. Repeated failures are logged and picked up by <strong>fail2ban</strong> for
           automatic IP banning.
         </p>

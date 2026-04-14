@@ -7,6 +7,7 @@ interface AuthState {
   isAuthenticated: boolean
   localSetupDone: boolean
   firewallConfigured: boolean
+  fail2banSetupDone: boolean
   refetch: () => void
 }
 
@@ -16,6 +17,7 @@ const AuthContext = createContext<AuthState>({
   isAuthenticated: false,
   localSetupDone: false,
   firewallConfigured: true,
+  fail2banSetupDone: true,
   refetch: () => {},
 })
 
@@ -25,23 +27,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [localSetupDone, setLocalSetupDone] = useState(false)
   const [firewallConfigured, setFirewallConfigured] = useState(true)
+  const [fail2banSetupDone, setFail2banSetupDone] = useState(true)
 
   const fetchStatus = async () => {
     setIsLoading(true)
     try {
       const [authRes, localRes] = await Promise.all([
         client.get<{ data: { setup: boolean; authenticated: boolean } }>('/auth/status'),
-        client.get<{ data: { local_setup_done: boolean; firewall_mode: string } }>('/local/status').catch(() => ({ data: { data: { local_setup_done: false, firewall_mode: 'none' } } })),
+        client.get<{ data: { local_setup_done: boolean; firewall_mode: string; fail2ban_setup_done: boolean } }>('/local/status').catch(() => ({ data: { data: { local_setup_done: false, firewall_mode: 'none', fail2ban_setup_done: true } } })),
       ])
       setIsSetup(authRes.data.data.setup)
       setIsAuthenticated(authRes.data.data.authenticated)
       setLocalSetupDone(localRes.data.data.local_setup_done)
       setFirewallConfigured(localRes.data.data.firewall_mode !== '')
+      setFail2banSetupDone(localRes.data.data.fail2ban_setup_done)
     } catch {
       setIsSetup(false)
       setIsAuthenticated(false)
       setLocalSetupDone(false)
       setFirewallConfigured(true)
+      setFail2banSetupDone(true)
     } finally {
       setIsLoading(false)
     }
@@ -50,7 +55,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { fetchStatus() }, [])
 
   return (
-    <AuthContext.Provider value={{ isLoading, isSetup, isAuthenticated, localSetupDone, firewallConfigured, refetch: fetchStatus }}>
+    <AuthContext.Provider value={{ isLoading, isSetup, isAuthenticated, localSetupDone, firewallConfigured, fail2banSetupDone, refetch: fetchStatus }}>
       {children}
     </AuthContext.Provider>
   )
