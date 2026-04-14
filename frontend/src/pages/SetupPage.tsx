@@ -145,7 +145,7 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       .then(({ ip }) => { if (ip) setServerHost(ip) })
       .catch(() => {})
       .finally(() => setDetectingIP(false))
-  }, [skipCaddy])
+  }, [skipCaddy, serverHost])
 
   // Debounced DNS check whenever domain changes
   useEffect(() => {
