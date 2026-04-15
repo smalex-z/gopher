@@ -121,8 +121,10 @@ export default function TunnelsPage() {
     try {
       await tunnelsApi.test(id)
       toast.success('Tunnel is reachable!')
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Tunnel test failed')
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
+        ?? (err instanceof Error ? err.message : 'Tunnel test failed')
+      toast.error(msg)
     }
   }
 

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/smalex-z/gopher/internal/db"
-	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
 type MonitorService struct{}
@@ -47,24 +46,30 @@ func (s *MonitorService) checkMachines() {
 }
 
 func (s *MonitorService) checkMachine(machine db.Machine) {
-	if machine.TunnelPort == 0 || machine.Username == "" {
+	if machine.TunnelPort == 0 {
 		return
 	}
-	sshKey, err := db.GetSSHKeyForMachine(&machine)
-	if err != nil {
-		// No key configured — can't check, leave status unchanged.
-		return
-	}
-	client, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
-	if err != nil {
-		// SSH failed — rathole client is not connected or machine is unreachable.
+	// Use an SSH banner grab rather than a full SSH handshake.
+	//
+	// golang.org/x/crypto/ssh's ClientConfig.Timeout only covers the TCP dial —
+	// not the SSH handshake. Rathole always accepts the TCP connection (it binds
+	// the port regardless of whether a client is connected), so the dial
+	// succeeds instantly. The SSH handshake then waits for a banner from the
+	// client VM's sshd. If the VM is offline, rathole holds the connection open
+	// indefinitely and the handshake never completes — causing NewClient to hang
+	// forever and the machine to stay "connected" forever.
+	//
+	// A banner read with a hard deadline is sufficient: sshd sends its version
+	// string immediately on connect, so any data back means the VM is reachable.
+	reachable := probeMachineSSH(machine.TunnelPort)
+
+	if !reachable {
 		machine.Status = "offline"
-		if dbErr := db.UpdateMachine(&machine); dbErr != nil {
-			log.Printf("monitor: failed to update machine %s: %v", machine.ID, dbErr)
+		if err := db.UpdateMachine(&machine); err != nil {
+			log.Printf("monitor: failed to update machine %s: %v", machine.ID, err)
 		}
 		return
 	}
-	_ = client.Close()
 
 	now := time.Now()
 	machine.LastSeen = &now
@@ -72,6 +77,21 @@ func (s *MonitorService) checkMachine(machine db.Machine) {
 	if err := db.UpdateMachine(&machine); err != nil {
 		log.Printf("monitor: failed to update machine %s: %v", machine.ID, err)
 	}
+}
+
+// probeMachineSSH connects to the machine's rathole tunnel port and reads the
+// SSH banner with a short deadline. Returns true only when the VM's sshd sends
+// data back, confirming the tunnel is live end-to-end.
+func probeMachineSSH(tunnelPort int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", tunnelPort), 5*time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 8)
+	n, err := conn.Read(buf)
+	return err == nil && n > 0
 }
 
 // checkTunnels probes each tunnel for real end-to-end connectivity and updates
