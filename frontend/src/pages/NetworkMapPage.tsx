@@ -452,7 +452,6 @@ export default function NetworkMapPage() {
 
                   for (const t of mt) {
                     const ry = cur + ROW_H / 2
-                    const active = t.status === 'active'
                     const name = t.name.length > 16 ? t.name.slice(0, 14) + '…' : t.name
                     const url = t.subdomain && domain ? `${t.subdomain}.${domain}` : null
                     const urlLabel = url && url.length > 28 ? url.slice(0, 26) + '…' : url
