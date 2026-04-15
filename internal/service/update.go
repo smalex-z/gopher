@@ -134,6 +134,22 @@ func (s *UpdateService) Apply() error {
 		log.Printf("WARN: could not patch sudoers: %v", err)
 	}
 
+	// Refresh fail2ban filter files so new jails/filters from this release are
+	// picked up. Only runs if fail2ban is installed and active.
+	if isCommandAvailable("fail2ban-client") {
+		if err := writeLocalFile("/etc/fail2ban/filter.d/gopher-auth.conf", fail2banFilterConfig); err != nil {
+			log.Printf("WARN: could not update gopher-auth fail2ban filter: %v", err)
+		}
+		if err := writeLocalFile("/etc/fail2ban/filter.d/rathole-auth.conf", fail2banFilterRatholeConfig); err != nil {
+			log.Printf("WARN: could not update rathole-auth fail2ban filter: %v", err)
+		}
+		sudo := privilegedCmdPrefix()
+		reloadArgs := append(append([]string{}, sudo...), "fail2ban-client", "reload")
+		if out, err := exec.Command(reloadArgs[0], reloadArgs[1:]...).CombinedOutput(); err != nil {
+			log.Printf("WARN: fail2ban reload failed: %v — %s", err, strings.TrimSpace(string(out)))
+		}
+	}
+
 	// Restart the service after a short delay so this HTTP response can be delivered
 	go func() {
 		time.Sleep(time.Second)

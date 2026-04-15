@@ -221,6 +221,15 @@ func buildJailConfig(cfg *Fail2banConfig) string {
 		b.WriteString("ignoreip = 127.0.0.1/8 ::1\n")
 	}
 	b.WriteString("action   = iptables-allports[name=gopher, protocol=all]\n")
+	b.WriteString("\n[rathole-auth]\n")
+	b.WriteString("enabled  = true\n")
+	b.WriteString("filter   = rathole-auth\n")
+	b.WriteString("backend  = systemd\n")
+	b.WriteString("journalmatch = _SYSTEMD_UNIT=rathole-server.service\n")
+	b.WriteString("maxretry = 30\n")
+	b.WriteString("findtime = 600\n")
+	b.WriteString("bantime  = 86400\n")
+	b.WriteString("action   = iptables-allports[name=rathole, protocol=all]\n")
 	return b.String()
 }
 

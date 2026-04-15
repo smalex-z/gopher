@@ -32,6 +32,9 @@ var ratholeServerInitialConfig string
 //go:embed templates/fail2ban-filter.conf
 var fail2banFilterConfig string
 
+//go:embed templates/fail2ban-filter-rathole.conf
+var fail2banFilterRatholeConfig string
+
 //go:embed templates/fail2ban-jail.conf
 var fail2banJailConfig string
 
@@ -286,6 +289,9 @@ func installFail2ban(logWriter io.Writer) error {
 
 	if err := writeLocalFile("/etc/fail2ban/filter.d/gopher-auth.conf", fail2banFilterConfig); err != nil {
 		return fmt.Errorf("failed to write fail2ban filter: %w", err)
+	}
+	if err := writeLocalFile("/etc/fail2ban/filter.d/rathole-auth.conf", fail2banFilterRatholeConfig); err != nil {
+		return fmt.Errorf("failed to write rathole fail2ban filter: %w", err)
 	}
 	if err := writeLocalFile("/etc/fail2ban/jail.d/gopher.conf", fail2banJailConfig); err != nil {
 		return fmt.Errorf("failed to write fail2ban jail: %w", err)
