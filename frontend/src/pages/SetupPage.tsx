@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+
+const toKeyFilename = (name: string) =>
+  name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '')
 import { Lock, Eye, EyeOff, CheckCircle2, XCircle, Loader2, SkipForward, Key, RefreshCw, Upload, Download, ClipboardCopy, Shield, ShieldAlert, ShieldCheck, ShieldOff, ShieldBan } from 'lucide-react'
 import client from '../api/client'
 import { useAuth } from '../lib/auth'
@@ -698,7 +701,7 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
       const blob = await localApi.downloadSSHKey(generatedKey.id)
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      a.href = url; a.download = 'gopher_id_rsa'; a.click()
+      a.href = url; a.download = toKeyFilename(generatedKey.name) || 'id_rsa'; a.click()
       URL.revokeObjectURL(url)
     } catch {
       toast.error('Download failed')
@@ -793,7 +796,7 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
           onClick={downloadPrivateKey}
           className="w-full flex items-center justify-center gap-2 bg-gray-800 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-gray-900 transition-colors"
         >
-          <Download size={15} /> Download private key (gopher_id_rsa)
+          <Download size={15} /> Download private key ({toKeyFilename(generatedKey?.name ?? '') || 'id_rsa'})
         </button>
         <button
           onClick={onDone}

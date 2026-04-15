@@ -89,10 +89,20 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		if kerr := db.CreateSSHKey(sshKey); kerr != nil {
 			return nil, fmt.Errorf("failed to save SSH keypair: %w", kerr)
 		}
+		if kerr := addToAuthorizedKeys(sshKey.PublicKey); kerr != nil {
+			fmt.Printf("WARN: could not add auto-generated key to authorized_keys: %v\n", kerr)
+		}
 	}
 
 	var tunnelPort int
 	if bt.TunnelPort != 0 {
+		exists, portErr := db.CheckRatholePortExists(bt.TunnelPort)
+		if portErr != nil {
+			return nil, fmt.Errorf("failed to check port availability: %w", portErr)
+		}
+		if exists {
+			return nil, fmt.Errorf("port %d is already in use by another tunnel", bt.TunnelPort)
+		}
 		tunnelPort = bt.TunnelPort
 	} else {
 		tunnelPort, err = db.NextSSHTunnelPort()

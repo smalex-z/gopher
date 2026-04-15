@@ -5,6 +5,9 @@ import { localApi } from '../api/local'
 import { toast } from '../lib/toast'
 import type { SSHKey } from '../types'
 
+const toKeyFilename = (name: string) =>
+  name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '')
+
 // ─── Add Key Modal ────────────────────────────────────────────────────────────
 type AddMode = 'generate' | 'upload'
 
@@ -44,12 +47,12 @@ function AddKeyModal({ onClose }: AddKeyModalProps) {
     onError: (err: Error) => toast.error(err.message || 'Invalid key pair'),
   })
 
-  const downloadKey = async (id: string) => {
+  const downloadKey = async (id: string, name: string) => {
     try {
       const blob = await localApi.downloadSSHKey(id)
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      a.href = url; a.download = 'gopher_id_rsa'; a.click()
+      a.href = url; a.download = toKeyFilename(name) || 'id_rsa'; a.click()
       URL.revokeObjectURL(url)
     } catch {
       toast.error('Download failed')
@@ -94,10 +97,10 @@ function AddKeyModal({ onClose }: AddKeyModalProps) {
             </div>
           </div>
           <button
-            onClick={() => downloadKey(generatedKey.id)}
+            onClick={() => downloadKey(generatedKey.id, generatedKey.name)}
             className="w-full flex items-center justify-center gap-2 bg-gray-800 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-gray-900 transition-colors"
           >
-            <Download size={15} /> Download private key (gopher_id_rsa)
+            <Download size={15} /> Download private key ({toKeyFilename(generatedKey.name) || 'id_rsa'})
           </button>
           <button
             onClick={onClose}
@@ -262,12 +265,12 @@ export default function SSHKeysPage() {
     onError: (err: Error) => toast.error(err.message || 'Failed to update default'),
   })
 
-  const downloadKey = async (id: string) => {
+  const downloadKey = async (id: string, name: string) => {
     try {
       const blob = await localApi.downloadSSHKey(id)
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      a.href = url; a.download = 'gopher_id_rsa'; a.click()
+      a.href = url; a.download = toKeyFilename(name) || 'id_rsa'; a.click()
       URL.revokeObjectURL(url)
     } catch {
       toast.error('Download failed')
@@ -358,7 +361,7 @@ export default function SSHKeysPage() {
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1">
                       <button
-                        onClick={() => downloadKey(key.id)}
+                        onClick={() => downloadKey(key.id, key.name)}
                         title="Download private key"
                         className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
                       >

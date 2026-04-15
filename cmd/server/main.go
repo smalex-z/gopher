@@ -67,6 +67,7 @@ func runServer(args []string) {
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
 	localSvc.ReconcileRouterCaddyBlock()
+	localSvc.ReconcileAuthorizedKeys()
 
 	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc)
 

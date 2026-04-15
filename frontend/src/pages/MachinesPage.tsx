@@ -9,6 +9,35 @@ import StatusBadge from '../components/StatusBadge'
 import { toast } from '../lib/toast'
 import type { Machine, Tunnel, SSHKey } from '../types'
 
+const toKeyFilename = (name: string) =>
+  name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '')
+
+type JumpboxOS = 'unix' | 'windows'
+
+const UnixIcon = () => (
+  <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="1" y="1" width="10" height="10" rx="1.5"/>
+    <polyline points="3,5 5.5,7 3,9"/>
+    <line x1="6.5" y1="9" x2="9" y2="9"/>
+  </svg>
+)
+
+const MacIcon = () => (
+  <svg width="11" height="13" viewBox="0 0 11 13" fill="currentColor">
+    <path d="M9.3 7C9.3 5.3 10.5 4.4 10.5 4.4 9.8 3.4 8.7 2.9 7.5 2.9 6.4 2.9 5.6 3.5 5.2 3.5 4.7 3.5 3.9 2.9 2.9 2.9 1.2 2.9 0 4.5 0 7 0 9.5 1.9 13 3.6 13 4.3 13 5 12.5 5.5 12.5 6 12.5 6.7 13 7.5 13 9.4 13 11 9.8 11 7Z"/>
+    <path d="M7.1 1.7C7.4 1.2 7.6 0.6 7.5 0 6.9 0 6.1 0.4 5.7 0.9 5.4 1.3 5.2 2 5.3 2.5 5.9 2.5 6.8 2.1 7.1 1.7Z"/>
+  </svg>
+)
+
+const WindowsIcon = () => (
+  <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+    <rect x="0" y="0" width="5.5" height="5.5"/>
+    <rect x="6.5" y="0" width="5.5" height="5.5"/>
+    <rect x="0" y="6.5" width="5.5" height="5.5"/>
+    <rect x="6.5" y="6.5" width="5.5" height="5.5"/>
+  </svg>
+)
+
 interface BootstrapModal { isOpen: boolean; command: string; token: string; expiresAt: string }
 
 export default function MachinesPage() {
@@ -24,6 +53,7 @@ export default function MachinesPage() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [reassigning, setReassigning] = useState<string | null>(null) // machine ID being reassigned
   const [reassignKeyID, setReassignKeyID] = useState('')
+  const [jumpboxOS, setJumpboxOS] = useState<JumpboxOS>('unix')
 
   const { data, isLoading } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list() })
   const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
@@ -36,17 +66,24 @@ export default function MachinesPage() {
   const domain = localStatus?.domain ?? ''
   const vps22Open = (firewallRes?.data ?? []).some(e => e.port_range === '22' && e.action === 'ACCEPT')
 
-  const machineSSHCmd = (m: Machine, keyExists: boolean): { cmd: string; label: string; keyMissing: boolean } | null => {
+  const machineSSHCmd = (m: Machine, key: SSHKey | undefined, os: JumpboxOS = 'unix'): { cmd: string; label: string; keyMissing: boolean; isJumpbox: boolean } | null => {
     if (m.tunnel_port === 0) return null
     const vpsHost = displayHost || vps?.host || '<vps-host>'
     const vpsUser = vps?.username ?? localStatus?.os_user ?? '<vps-user>'
-    // The download endpoint always names the file gopher_id_rsa; suggest that path.
-    const keyFlag = keyExists ? ' -i ~/.ssh/gopher_id_rsa' : ''
+    const keyFile = key ? `~/.ssh/${toKeyFilename(key.name) || 'id_rsa'}` : null
     if (m.public_ssh) {
-      return { cmd: `ssh${keyFlag} -p ${m.tunnel_port} ${m.username}@${vpsHost}`, label: 'SSH:', keyMissing: !keyExists }
+      const keyFlag = keyFile ? ` -i ${keyFile}` : ''
+      return { cmd: `ssh${keyFlag} -p ${m.tunnel_port} ${m.username}@${vpsHost}`, label: 'SSH:', keyMissing: !key, isJumpbox: false }
     }
     if (!vps22Open) return null
-    return { cmd: `ssh -J ${vpsUser}@${vpsHost}${keyFlag} -p ${m.tunnel_port} ${m.username}@localhost`, label: 'Jumpbox:', keyMissing: !keyExists }
+    const keyFlag = keyFile ? ` -i ${keyFile}` : ''
+    if (os === 'windows') {
+      const proxyKey = keyFile ? `-i ${keyFile} ` : ''
+      const cmd = `ssh -o "ProxyCommand=ssh ${proxyKey}-W %h:%p ${vpsUser}@${vpsHost}"${keyFlag} -p ${m.tunnel_port} ${m.username}@localhost`
+      return { cmd, label: 'Jumpbox:', keyMissing: !key, isJumpbox: true }
+    }
+    // Unix/Mac: -i propagates correctly to -J
+    return { cmd: `ssh -J ${vpsUser}@${vpsHost}${keyFlag} -p ${m.tunnel_port} ${m.username}@localhost`, label: 'Jumpbox:', keyMissing: !key, isJumpbox: true }
   }
 
   const { data: domainIPData } = useQuery({
@@ -277,14 +314,28 @@ export default function MachinesPage() {
                           </div>
                           {/* SSH command — shown right below the key */}
                           {(() => {
-                            const keyExists = sshKeys.some(k => k.id === m.ssh_key_id)
-                            const ssh = machineSSHCmd(m, keyExists)
+                            const machineKey = sshKeys.find(k => k.id === m.ssh_key_id)
+                            const ssh = machineSSHCmd(m, machineKey, jumpboxOS)
                             if (!ssh) return null
                             return (
                               <div className="mt-1 mb-3 space-y-1">
                                 <div className="flex items-center gap-2 px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
                                   <Terminal size={10} className="shrink-0 text-slate-400" />
                                   <span className="font-medium text-slate-500">{ssh.label}</span>
+                                  {ssh.isJumpbox && (
+                                    <div className="flex items-center gap-0.5 shrink-0">
+                                      {([['unix', <><UnixIcon /><MacIcon /></>], ['windows', <WindowsIcon />]] as [JumpboxOS, React.ReactNode][]).map(([os, icon]) => (
+                                        <button
+                                          key={os}
+                                          onClick={() => setJumpboxOS(os)}
+                                          title={os === 'unix' ? 'Linux / macOS' : 'Windows'}
+                                          className={`flex items-center gap-0.5 px-1 py-1 rounded transition-colors ${jumpboxOS === os ? 'text-blue-600 bg-blue-100' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-200'}`}
+                                        >
+                                          {icon}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
                                   <code className="font-mono text-slate-700 bg-white border border-slate-200 px-2 py-0.5 rounded select-all flex-1 min-w-0 truncate">{ssh.cmd}</code>
                                   <button onClick={() => { navigator.clipboard.writeText(ssh.cmd); toast.success('Copied!') }} className="text-slate-400 hover:text-slate-600 shrink-0">
                                     <ClipboardCopy size={10} />
@@ -295,9 +346,9 @@ export default function MachinesPage() {
                                     SSH key deleted from Gopher — private key may no longer be available. The machine's <code>authorized_keys</code> still has the old public key.
                                   </p>
                                 )}
-                                {keyExists && (
+                                {machineKey && (
                                   <p className="text-xs text-gray-400 px-1">
-                                    Uses <code>~/.ssh/gopher_id_rsa</code> — download from SSH Keys if needed.
+                                    Uses <code>~/.ssh/{toKeyFilename(machineKey.name) || 'id_rsa'}</code> — download from SSH Keys if needed.
                                   </p>
                                 )}
                               </div>

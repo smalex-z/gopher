@@ -129,6 +129,9 @@ func (s *LocalSetupService) storeSSHKey(name, privKey, pubKey string, setDefault
 		}
 		key.IsDefault = true
 	}
+	if err := addToAuthorizedKeys(pubKey); err != nil {
+		fmt.Printf("WARN: could not add key to authorized_keys: %v\n", err)
+	}
 	return key, nil
 }
 
@@ -141,7 +144,17 @@ func (s *LocalSetupService) DeleteSSHKey(id string) error {
 	if n > 0 {
 		return fmt.Errorf("%d machine(s) still use this key; reassign them first", n)
 	}
-	return db.DeleteSSHKeyByID(id)
+	key, err := db.GetSSHKey(id)
+	if err != nil {
+		return err
+	}
+	if err := db.DeleteSSHKeyByID(id); err != nil {
+		return err
+	}
+	if err := removeFromAuthorizedKeys(key.PublicKey); err != nil {
+		fmt.Printf("WARN: could not remove key from authorized_keys: %v\n", err)
+	}
+	return nil
 }
 
 // SetDefaultSSHKey marks the given key as the default for new bootstraps.
@@ -159,6 +172,145 @@ func (s *LocalSetupService) DownloadSSHKey(id string) (string, error) {
 		return "", err
 	}
 	return key.PrivateKey, nil
+}
+
+// ReconcileAuthorizedKeys ensures all current Gopher public keys are present
+// in ~/.ssh/authorized_keys so any Gopher key works as -i for both the
+// jump-host hop and the destination machine.
+func (s *LocalSetupService) ReconcileAuthorizedKeys() {
+	keys, err := db.GetSSHKeys()
+	if err != nil {
+		fmt.Printf("WARN: reconcile authorized_keys: could not list keys: %v\n", err)
+		return
+	}
+	for _, k := range keys {
+		if err := addToAuthorizedKeys(k.PublicKey); err != nil {
+			fmt.Printf("WARN: reconcile authorized_keys: could not add key %q: %v\n", k.Name, err)
+		}
+	}
+}
+
+// addToAuthorizedKeys idempotently appends pubKey to ~/.ssh/authorized_keys.
+// Matching is on type+keydata only (comment field is ignored).
+// Falls back to sudo for directory/file operations when running as a system user.
+func addToAuthorizedKeys(pubKey string) error {
+	path, err := authorizedKeysPath()
+	if err != nil {
+		return err
+	}
+	u, err := user.Current()
+	if err != nil {
+		return err
+	}
+	sshDir := filepath.Dir(path)
+
+	// Ensure ~/.ssh exists with correct permissions.
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		if err2 := exec.Command("sudo", "mkdir", "-p", sshDir).Run(); err2 != nil { // #nosec G204
+			return fmt.Errorf("mkdir %s: %w", sshDir, err2)
+		}
+		exec.Command("sudo", "chmod", "700", sshDir).Run()                              // #nosec G204
+		exec.Command("sudo", "chown", u.Username+":"+u.Username, sshDir).Run()          // #nosec G204
+	}
+
+	// Read existing content.
+	var existing []byte
+	if data, rerr := os.ReadFile(path); rerr == nil {
+		existing = data
+	} else if out, rerr2 := exec.Command("sudo", "cat", path).Output(); rerr2 == nil { // #nosec G204
+		existing = out
+	}
+
+	trimmed := strings.TrimSpace(pubKey)
+	parts := strings.Fields(trimmed)
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid public key format")
+	}
+	token := parts[0] + " " + parts[1]
+	for _, line := range strings.Split(string(existing), "\n") {
+		lp := strings.Fields(line)
+		if len(lp) >= 2 && lp[0]+" "+lp[1] == token {
+			return nil // already present
+		}
+	}
+
+	content := string(existing)
+	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += trimmed + "\n"
+
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		cmd := exec.Command("sudo", "tee", path) // #nosec G204
+		cmd.Stdin = strings.NewReader(content)
+		cmd.Stdout = io.Discard
+		if err2 := cmd.Run(); err2 != nil {
+			return err2
+		}
+		exec.Command("sudo", "chmod", "600", path).Run()                             // #nosec G204
+		exec.Command("sudo", "chown", u.Username+":"+u.Username, path).Run()         // #nosec G204
+	}
+	return nil
+}
+
+// removeFromAuthorizedKeys removes the line matching pubKey from authorized_keys.
+func removeFromAuthorizedKeys(pubKey string) error {
+	path, err := authorizedKeysPath()
+	if err != nil {
+		return err
+	}
+	u, err := user.Current()
+	if err != nil {
+		return err
+	}
+
+	var existing []byte
+	if data, rerr := os.ReadFile(path); rerr == nil {
+		existing = data
+	} else if out, rerr2 := exec.Command("sudo", "cat", path).Output(); rerr2 == nil { // #nosec G204
+		existing = out
+	} else {
+		return nil // file doesn't exist, nothing to do
+	}
+
+	trimmed := strings.TrimSpace(pubKey)
+	parts := strings.Fields(trimmed)
+	if len(parts) < 2 {
+		return nil
+	}
+	token := parts[0] + " " + parts[1]
+	var kept []string
+	for _, line := range strings.Split(string(existing), "\n") {
+		lp := strings.Fields(line)
+		if len(lp) >= 2 && lp[0]+" "+lp[1] == token {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	result := strings.Join(kept, "\n")
+	if result != "" && !strings.HasSuffix(result, "\n") {
+		result += "\n"
+	}
+
+	if err := os.WriteFile(path, []byte(result), 0600); err != nil {
+		cmd := exec.Command("sudo", "tee", path) // #nosec G204
+		cmd.Stdin = strings.NewReader(result)
+		cmd.Stdout = io.Discard
+		if err2 := cmd.Run(); err2 != nil {
+			return err2
+		}
+		exec.Command("sudo", "chmod", "600", path).Run()                             // #nosec G204
+		exec.Command("sudo", "chown", u.Username+":"+u.Username, path).Run()         // #nosec G204
+	}
+	return nil
+}
+
+func authorizedKeysPath() (string, error) {
+	u, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(u.HomeDir, ".ssh", "authorized_keys"), nil
 }
 
 // writeLocalFile writes content to path. If the direct write fails due to
