@@ -10,7 +10,6 @@ import { toast } from '../lib/toast'
 import type { Tunnel } from '../types'
 
 interface ModalState { isOpen: boolean }
-interface TestResult { ok: boolean; message: string }
 interface FormState {
   machine_id: string
   name: string
@@ -28,7 +27,6 @@ export default function TunnelsPage() {
   const qc = useQueryClient()
   const [searchParams] = useSearchParams()
   const [modal, setModal] = useState<ModalState>({ isOpen: false })
-  const [testResults, setTestResults] = useState<Record<string, TestResult>>({})
   const [form, setForm] = useState<FormState>(defaultForm)
   const [nextPortLoading, setNextPortLoading] = useState(false)
 
@@ -122,9 +120,11 @@ export default function TunnelsPage() {
   const testTunnel = async (id: string) => {
     try {
       await tunnelsApi.test(id)
-      setTestResults(r => ({ ...r, [id]: { ok: true, message: 'Tunnel is reachable!' } }))
-    } catch (err) {
-      setTestResults(r => ({ ...r, [id]: { ok: false, message: err instanceof Error ? err.message : 'Test failed' } }))
+      toast.success('Tunnel is reachable!')
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
+        ?? (err instanceof Error ? err.message : 'Tunnel test failed')
+      toast.error(msg)
     }
   }
 
@@ -253,15 +253,6 @@ export default function TunnelsPage() {
                   </tr>
                     )
                   })()}
-                  {testResults[t.id] && (
-                    <tr>
-                      <td colSpan={5} className="px-4 py-2">
-                        <span className={`text-xs px-2 py-1 rounded ${testResults[t.id].ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                          {testResults[t.id].ok ? '✅' : '❌'} {testResults[t.id].message}
-                        </span>
-                      </td>
-                    </tr>
-                  )}
                   {t.private && jumpboxCmd(t) && (
                     <tr className="bg-slate-50 border-t-0">
                       <td colSpan={5} className="px-4 pb-2 pt-0">

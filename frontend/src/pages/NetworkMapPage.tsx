@@ -64,7 +64,8 @@ function statusStyle(status: string) {
     return { fill: '#f0fdf4', stroke: '#16a34a', text: '#14532d', dot: '#22c55e' }
   if (status === 'pending' || status === 'connecting')
     return { fill: '#fefce8', stroke: '#ca8a04', text: '#92400e', dot: '#eab308' }
-  return { fill: '#f9fafb', stroke: '#9ca3af', text: '#374151', dot: '#d1d5db' }
+  // 'offline' or any unknown status
+  return { fill: '#f9fafb', stroke: '#d1d5db', text: '#6b7280', dot: '#d1d5db' }
 }
 
 // ── Computed layout types ─────────────────────────────────────────────────────
@@ -106,8 +107,10 @@ function TunnelDetailRow({ tunnel, domain }: { tunnel: Tunnel; domain?: string }
         :{tunnel.local_port}
       </span>
       <span className={`text-xs font-medium px-1.5 py-0.5 rounded shrink-0 ${
-        tunnel.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
-      }`}>{tunnel.status}</span>
+        tunnel.status === 'active' ? 'bg-green-100 text-green-700'
+        : tunnel.status === 'idle' ? 'bg-amber-100 text-amber-700'
+        : 'bg-gray-100 text-gray-500'
+      }`}>{tunnel.status === 'idle' ? 'no service' : tunnel.status}</span>
       {hasUrl && domain && (
         <a href={`https://${tunnel.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
           className="text-indigo-500 hover:text-indigo-700 text-xs font-mono truncate max-w-[160px] shrink-0">
@@ -174,11 +177,15 @@ export default function NetworkMapPage() {
 
   // Build a map: machineId → { public_ip, private_ip, is_nat }
   const netInfoMap = new Map<string, { public_ip: string; private_ip: string; is_nat: boolean }>()
+  const isOnline = (m: Machine) => m.status === 'active' || m.status === 'connected'
   machines.forEach((m, i) => {
     const fresh = netInfoResults[i]?.data
     if (fresh && fresh.public_ip) {
       netInfoMap.set(m.id, { public_ip: fresh.public_ip, private_ip: fresh.private_ip, is_nat: fresh.is_nat })
-    } else if (m.public_ip) {
+    } else if (m.public_ip && isOnline(m)) {
+      // Only use stale public_ip for machines that are currently online.
+      // Offline machines fall back to a solo group so they don't appear inside
+      // a LAN bracket that implies current reachability.
       netInfoMap.set(m.id, { public_ip: m.public_ip, private_ip: m.host ?? '', is_nat: isPrivateIP(m.host ?? '') })
     }
   })
@@ -312,23 +319,26 @@ export default function NetworkMapPage() {
 
           {/* ── Tunnel lines (behind everything) ─────────────────────────── */}
           {tunnelLines.map(({ tunnel, vpsY, machY }) => {
-            const active = tunnel.status === 'active'
+            const active   = tunnel.status === 'active'
+            const idle = tunnel.status === 'idle'
             const isUdp = tunnel.transport === 'udp'
             const cy = (vpsY + machY) / 2
             const label = `:${tunnel.rathole_port}`
             const lw = label.length * 6.2 + 10
-            const lineColor = active ? (isUdp ? '#a855f7' : '#4ade80') : '#d1d5db'
-            const pillFill  = active ? (isUdp ? '#faf5ff' : '#f0fdf4') : '#f9fafb'
-            const pillStroke = active ? (isUdp ? '#a855f7' : '#4ade80') : '#d1d5db'
-            const textColor  = active ? (isUdp ? '#7e22ce' : '#16a34a') : '#6b7280'
+            // Degraded: tunnel IS connected so line is green, but pill is amber to
+            // signal the service isn't responding on the client side.
+            const lineColor  = (active || idle) ? (isUdp ? '#a855f7' : '#4ade80') : '#d1d5db'
+            const pillFill   = active ? (isUdp ? '#faf5ff' : '#f0fdf4') : idle ? '#fffbeb' : '#f9fafb'
+            const pillStroke = active ? (isUdp ? '#a855f7' : '#4ade80') : idle ? '#f59e0b' : '#d1d5db'
+            const textColor  = active ? (isUdp ? '#7e22ce' : '#16a34a') : idle ? '#b45309' : '#6b7280'
             return (
               <g key={tunnel.id}>
                 <path
                   d={`M ${VPS_RIGHT} ${vpsY} C ${midX} ${vpsY}, ${midX} ${machY}, ${MACHINE_X} ${machY}`}
                   fill="none"
                   stroke={lineColor}
-                  strokeWidth={active ? 2.5 : 1.5}
-                  strokeDasharray={active ? undefined : '5 4'}
+                  strokeWidth={(active || idle) ? 2.5 : 1.5}
+                  strokeDasharray={active || idle ? undefined : '5 4'}
                   opacity={0.9}
                 />
                 <rect x={midX - lw / 2} y={cy - 9} width={lw} height={17} rx={4}
@@ -442,7 +452,6 @@ export default function NetworkMapPage() {
 
                   for (const t of mt) {
                     const ry = cur + ROW_H / 2
-                    const active = t.status === 'active'
                     const name = t.name.length > 16 ? t.name.slice(0, 14) + '…' : t.name
                     const url = t.subdomain && domain ? `${t.subdomain}.${domain}` : null
                     const urlLabel = url && url.length > 28 ? url.slice(0, 26) + '…' : url
@@ -456,7 +465,8 @@ export default function NetworkMapPage() {
                           :{t.rathole_port}
                         </text>
                         <circle cx={VPS_RIGHT} cy={ry} r={4.5}
-                          fill={active ? '#22c55e' : '#d1d5db'} stroke="white" strokeWidth={1.5} />
+                          fill={t.status === 'active' || t.status === 'idle' ? '#22c55e' : '#818cf8'}
+                          stroke="white" strokeWidth={1.5} />
                         {urlLabel && (
                           <text x={VPS_X + 14} y={cur + ROW_H + 9} fontSize={8.5} fill="#6366f1"
                             fontFamily="ui-monospace,monospace" opacity={0.9}>{urlLabel}</text>
@@ -555,12 +565,12 @@ export default function NetworkMapPage() {
                 {/* Port rows */}
                 {mt.map((t, j) => {
                   const ry = top + MACH_HEADER + j * ROW_H + ROW_H / 2
-                  const active = t.status === 'active'
+                  const tDot = t.status === 'active' ? '#22c55e' : t.status === 'idle' ? '#f59e0b' : '#d1d5db'
                   const name = t.name.length > 13 ? t.name.slice(0, 11) + '…' : t.name
                   return (
                     <g key={`mr-${t.id}`}>
                       <circle cx={MACHINE_X} cy={ry} r={4.5}
-                        fill={active ? '#22c55e' : '#d1d5db'} stroke="white" strokeWidth={1.5} />
+                        fill={tDot} stroke="white" strokeWidth={1.5} />
                       <text x={MACHINE_X + 12} y={ry + 4} textAnchor="start"
                         fontSize={10} fill="#14532d" fontFamily="ui-monospace,monospace" fontWeight={700}>
                         :{t.local_port}
@@ -604,26 +614,16 @@ export default function NetworkMapPage() {
           <div className="px-5 py-4 flex items-center justify-between border-b bg-gray-50">
             <div className="flex items-center gap-3">
               <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                selectedMachine.status === 'active' || selectedMachine.status === 'connected' ? 'bg-green-500'
+                selectedMachine.status === 'connected' ? 'bg-green-500'
                 : selectedMachine.status === 'pending' || selectedMachine.status === 'connecting' ? 'bg-yellow-500'
                 : 'bg-gray-300'}`} />
               <span className="font-bold text-gray-900">{selectedMachine.name}</span>
-              {(() => {
-                const info = netInfoMap.get(selectedMachine.id)
-                const privateIP = info?.private_ip || (isPrivateIP(selectedMachine.host ?? '') ? selectedMachine.host : null)
-                const directPort = selectedMachine.port && selectedMachine.port > 0 ? `:${selectedMachine.port}` : ''
-                if (privateIP) return (
-                  <span className="text-xs text-gray-600 font-mono bg-gray-100 px-2 py-0.5 rounded">
-                    {privateIP}{directPort}
-                  </span>
-                )
-                if (directPort) return (
-                  <span className="text-xs text-gray-600 font-mono bg-gray-100 px-2 py-0.5 rounded">
-                    {selectedMachine.host}{directPort}
-                  </span>
-                )
-                return null
-              })()}
+              <span className={`text-xs px-2 py-0.5 rounded font-medium ${
+                selectedMachine.status === 'connected' ? 'bg-green-50 text-green-700'
+                : 'bg-gray-100 text-gray-500'
+              }`}>
+                {selectedMachine.status === 'connected' ? 'client online' : 'client offline'}
+              </span>
               {netInfoMap.get(selectedMachine.id)?.public_ip && (
                 <span className="text-xs text-indigo-600 font-mono bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded">
                   ↑ {netInfoMap.get(selectedMachine.id)!.public_ip}
@@ -637,16 +637,35 @@ export default function NetworkMapPage() {
                   SSH :{selectedMachine.tunnel_port}
                 </span>
               )}
-              {selectedMachine.last_seen && (
-                <span>last seen {new Date(selectedMachine.last_seen).toLocaleString()}</span>
+              {selectedMachine.status !== 'connected' && selectedMachine.last_seen && (
+                <span className="text-xs text-gray-400">last seen {new Date(selectedMachine.last_seen).toLocaleString()}</span>
               )}
               <button onClick={() => setSelectedId(null)} className="text-gray-400 hover:text-gray-600 text-lg leading-none">×</button>
             </div>
           </div>
+
+          {selectedMachine.status !== 'connected' && (
+            <div className="px-5 py-2 bg-gray-50 border-b text-xs text-gray-500">
+              The rathole client on this machine is not connected. Tunnels cannot forward traffic until the client reconnects.
+            </div>
+          )}
+
           <div className="px-5 py-3">
             {selectedTunnels.length === 0
               ? <p className="text-sm text-gray-400 py-2">No tunnels configured for this machine.</p>
-              : selectedTunnels.map(t => <TunnelDetailRow key={t.id} tunnel={t} domain={domain} />)
+              : selectedTunnels.map(t => (
+                <div key={t.id} className="flex items-center gap-2 py-2 border-t border-gray-100 first:border-t-0">
+                  <TunnelDetailRow tunnel={t} domain={domain} />
+                  {t.status === 'idle' && (
+                    <span className="ml-auto text-xs text-amber-600 shrink-0">
+                      nothing listening on :{t.local_port}
+                    </span>
+                  )}
+                  {t.status === 'offline' && selectedMachine.status === 'connected' && (
+                    <span className="ml-auto text-xs text-gray-400 shrink-0">no client</span>
+                  )}
+                </div>
+              ))
             }
           </div>
         </div>
@@ -658,15 +677,22 @@ export default function NetworkMapPage() {
         <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-green-500 inline-block" /> Connected</span>
         <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-yellow-400 inline-block" /> Connecting</span>
         <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-gray-300 inline-block" /> Offline</span>
-        <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-green-400" /> Active tunnel</span>
-        <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-dashed border-gray-300" /> Inactive</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-green-400" /> Tunnel active</span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-flex items-center gap-0.5">
+            <span className="inline-block w-4 border-t-2 border-green-400" />
+            <span className="text-[9px] font-bold px-1 rounded bg-amber-100 text-amber-700 border border-amber-300">:port</span>
+          </span>
+          Tunnel up, nothing listening on client
+        </span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-dashed border-gray-300" /> No client connected</span>
         <span className="flex items-center gap-1.5">
           <span className="inline-block w-4 h-3 rounded border-2 border-dashed border-yellow-400 bg-yellow-50 opacity-70" />
-          Same LAN (NAT)
+          Shared network (behind NAT)
         </span>
         <span className="flex items-center gap-1.5">
           <span className="inline-block w-4 h-3 rounded border-2 border-indigo-400 bg-indigo-50 opacity-70" />
-          Same LAN (direct)
+          Shared network (public IP)
         </span>
         <span className="ml-auto text-gray-400 italic">Click a machine to view details</span>
       </div>

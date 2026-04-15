@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -124,8 +125,18 @@ func (h *TunnelHandler) Test(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, err.Error())
 		return
 	}
-	response.Success(w, map[string]interface{}{
-		"tunnel": tunnel,
-		"status": "test not implemented",
-	})
+	status := h.svc.Probe(tunnel)
+	if status != "active" {
+		msg := "Tunnel is offline — no client connected"
+		if status == "idle" {
+			msg = "Tunnel is connected but nothing is listening on port " + itoa(tunnel.LocalPort) + " on the client"
+		}
+		response.BadRequest(w, msg)
+		return
+	}
+	response.Success(w, map[string]string{"status": status})
+}
+
+func itoa(n int) string {
+	return fmt.Sprintf("%d", n)
 }

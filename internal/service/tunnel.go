@@ -87,6 +87,13 @@ func (s *TunnelService) Get(id string) (*db.Tunnel, error) {
 	return db.GetTunnel(id)
 }
 
+// Probe runs a live connectivity check on the tunnel and returns one of
+// "active", "idle", or "offline". It uses the same logic as the background
+// monitor so the result is consistent with what the dashboard shows.
+func (s *TunnelService) Probe(t *db.Tunnel) string {
+	return probeTunnel(*t)
+}
+
 func (s *TunnelService) NextPort() (int, error) {
 	return db.NextRatholePort()
 }
