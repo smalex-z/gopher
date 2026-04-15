@@ -1,256 +1,339 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { CheckCircle, Circle, ClipboardCopy, Key } from 'lucide-react'
+import {
+  Server, Globe, Shield, Key, ArrowRight,
+  ShieldCheck, ShieldOff, Lock, Wifi, WifiOff,
+} from 'lucide-react'
 import { machinesApi } from '../api/machines'
 import { tunnelsApi } from '../api/tunnels'
 import { localApi } from '../api/local'
-import StatusBadge from '../components/StatusBadge'
-import { toast } from '../lib/toast'
-import type { Machine, Tunnel } from '../types'
+import { securityApi } from '../api/security'
+import { updateApi } from '../api/update'
+import client from '../api/client'
+import type { Machine, Tunnel, SSHKey, FirewallEntry } from '../types'
+
+// ─── Tiny helpers ─────────────────────────────────────────────────────────────
+
+function Dot({ status }: { status: string }) {
+  const s = status.toLowerCase()
+  const c =
+    s === 'active' || s === 'connected' ? 'bg-green-500' :
+    s === 'pending' || s === 'connecting' ? 'bg-yellow-400' :
+    s === 'failed' || s === 'error' ? 'bg-red-500' :
+    'bg-gray-300'
+  return <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${c}`} />
+}
+
+function Chip({ label, color }: { label: string; color: 'green' | 'red' | 'yellow' | 'gray' | 'blue' }) {
+  const styles = {
+    green:  'bg-green-50 text-green-700 border-green-200',
+    red:    'bg-red-50 text-red-600 border-red-200',
+    yellow: 'bg-yellow-50 text-yellow-700 border-yellow-200',
+    gray:   'bg-gray-100 text-gray-500 border-gray-200',
+    blue:   'bg-blue-50 text-blue-700 border-blue-200',
+  }
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${styles[color]}`}>
+      {label}
+    </span>
+  )
+}
+
+interface CardProps {
+  title: string
+  icon: React.ReactNode
+  count?: number | string
+  href: string
+  children: React.ReactNode
+}
+
+function Card({ title, icon, count, href, children }: CardProps) {
+  const navigate = useNavigate()
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 flex flex-col overflow-hidden">
+      <div className="flex items-center justify-between px-4 pt-4 pb-3 border-b border-gray-100">
+        <div className="flex items-center gap-2">
+          <span className="text-gray-400">{icon}</span>
+          <span className="text-sm font-semibold text-gray-800">{title}</span>
+          {count !== undefined && (
+            <span className="text-xs font-medium bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-full">{count}</span>
+          )}
+        </div>
+        <button
+          onClick={() => navigate(href)}
+          className="text-xs text-gray-400 hover:text-blue-600 flex items-center gap-0.5 transition-colors"
+        >
+          Manage <ArrowRight size={11} />
+        </button>
+      </div>
+      <div className="px-4 py-3 flex-1 space-y-2 text-sm">
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function EmptyState({ label }: { label: string }) {
+  return <p className="text-xs text-gray-400 italic">{label}</p>
+}
+
+// ─── Dashboard ────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
   const navigate = useNavigate()
 
-  const { data: machinesData } = useQuery({
-    queryKey: ['machines'],
-    queryFn: () => machinesApi.list(),
-  })
-
-  const { data: tunnelsData } = useQuery({
-    queryKey: ['tunnels'],
-    queryFn: () => tunnelsApi.list(),
-  })
-
   const { data: localStatus } = useQuery({
     queryKey: ['local-status'],
     queryFn: () => localApi.status(),
-    refetchInterval: 10000,
+    refetchInterval: 15000,
+  })
+  const { data: machinesData } = useQuery({
+    queryKey: ['machines'],
+    queryFn: () => machinesApi.list(),
+    refetchInterval: 20000,
+  })
+  const { data: tunnelsData } = useQuery({
+    queryKey: ['tunnels'],
+    queryFn: () => tunnelsApi.list(),
+    refetchInterval: 20000,
+  })
+  const { data: keysData } = useQuery({
+    queryKey: ['ssh-keys'],
+    queryFn: () => localApi.listSSHKeys(),
+  })
+  const { data: firewallData } = useQuery({
+    queryKey: ['firewall-overview'],
+    queryFn: () => localApi.firewallOverview(),
+  })
+  const { data: fail2ban } = useQuery({
+    queryKey: ['fail2ban-status'],
+    queryFn: () => securityApi.fail2banStatus(),
+  })
+  const { data: totpData } = useQuery({
+    queryKey: ['totp-status'],
+    queryFn: () => client.get<{ data: { enabled: boolean } }>('/auth/2fa/status').then(r => r.data.data),
+  })
+  const { data: updateInfo } = useQuery({
+    queryKey: ['update-check'],
+    queryFn: () => updateApi.check(),
+    staleTime: 60_000,
   })
 
-  const machines: Machine[] = machinesData?.data ?? []
-  const tunnels: Tunnel[] = tunnelsData?.data ?? []
+  const machines: Machine[]       = machinesData?.data ?? []
+  const tunnels: Tunnel[]         = tunnelsData?.data ?? []
+  const keys: SSHKey[]            = keysData?.data ?? []
+  const fwEntries: FirewallEntry[] = firewallData?.data ?? []
 
-  const activeMachines = machines.filter(m => m.status === 'active' || m.status === 'connected').length
-  const activeTunnels = tunnels.filter(t => t.status === 'active').length
-  const servicesOk = localStatus?.caddy_active === 'active' && localStatus?.rathole_active === 'active'
-  const isHealthy = servicesOk && machines.length > 0 && tunnels.length > 0
+  const caddyOk    = localStatus?.caddy_active === 'active'
+  const ratholeOk  = localStatus?.rathole_active === 'active'
+  const domain     = localStatus?.domain ?? ''
+  const fwMode     = localStatus?.firewall_mode ?? ''
 
-  const steps = [
-    { label: 'Local services running', done: !!servicesOk, path: '/vps' },
-    { label: 'Bootstrap a machine', done: machines.length > 0, path: '/machines' },
-    { label: 'Add a tunnel', done: tunnels.length > 0, path: '/tunnels' },
-    { label: 'Deploy & go live', done: false, path: '/status', isInfo: true },
-  ]
+  const connected   = machines.filter(m => m.status === 'active' || m.status === 'connected').length
+  const activeTuns  = tunnels.filter(t => t.status === 'active').length
+  const defaultKey  = keys.find(k => k.is_default)
+  const bannedCount = (fail2ban?.jails ?? []).reduce((n, j) => n + j.currently_banned, 0)
+  const customRules = fwEntries.filter(e => e.type === 'custom').length
+  const openPorts   = fwEntries.filter(e => e.action === 'ACCEPT').length
 
-  const showStepper = !servicesOk || machines.length === 0 || tunnels.length === 0
+  const fwModeColor = fwMode === 'gopher' ? 'green' : fwMode === 'manual' ? 'yellow' : 'gray'
+  const fwModeLabel = fwMode === 'gopher' ? 'Gopher managed' : fwMode === 'manual' ? 'Manual' : fwMode === 'none' ? 'Disabled' : 'Not configured'
 
-  const copyUrl = (subdomain: string) => {
-    if (localStatus?.domain) {
-      navigator.clipboard.writeText(`${subdomain}.${localStatus.domain}`)
-      toast.success('URL copied!')
-    }
+  const tunnelURL = (t: Tunnel) => {
+    if (t.subdomain && domain) return `${t.subdomain}.${domain}`
+    return `:${t.rathole_port}`
   }
 
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-        <p className="text-gray-500 mt-1">Overview of your Gopher tunnel gateway</p>
+    <div className="space-y-4">
+
+      {/* ── Top bar: system health ──────────────────────────────────────── */}
+      <div
+        className="bg-white rounded-xl border border-gray-200 px-5 py-3.5 flex items-center gap-4 flex-wrap cursor-pointer hover:border-gray-300 transition-colors"
+        onClick={() => navigate('/vps')}
+      >
+        <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">System</span>
+
+        <div className="flex items-center gap-1.5">
+          {caddyOk ? <Wifi size={13} className="text-green-500" /> : <WifiOff size={13} className="text-red-400" />}
+          <span className={`text-xs font-medium ${caddyOk ? 'text-green-700' : 'text-red-600'}`}>Caddy</span>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          {ratholeOk ? <Wifi size={13} className="text-green-500" /> : <WifiOff size={13} className="text-red-400" />}
+          <span className={`text-xs font-medium ${ratholeOk ? 'text-green-700' : 'text-red-600'}`}>Rathole</span>
+        </div>
+
+        {domain && (
+          <>
+            <div className="w-px h-4 bg-gray-200" />
+            <div className="flex items-center gap-1.5">
+              <Globe size={12} className="text-gray-400" />
+              <code className="text-xs text-gray-700">{domain}</code>
+            </div>
+          </>
+        )}
+
+        {updateInfo?.update_available && (
+          <>
+            <div className="w-px h-4 bg-gray-200" />
+            <Chip label={`Update available: ${updateInfo.latest_version}`} color="blue" />
+          </>
+        )}
+
+        <ArrowRight size={13} className="text-gray-300 ml-auto" />
       </div>
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white rounded-xl p-5 shadow-sm border">
-          <div className="text-sm text-gray-500 mb-1">This Server</div>
-          {localStatus?.domain ? (
-            <>
-              <StatusBadge
-                status={localStatus.caddy_active === 'active' && localStatus.rathole_active === 'active' ? 'active' : 'inactive'}
-                className="font-semibold"
-              />
-              <div className="text-xs text-gray-400 mt-2 truncate">{localStatus.domain}</div>
-              <div className="text-xs text-gray-400 truncate">router.{localStatus.domain}</div>
-            </>
-          ) : (
-            <>
-              <StatusBadge status="inactive" className="font-semibold" />
-              <div className="text-xs text-gray-400 mt-2">No domain configured</div>
-            </>
-          )}
-        </div>
+      {/* ── Main grid ──────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 gap-4">
 
-        <div onClick={() => navigate('/machines')} className="bg-white rounded-xl p-5 shadow-sm border cursor-pointer hover:shadow-md transition-shadow">
-          <div className="text-sm text-gray-500 mb-1">Machines</div>
-          <div className="text-2xl font-bold text-gray-900">{machines.length}</div>
-          <div className="text-xs text-gray-500 mt-1">{activeMachines} active</div>
-        </div>
-
-        <div onClick={() => navigate('/tunnels')} className="bg-white rounded-xl p-5 shadow-sm border cursor-pointer hover:shadow-md transition-shadow">
-          <div className="text-sm text-gray-500 mb-1">Tunnels</div>
-          <div className="text-2xl font-bold text-gray-900">{tunnels.length}</div>
-          <div className="text-xs text-gray-500 mt-1">{activeTunnels} active</div>
-        </div>
-
-        <div onClick={() => navigate('/status')} className="bg-white rounded-xl p-5 shadow-sm border cursor-pointer hover:shadow-md transition-shadow">
-          <div className="text-sm text-gray-500 mb-1">System Health</div>
-          <StatusBadge status={isHealthy ? 'active' : 'inactive'} className="font-semibold" />
-          <div className="text-xs text-gray-400 mt-2">{isHealthy ? 'All systems operational' : 'Setup required'}</div>
-        </div>
-      </div>
-
-      {/* Local Services status */}
-      {localStatus && (
-        <div className="bg-white rounded-xl shadow-sm border p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Local Services</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {[
-              {
-                name: 'Caddy (reverse proxy)',
-                installed: localStatus.caddy_installed,
-                active: localStatus.caddy_active,
-              },
-              {
-                name: 'Rathole Server (tunnels)',
-                installed: localStatus.rathole_installed,
-                active: localStatus.rathole_active,
-              },
-            ].map(svc => {
-              const status = svc.installed ? svc.active : 'not-installed'
-              const color =
-                status === 'active' ? 'bg-green-50 border-green-200' :
-                status === 'activating' ? 'bg-yellow-50 border-yellow-200' :
-                'bg-red-50 border-red-200'
-              const badge =
-                status === 'active' ? 'bg-green-100 text-green-700' :
-                status === 'activating' ? 'bg-yellow-100 text-yellow-700' :
-                'bg-red-100 text-red-700'
-              return (
-                <div key={svc.name} className={`rounded-lg border p-4 ${color}`}>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium text-gray-800">{svc.name}</span>
-                    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${badge}`}>
-                      {status}
-                    </span>
-                  </div>
-                  {localStatus.domain && status === 'active' && svc.name.startsWith('Caddy') && (
-                    <div className="text-xs text-gray-500 mt-1 truncate">
-                      router.{localStatus.domain}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-      {/* SSH Key */}
-      {localStatus?.ssh_public_key && (
-        <div className="bg-white rounded-xl shadow-sm border p-6 space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">Server SSH Key</h2>
-              <p className="text-sm text-gray-500 mt-0.5">Used to SSH into bootstrapped machines through their tunnels</p>
-            </div>
-            <button
-              onClick={() => navigate('/keys')}
-              className="px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 text-sm font-medium flex items-center gap-1.5"
-            >
-              <Key size={13} /> Manage Keys
-            </button>
-          </div>
-          <div className="bg-gray-50 rounded-lg p-3">
-            <div className="text-xs text-gray-500 mb-1">Default public key (add to authorized_keys on any machine you want direct access to)</div>
-            <div className="flex items-center gap-2">
-              <code className="text-xs text-gray-700 break-all flex-1">{localStatus.ssh_public_key}</code>
-              <button onClick={() => { navigator.clipboard.writeText(localStatus.ssh_public_key); toast.success('Copied!') }} className="shrink-0 text-gray-400 hover:text-gray-600">
-                <ClipboardCopy size={14} />
-              </button>
-            </div>
-          </div>
-          <p className="text-xs text-gray-400">Usage: <code className="bg-gray-100 px-1 rounded">ssh -i gopher_id_rsa -p &lt;tunnel-port&gt; &lt;username&gt;@{localStatus.domain ?? 'your-vps'}</code></p>
-        </div>
-      )}
-      {showStepper && (
-        <div className="bg-white rounded-xl shadow-sm border p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Get Started</h2>
-          <div className="space-y-3">
-            {steps.map((step, i) => (
-              <div key={i} className="flex items-center gap-4">
-                <div className="flex-shrink-0">
-                  {step.done ? (
-                    <CheckCircle className="w-6 h-6 text-green-500" />
-                  ) : (
-                    <Circle className="w-6 h-6 text-gray-300" />
-                  )}
-                </div>
-                <div className="flex-1">
-                  <span className={step.done ? 'line-through text-gray-400' : 'text-gray-800 font-medium'}>
-                    {i + 1}. {step.label}
-                  </span>
-                </div>
-                {!step.done && (
-                  <button
-                    onClick={() => navigate(step.path)}
-                    className={`text-sm px-3 py-1 rounded-lg ${step.isInfo ? 'bg-blue-50 text-blue-600 hover:bg-blue-100' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
-                  >
-                    {step.isInfo ? 'View Status' : 'Configure'}
-                  </button>
-                )}
+        {/* Machines */}
+        <Card title="Machines" icon={<Server size={15} />} count={`${connected}/${machines.length}`} href="/machines">
+          {machines.length === 0
+            ? <EmptyState label="No machines registered yet" />
+            : machines.slice(0, 5).map(m => (
+              <div key={m.id} className="flex items-center gap-2">
+                <Dot status={m.status} />
+                <span className="text-gray-700 text-xs font-medium flex-1 truncate">{m.name}</span>
+                <span className="text-xs text-gray-400 capitalize shrink-0">{m.status}</span>
               </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Recent activity */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div className="bg-white rounded-xl shadow-sm border p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Recent Machines</h2>
-          {machines.length === 0 ? (
-            <p className="text-sm text-gray-400">No machines configured yet.</p>
-          ) : (
-            <div className="space-y-3">
-              {machines.slice(-3).reverse().map(m => (
-                <div key={m.id} className="flex items-center justify-between">
-                  <div>
-                    <div className="font-medium text-sm text-gray-800">{m.name}</div>
-                    <div className="text-xs text-gray-400">{m.status === 'connected' || m.status === 'active' ? 'online' : m.last_seen ? new Date(m.last_seen).toLocaleString() : 'never seen'}</div>
-                  </div>
-                  <StatusBadge status={m.status} />
-                </div>
-              ))}
-            </div>
+            ))
+          }
+          {machines.length > 5 && (
+            <p className="text-xs text-gray-400">+{machines.length - 5} more</p>
           )}
-        </div>
+        </Card>
 
-        <div className="bg-white rounded-xl shadow-sm border p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Recent Tunnels</h2>
-          {tunnels.length === 0 ? (
-            <p className="text-sm text-gray-400">No tunnels configured yet.</p>
-          ) : (
-            <div className="space-y-3">
-              {tunnels.slice(-3).reverse().map(t => (
-                <div key={t.id} className="flex items-center justify-between">
-                  <div>
-                    <div className="font-medium text-sm text-gray-800">{t.name}</div>
-                    {localStatus?.domain ? (
-                      <div className="flex items-center gap-1">
-                        <span className="text-xs text-gray-400">{t.subdomain}.{localStatus.domain}</span>
-                        <button onClick={() => copyUrl(t.subdomain)} className="text-gray-300 hover:text-gray-600">
-                          <ClipboardCopy size={12} />
-                        </button>
-                      </div>
-                    ) : (
-                      <span className="text-xs text-gray-400">{t.subdomain}</span>
-                    )}
-                  </div>
-                  <StatusBadge status={t.status} />
-                </div>
-              ))}
-            </div>
+        {/* Tunnels */}
+        <Card title="Service Tunnels" icon={<Globe size={15} />} count={`${activeTuns}/${tunnels.length} active`} href="/tunnels">
+          {tunnels.length === 0
+            ? <EmptyState label="No service tunnels configured yet" />
+            : tunnels.slice(0, 5).map(t => (
+              <div key={t.id} className="flex items-center gap-2">
+                <Dot status={t.status} />
+                {t.private && <Lock size={10} className="text-gray-300 shrink-0" />}
+                <span className="text-gray-700 text-xs font-medium flex-1 truncate">{t.name}</span>
+                <code className="text-xs text-gray-400 truncate shrink-0 max-w-[140px]">{tunnelURL(t)}</code>
+              </div>
+            ))
+          }
+          {tunnels.length > 5 && (
+            <p className="text-xs text-gray-400">+{tunnels.length - 5} more</p>
           )}
-        </div>
+        </Card>
+
       </div>
+
+      {/* ── Bottom grid ────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-3 gap-4">
+
+        {/* SSH Keys */}
+        <Card title="SSH Keys" icon={<Key size={15} />} count={keys.length} href="/keys">
+          {keys.length === 0
+            ? <EmptyState label="No keys stored" />
+            : <>
+              {defaultKey && (
+                <div className="flex items-center gap-2">
+                  <Key size={11} className="text-blue-500 shrink-0" />
+                  <span className="text-xs text-gray-700 font-medium flex-1 truncate">{defaultKey.name}</span>
+                  <Chip label="Default" color="blue" />
+                </div>
+              )}
+              {keys.filter(k => !k.is_default).slice(0, 3).map(k => (
+                <div key={k.id} className="flex items-center gap-2">
+                  <Key size={11} className="text-gray-300 shrink-0" />
+                  <span className="text-xs text-gray-500 truncate">{k.name}</span>
+                  {(k.machine_count ?? 0) > 0 && (
+                    <span className="text-xs text-gray-400 shrink-0">{k.machine_count}m</span>
+                  )}
+                </div>
+              ))}
+              {keys.length > 4 && <p className="text-xs text-gray-400">+{keys.length - 4} more</p>}
+            </>
+          }
+        </Card>
+
+        {/* Firewall */}
+        <Card title="Firewall" icon={<Shield size={15} />} href="/firewall">
+          <div className="flex items-center gap-2">
+            <Chip label={fwModeLabel} color={fwModeColor as 'green' | 'yellow' | 'gray'} />
+          </div>
+          {fwMode === 'gopher' && (
+            <>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">Open ports</span>
+                <span className="font-medium text-gray-700">{openPorts}</span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">Custom rules</span>
+                <span className="font-medium text-gray-700">{customRules}</span>
+              </div>
+            </>
+          )}
+          {fwMode !== 'gopher' && fwMode !== '' && (
+            <p className="text-xs text-gray-400">Gopher is not managing the firewall</p>
+          )}
+        </Card>
+
+        {/* Access Control */}
+        <Card title="Access Control" icon={<ShieldCheck size={15} />} href="/security">
+          {/* 2FA */}
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-500">Two-factor auth</span>
+            {totpData?.enabled
+              ? <Chip label="Enabled" color="green" />
+              : <Chip label="Disabled" color="red" />
+            }
+          </div>
+
+          {/* Fail2ban */}
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-500">Fail2ban</span>
+            {fail2ban?.running
+              ? <Chip label="Active" color="green" />
+              : <Chip label="Inactive" color="gray" />
+            }
+          </div>
+
+          {/* Banned IPs */}
+          {fail2ban?.running && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-gray-500">Banned IPs</span>
+              <span className={`text-xs font-semibold ${bannedCount > 0 ? 'text-red-500' : 'text-gray-400'}`}>
+                {bannedCount > 0 ? bannedCount : 'None'}
+              </span>
+            </div>
+          )}
+
+          {!fail2ban?.available && (
+            <div className="flex items-center gap-1.5 text-xs text-amber-600">
+              <ShieldOff size={11} />
+              Fail2ban not installed
+            </div>
+          )}
+        </Card>
+
+      </div>
+
+      {/* Network map link */}
+      <button
+        onClick={() => navigate('/network')}
+        className="w-full bg-white rounded-xl border border-gray-200 px-5 py-3 flex items-center justify-between hover:border-blue-200 hover:shadow-sm transition-all group"
+      >
+        <div className="flex items-center gap-2">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-gray-400">
+            <circle cx="3" cy="8" r="2"/>
+            <circle cx="13" cy="3" r="2"/>
+            <circle cx="13" cy="13" r="2"/>
+            <line x1="5" y1="7.3" x2="11" y2="3.7"/>
+            <line x1="5" y1="8.7" x2="11" y2="12.3"/>
+          </svg>
+          <span className="text-sm font-medium text-gray-600">Network Map</span>
+          <span className="text-xs text-gray-400">— visual overview of all tunnels and machines</span>
+        </div>
+        <ArrowRight size={14} className="text-gray-300 group-hover:text-blue-500 transition-colors" />
+      </button>
+
     </div>
   )
 }
