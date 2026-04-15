@@ -64,7 +64,8 @@ function statusStyle(status: string) {
     return { fill: '#f0fdf4', stroke: '#16a34a', text: '#14532d', dot: '#22c55e' }
   if (status === 'pending' || status === 'connecting')
     return { fill: '#fefce8', stroke: '#ca8a04', text: '#92400e', dot: '#eab308' }
-  return { fill: '#f9fafb', stroke: '#9ca3af', text: '#374151', dot: '#d1d5db' }
+  // 'offline' or any unknown status
+  return { fill: '#f9fafb', stroke: '#d1d5db', text: '#6b7280', dot: '#d1d5db' }
 }
 
 // ── Computed layout types ─────────────────────────────────────────────────────
@@ -106,8 +107,10 @@ function TunnelDetailRow({ tunnel, domain }: { tunnel: Tunnel; domain?: string }
         :{tunnel.local_port}
       </span>
       <span className={`text-xs font-medium px-1.5 py-0.5 rounded shrink-0 ${
-        tunnel.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
-      }`}>{tunnel.status}</span>
+        tunnel.status === 'active' ? 'bg-green-100 text-green-700'
+        : tunnel.status === 'idle' ? 'bg-amber-100 text-amber-700'
+        : 'bg-gray-100 text-gray-500'
+      }`}>{tunnel.status === 'idle' ? 'no service' : tunnel.status}</span>
       {hasUrl && domain && (
         <a href={`https://${tunnel.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
           className="text-indigo-500 hover:text-indigo-700 text-xs font-mono truncate max-w-[160px] shrink-0">
@@ -174,11 +177,15 @@ export default function NetworkMapPage() {
 
   // Build a map: machineId → { public_ip, private_ip, is_nat }
   const netInfoMap = new Map<string, { public_ip: string; private_ip: string; is_nat: boolean }>()
+  const isOnline = (m: Machine) => m.status === 'active' || m.status === 'connected'
   machines.forEach((m, i) => {
     const fresh = netInfoResults[i]?.data
     if (fresh && fresh.public_ip) {
       netInfoMap.set(m.id, { public_ip: fresh.public_ip, private_ip: fresh.private_ip, is_nat: fresh.is_nat })
-    } else if (m.public_ip) {
+    } else if (m.public_ip && isOnline(m)) {
+      // Only use stale public_ip for machines that are currently online.
+      // Offline machines fall back to a solo group so they don't appear inside
+      // a LAN bracket that implies current reachability.
       netInfoMap.set(m.id, { public_ip: m.public_ip, private_ip: m.host ?? '', is_nat: isPrivateIP(m.host ?? '') })
     }
   })
@@ -312,32 +319,40 @@ export default function NetworkMapPage() {
 
           {/* ── Tunnel lines (behind everything) ─────────────────────────── */}
           {tunnelLines.map(({ tunnel, vpsY, machY }) => {
-            const active = tunnel.status === 'active'
+            const active   = tunnel.status === 'active'
+            const idle = tunnel.status === 'idle'
             const isUdp = tunnel.transport === 'udp'
             const cy = (vpsY + machY) / 2
             const label = `:${tunnel.rathole_port}`
             const lw = label.length * 6.2 + 10
-            const lineColor = active ? (isUdp ? '#a855f7' : '#4ade80') : '#d1d5db'
-            const pillFill  = active ? (isUdp ? '#faf5ff' : '#f0fdf4') : '#f9fafb'
-            const pillStroke = active ? (isUdp ? '#a855f7' : '#4ade80') : '#d1d5db'
-            const textColor  = active ? (isUdp ? '#7e22ce' : '#16a34a') : '#6b7280'
+            // Degraded: tunnel IS connected so line is green, but pill is amber to
+            // signal the service isn't responding on the client side.
+            const lineColor  = (active || idle) ? (isUdp ? '#a855f7' : '#4ade80') : '#d1d5db'
+            const pillFill   = active ? (isUdp ? '#faf5ff' : '#f0fdf4') : idle ? '#fffbeb' : '#f9fafb'
+            const pillStroke = active ? (isUdp ? '#a855f7' : '#4ade80') : idle ? '#f59e0b' : '#d1d5db'
+            const textColor  = active ? (isUdp ? '#7e22ce' : '#16a34a') : idle ? '#b45309' : '#6b7280'
             return (
               <g key={tunnel.id}>
                 <path
                   d={`M ${VPS_RIGHT} ${vpsY} C ${midX} ${vpsY}, ${midX} ${machY}, ${MACHINE_X} ${machY}`}
                   fill="none"
                   stroke={lineColor}
-                  strokeWidth={active ? 2.5 : 1.5}
-                  strokeDasharray={active ? undefined : '5 4'}
+                  strokeWidth={(active || idle) ? 2.5 : 1.5}
+                  strokeDasharray={active || idle ? undefined : '5 4'}
                   opacity={0.9}
                 />
-                <rect x={midX - lw / 2} y={cy - 9} width={lw} height={17} rx={4}
-                  fill={pillFill} stroke={pillStroke} strokeWidth={1} />
-                <text x={midX} y={cy + 4} textAnchor="middle"
-                  fontSize={9.5} fontFamily="ui-monospace,monospace" fontWeight={700}
-                  fill={textColor}>
-                  {label}
-                </text>
+                <g style={{ cursor: idle ? 'help' : 'default' }}>
+                  {idle && (
+                    <title>Tunnel connected — nothing is listening on port {tunnel.local_port} on the client machine. Start the service or check the configured local port.</title>
+                  )}
+                  <rect x={midX - lw / 2} y={cy - 9} width={lw} height={17} rx={4}
+                    fill={pillFill} stroke={pillStroke} strokeWidth={1} />
+                  <text x={midX} y={cy + 4} textAnchor="middle"
+                    fontSize={9.5} fontFamily="ui-monospace,monospace" fontWeight={700}
+                    fill={textColor}>
+                    {label}
+                  </text>
+                </g>
               </g>
             )
           })}
@@ -658,15 +673,22 @@ export default function NetworkMapPage() {
         <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-green-500 inline-block" /> Connected</span>
         <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-yellow-400 inline-block" /> Connecting</span>
         <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-gray-300 inline-block" /> Offline</span>
-        <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-green-400" /> Active tunnel</span>
-        <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-dashed border-gray-300" /> Inactive</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-green-400" /> Tunnel active</span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-flex items-center gap-0.5">
+            <span className="inline-block w-4 border-t-2 border-green-400" />
+            <span className="text-[9px] font-bold px-1 rounded bg-amber-100 text-amber-700 border border-amber-300">:port</span>
+          </span>
+          Tunnel up, nothing listening (hover for details)
+        </span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-dashed border-gray-300" /> No client connected</span>
         <span className="flex items-center gap-1.5">
           <span className="inline-block w-4 h-3 rounded border-2 border-dashed border-yellow-400 bg-yellow-50 opacity-70" />
-          Same LAN (NAT)
+          Shared network (behind NAT)
         </span>
         <span className="flex items-center gap-1.5">
           <span className="inline-block w-4 h-3 rounded border-2 border-indigo-400 bg-indigo-50 opacity-70" />
-          Same LAN (direct)
+          Shared network (public IP)
         </span>
         <span className="ml-auto text-gray-400 italic">Click a machine to view details</span>
       </div>

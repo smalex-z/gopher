@@ -1,11 +1,9 @@
 package service
 
 import (
-	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"time"
 
 	"github.com/smalex-z/gopher/internal/db"
@@ -54,10 +52,16 @@ func (s *MonitorService) checkMachine(machine db.Machine) {
 	}
 	sshKey, err := db.GetSSHKeyForMachine(&machine)
 	if err != nil {
+		// No key configured — can't check, leave status unchanged.
 		return
 	}
 	client, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 	if err != nil {
+		// SSH failed — rathole client is not connected or machine is unreachable.
+		machine.Status = "offline"
+		if dbErr := db.UpdateMachine(&machine); dbErr != nil {
+			log.Printf("monitor: failed to update machine %s: %v", machine.ID, dbErr)
+		}
 		return
 	}
 	_ = client.Close()
@@ -71,114 +75,68 @@ func (s *MonitorService) checkMachine(machine db.Machine) {
 }
 
 // checkTunnels probes each tunnel for real end-to-end connectivity and updates
-// the tunnel's status in the DB to "active" or "inactive".
+// the tunnel's status in the DB.
 func (s *MonitorService) checkTunnels() {
 	tunnels, err := db.GetTunnels()
 	if err != nil {
 		log.Printf("monitor: failed to get tunnels: %v", err)
 		return
 	}
-	settings, err := db.GetSettings()
-	if err != nil {
-		log.Printf("monitor: failed to get settings: %v", err)
-		return
-	}
 	for _, t := range tunnels {
-		go s.checkTunnel(t, settings.Domain)
+		go s.checkTunnel(t)
 	}
 }
 
-// checkTunnel uses a protocol-aware probe to determine whether the tunnel
-// client is actually connected and forwarding traffic.
+// checkTunnel probes the tunnel and stores one of three status values:
 //
-// Rathole always keeps the server-side port open, so a plain TCP connect
-// succeeds regardless of whether any client is behind the tunnel. Instead:
+//   - "active"    — rathole client connected, service responding
+//   - "connected" — rathole client connected, but service not responding on the client side
+//   - "offline"   — rathole client not connected
 //
-//   - SSH tunnels: read the SSH banner — only present when a client forwards.
-//   - HTTP/HTTPS tunnels with a domain: GET the subdomain URL and treat
-//     502/503/504 (Caddy can't reach backend) as offline.
-//   - Everything else: fall back to TCP connect + read probe.
-func (s *MonitorService) checkTunnel(t db.Tunnel, domain string) {
+// The key distinction between "connected" and "offline" relies on rathole's
+// behaviour: when no client is connected, rathole holds the data-channel TCP
+// connection open indefinitely (waiting for a client), so a read times out.
+// When a client is connected but the service is not listening, rathole forwards
+// the connection, the client gets an immediate connection refused, and closes
+// the channel — so we receive an EOF with no data almost immediately.
+func (s *MonitorService) checkTunnel(t db.Tunnel) {
 	if t.RatholePort == 0 {
 		return
 	}
-
-	var online bool
-	switch t.Protocol {
-	case "ssh":
-		online = probeSSHBanner(t.RatholePort)
-	default:
-		if t.Subdomain != "" && domain != "" {
-			online = probeHTTP(t, domain)
-		} else {
-			online = probeTCPRead(t.RatholePort)
-		}
-	}
-
-	if online {
-		t.Status = "active"
-	} else {
-		t.Status = "inactive"
-	}
+	t.Status = probeTunnel(t)
 	if err := db.UpdateTunnel(&t); err != nil {
 		log.Printf("monitor: failed to update tunnel %s: %v", t.ID, err)
 	}
 }
 
-// probeSSHBanner connects to the rathole port and waits for an SSH banner.
-// When a rathole client is connected and forwarding an SSH service, the remote
-// SSH daemon sends its version string immediately. An empty read means nobody
-// is behind the tunnel.
-func probeSSHBanner(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 3*time.Second)
+// probeTunnel connects directly to the rathole port and classifies the result.
+// For HTTP/HTTPS it sends a HEAD request first so the service actually responds.
+func probeTunnel(t db.Tunnel) string {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", t.RatholePort), 3*time.Second)
 	if err != nil {
-		return false
+		return "offline"
 	}
 	defer conn.Close()
+
+	// For HTTP/HTTPS services we need to send a request before the server will
+	// send any data back.
+	if t.Protocol == "http" || t.Protocol == "https" {
+		_, _ = fmt.Fprintf(conn, "HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+	}
+
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	buf := make([]byte, 8)
-	n, err := conn.Read(buf)
-	return err == nil && n > 0
-}
+	n, readErr := conn.Read(buf)
 
-// probeHTTP makes a GET to the tunnel's public URL and treats Caddy gateway
-// errors (502/503/504) as offline. Any other response — including auth errors
-// or 404 — means the service is reachable through the tunnel.
-func probeHTTP(t db.Tunnel, domain string) bool {
-	scheme := "https"
-	if t.NoTLS {
-		scheme = "http"
+	if n > 0 {
+		return "active"
 	}
-	url := fmt.Sprintf("%s://%s.%s/", scheme, t.Subdomain, domain)
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 — health probe only
-		},
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse // don't follow redirects
-		},
+	if netErr, ok := readErr.(net.Error); ok && netErr.Timeout() {
+		// Read deadline expired: rathole is holding the connection open waiting
+		// for a client — no client is connected.
+		return "offline"
 	}
-	resp, err := client.Get(url) // #nosec G107 — URL constructed from trusted DB values
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-	return resp.StatusCode != 502 && resp.StatusCode != 503 && resp.StatusCode != 504
-}
-
-// probeTCPRead connects to the rathole port and attempts to read data with a
-// short deadline. Used for generic TCP tunnels without a known protocol banner.
-// Rathole keeps ports open even with no client, so a plain connect is
-// insufficient — we need the far end to send something back.
-func probeTCPRead(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 3*time.Second)
-	if err != nil {
-		return false
-	}
-	defer conn.Close()
-	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	buf := make([]byte, 1)
-	n, err := conn.Read(buf)
-	return err == nil && n > 0
+	// EOF or connection reset: rathole forwarded to the client, the client
+	// couldn't reach the service, and closed the channel.
+	return "idle"
 }

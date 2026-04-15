@@ -31,7 +31,7 @@ export default function DashboardPage() {
   const tunnels: Tunnel[] = tunnelsData?.data ?? []
 
   const activeMachines = machines.filter(m => m.status === 'active' || m.status === 'connected').length
-  const activeTunnels = tunnels.filter(t => t.status === 'active' || t.status === 'connected').length
+  const activeTunnels = tunnels.filter(t => t.status === 'active').length
   const servicesOk = localStatus?.caddy_active === 'active' && localStatus?.rathole_active === 'active'
   const isHealthy = servicesOk && machines.length > 0 && tunnels.length > 0
 

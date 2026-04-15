@@ -325,7 +325,7 @@ export default function MachinesPage() {
                                         <Lock size={9} /> Private
                                       </span>
                                     )}
-                                    <StatusBadge status={m.status === 'connected' ? 'active' : m.status} />
+                                    <StatusBadge status={m.status} />
                                   </div>
                                 </div>
                               )
