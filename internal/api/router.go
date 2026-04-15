@@ -68,6 +68,7 @@ func NewRouter(
 			r.Post("/auth/logout", authH.Logout)
 
 			r.Route("/security", func(r chi.Router) {
+				r.Get("/stale-tokens", securityH.StaleTokenAttempts)
 				r.Get("/logs", securityH.AuditLog)
 				r.Get("/fail2ban", securityH.Fail2banStatus)
 				r.Post("/fail2ban/unban", securityH.UnbanIP)

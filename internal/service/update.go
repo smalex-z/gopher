@@ -140,9 +140,6 @@ func (s *UpdateService) Apply() error {
 		if err := writeLocalFile("/etc/fail2ban/filter.d/gopher-auth.conf", fail2banFilterConfig); err != nil {
 			log.Printf("WARN: could not update gopher-auth fail2ban filter: %v", err)
 		}
-		if err := writeLocalFile("/etc/fail2ban/filter.d/rathole-auth.conf", fail2banFilterRatholeConfig); err != nil {
-			log.Printf("WARN: could not update rathole-auth fail2ban filter: %v", err)
-		}
 		sudo := privilegedCmdPrefix()
 		reloadArgs := append(append([]string{}, sudo...), "fail2ban-client", "reload")
 		if out, err := exec.Command(reloadArgs[0], reloadArgs[1:]...).CombinedOutput(); err != nil {
@@ -204,6 +201,7 @@ func buildServiceSudoers(username string) string {
 		username + " ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash",
 		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl",
 		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/fail2ban-client, /usr/local/bin/fail2ban-client",
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/journalctl, /bin/journalctl",
 	}
 	return strings.Join(lines, "\n") + "\n"
 }

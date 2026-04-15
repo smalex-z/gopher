@@ -2,10 +2,10 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ShieldCheck, ShieldOff, KeyRound, RefreshCw, Copy, Check,
-  Ban, Trash2, Plus, AlertTriangle, Activity,
+  Ban, Trash2, Plus, AlertTriangle, Activity, Unplug,
 } from 'lucide-react'
 import client from '../api/client'
-import { securityApi, type AuditEvent, type Fail2banStatus, type Fail2banConfig } from '../api/security'
+import { securityApi, type AuditEvent, type Fail2banStatus, type Fail2banConfig, type StaleTokenAttempt } from '../api/security'
 import { toast } from '../lib/toast'
 
 // ─── TOTP types + hook ───────────────────────────────────────────────────────
@@ -374,6 +374,66 @@ function AuditLogSection() {
                   <td className="py-2 pr-4 text-gray-400 text-xs whitespace-nowrap font-mono">{formatTime(ev.time)}</td>
                   <td className="py-2 pr-4">{eventBadge(ev.event)}</td>
                   <td className="py-2 font-mono text-xs text-gray-600">{ev.ip || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Stale token section ──────────────────────────────────────────────────────
+
+function StaleTokensSection() {
+  const { data, isLoading, error } = useQuery<StaleTokenAttempt[]>({
+    queryKey: ['stale-tokens'],
+    queryFn: securityApi.staleTokenAttempts,
+    refetchInterval: 60_000,
+  })
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
+      <div className="flex items-center gap-2 mb-4">
+        <Unplug size={18} className="text-gray-400" />
+        <h2 className="font-semibold text-gray-900">Stale tunnel clients</h2>
+        <span className="ml-auto text-xs text-gray-400">last 2000 journal entries · auto-refreshes</span>
+      </div>
+      <p className="text-sm text-gray-500 mb-4">
+        Rathole clients connecting with a service name that no longer exists in the server config.
+        These are machines that still have an old token and need their config updated.
+      </p>
+
+      {isLoading && <p className="text-sm text-gray-400">Loading…</p>}
+      {error && <p className="text-sm text-red-500">Failed to load stale token data</p>}
+      {data && data.length === 0 && <p className="text-sm text-gray-400">No stale clients detected.</p>}
+
+      {data && data.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-100">
+                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Token</th>
+                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Source IP</th>
+                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Last seen</th>
+                <th className="text-left py-2 font-medium text-gray-500 text-xs">Attempts</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {data.map((a, i) => (
+                <tr key={i} className="hover:bg-gray-50">
+                  <td className="py-2 pr-4">
+                    <span
+                      className="font-mono text-xs text-gray-600 bg-gray-100 px-2 py-0.5 rounded"
+                      title={a.token}
+                    >
+                      {a.token.length > 16 ? a.token.slice(0, 16) + '…' : a.token}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-4 font-mono text-xs text-gray-700">{a.ip}</td>
+                  <td className="py-2 pr-4 text-xs text-gray-500 whitespace-nowrap">{formatTime(a.last_seen)}</td>
+                  <td className="py-2 text-xs font-medium text-amber-600">{a.count}</td>
                 </tr>
               ))}
             </tbody>
@@ -760,6 +820,9 @@ export default function SecurityPage() {
 
       {/* Auth event log */}
       <AuditLogSection />
+
+      {/* Stale tunnel clients */}
+      <StaleTokensSection />
 
       {/* Fail2ban live status */}
       <Fail2banSection />
