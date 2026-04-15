@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/smalex-z/gopher/internal/db"
 )
@@ -48,6 +49,23 @@ type Fail2banStatus struct {
 type SecurityService struct{}
 
 func NewSecurityService() *SecurityService { return &SecurityService{} }
+
+// SyncFail2banConfig writes the latest filter files and jail config if fail2ban
+// is installed, then reloads it. Called on startup and after updates so every
+// deploy picks up config changes without requiring a fresh install.
+func (s *SecurityService) SyncFail2banConfig() {
+	if !isCommandAvailable("fail2ban-client") {
+		return
+	}
+	if err := writeLocalFile("/etc/fail2ban/filter.d/gopher-auth.conf", fail2banFilterConfig); err != nil {
+		return
+	}
+	cfg, err := s.GetFail2banConfig()
+	if err != nil {
+		return
+	}
+	_ = s.rewriteJailConfig(cfg)
+}
 
 // GetFail2banConfig reads stored config, filling in defaults for zero values.
 func (s *SecurityService) GetFail2banConfig() (*Fail2banConfig, error) {
@@ -222,6 +240,72 @@ func buildJailConfig(cfg *Fail2banConfig) string {
 	}
 	b.WriteString("action   = iptables-allports[name=gopher, protocol=all]\n")
 	return b.String()
+}
+
+// ─── Stale token detection ────────────────────────────────────────────────────
+
+// StaleTokenAttempt represents a rathole client repeatedly connecting with a
+// service name that no longer exists in the server config.
+type StaleTokenAttempt struct {
+	Token    string    `json:"token"`     // full service name (token hash)
+	IP       string    `json:"ip"`        // source IP
+	LastSeen time.Time `json:"last_seen"` // most recent attempt
+	Count    int       `json:"count"`     // total attempts in the journal window
+}
+
+var staleTokenRe = regexp.MustCompile(`(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+ERROR connection\{addr=(\d+\.\d+\.\d+\.\d+):\d+\}.*No such a service\s+(\S+)`)
+
+// StaleTokenAttempts scans the rathole-server journal for "No such a service"
+// errors and returns them grouped by (token, ip), sorted by last seen descending.
+// Returns an empty slice if journalctl is unavailable or the unit has no logs.
+func (s *SecurityService) StaleTokenAttempts() ([]StaleTokenAttempt, error) {
+	prefix := privilegedCmdPrefix()
+	args := append(prefix, "journalctl", "-u", "rathole-server", "--no-pager", "-n", "2000", "--output=short-iso")
+	out, err := exec.Command(args[0], args[1:]...).CombinedOutput() // #nosec G204
+	if err != nil {
+		// journalctl exits non-zero when the unit doesn't exist yet — treat as empty
+		return []StaleTokenAttempt{}, nil
+	}
+
+	type key struct{ token, ip string }
+	byKey := map[key]*StaleTokenAttempt{}
+	var order []key
+
+	for _, line := range strings.Split(string(out), "\n") {
+		m := staleTokenRe.FindStringSubmatch(line)
+		if len(m) != 4 {
+			continue
+		}
+		ts, ip, token := m[1], m[2], m[3]
+		t, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			t, _ = time.Parse("2006-01-02T15:04:05Z", ts)
+		}
+		k := key{token, ip}
+		if e, ok := byKey[k]; ok {
+			e.Count++
+			if t.After(e.LastSeen) {
+				e.LastSeen = t
+			}
+		} else {
+			byKey[k] = &StaleTokenAttempt{Token: token, IP: ip, LastSeen: t, Count: 1}
+			order = append(order, k)
+		}
+	}
+
+	result := make([]StaleTokenAttempt, 0, len(order))
+	for _, k := range order {
+		result = append(result, *byKey[k])
+	}
+	// sort newest-first
+	for i := 0; i < len(result)-1; i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].LastSeen.After(result[i].LastSeen) {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	return result, nil
 }
 
 // ─── Parsing helpers ─────────────────────────────────────────────────────────

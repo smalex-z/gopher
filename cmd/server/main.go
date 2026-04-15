@@ -63,6 +63,7 @@ func runServer(args []string) {
 	bootstrapSvc := service.NewBootstrapService(localSvc)
 	updateSvc := service.NewUpdateService()
 	secSvc := service.NewSecurityService()
+	go secSvc.SyncFail2banConfig()
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
 	localSvc.ReconcileRouterCaddyBlock()

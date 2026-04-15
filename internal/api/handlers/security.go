@@ -18,6 +18,16 @@ func NewSecurityHandler(authSvc *service.AuthService, secSvc *service.SecuritySe
 	return &SecurityHandler{authSvc: authSvc, secSvc: secSvc}
 }
 
+// GET /api/security/stale-tokens
+func (h *SecurityHandler) StaleTokenAttempts(w http.ResponseWriter, r *http.Request) {
+	attempts, err := h.secSvc.StaleTokenAttempts()
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, attempts)
+}
+
 // GET /api/security/logs
 func (h *SecurityHandler) AuditLog(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, h.authSvc.AuditLog())

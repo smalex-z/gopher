@@ -28,6 +28,13 @@ export interface Fail2banConfig {
   ignore_ips: string[]
 }
 
+export interface StaleTokenAttempt {
+  token: string
+  ip: string
+  last_seen: string
+  count: number
+}
+
 export const securityApi = {
   auditLog: () =>
     client.get<{ data: AuditEvent[] }>('/security/logs').then(r => r.data.data),
@@ -43,4 +50,6 @@ export const securityApi = {
     client.post('/security/fail2ban/whitelist', { ip }).then(r => r.data),
   removeWhitelistIP: (ip: string) =>
     client.delete(`/security/fail2ban/whitelist/${encodeURIComponent(ip)}`).then(r => r.data),
+  staleTokenAttempts: () =>
+    client.get<{ data: StaleTokenAttempt[] }>('/security/stale-tokens').then(r => r.data.data),
 }
