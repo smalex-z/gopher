@@ -130,7 +130,14 @@ func (s *MonitorService) checkTunnel(t db.Tunnel) {
 }
 
 // probeTunnel connects directly to the rathole port and classifies the result.
-// For HTTP/HTTPS it sends a HEAD request first so the service actually responds.
+//
+// Strategy: first attempt a passive read (services like SSH, SMTP send a banner
+// immediately on connect). If nothing arrives within the deadline we fall back
+// to an HTTP HEAD probe — this covers the very common case of a tcp-typed
+// tunnel that actually fronts an HTTP service, and lets us distinguish
+// "rathole has no client" (HEAD disappears into rathole's buffer, second
+// timeout) from "client connected, HTTP service running" (HEAD elicits a
+// response).
 func probeTunnel(t db.Tunnel) string {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", t.RatholePort), 3*time.Second)
 	if err != nil {
@@ -138,9 +145,10 @@ func probeTunnel(t db.Tunnel) string {
 	}
 	defer conn.Close()
 
-	// For HTTP/HTTPS services we need to send a request before the server will
-	// send any data back.
-	if t.Protocol == "http" || t.Protocol == "https" {
+	isHTTP := t.Protocol == "http" || t.Protocol == "https"
+
+	// For HTTP/HTTPS send the probe request up front so the service responds.
+	if isHTTP {
 		_, _ = fmt.Fprintf(conn, "HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n")
 	}
 
@@ -151,12 +159,42 @@ func probeTunnel(t db.Tunnel) string {
 	if n > 0 {
 		return "active"
 	}
-	if netErr, ok := readErr.(net.Error); ok && netErr.Timeout() {
-		// Read deadline expired: rathole is holding the connection open waiting
-		// for a client — no client is connected.
-		return "offline"
+
+	isTimeout := func(e error) bool {
+		ne, ok := e.(net.Error)
+		return ok && ne.Timeout()
 	}
-	// EOF or connection reset: rathole forwarded to the client, the client
-	// couldn't reach the service, and closed the channel.
+
+	if isTimeout(readErr) {
+		if isHTTP {
+			// HTTP tunnel timed out — can't distinguish "no rathole client"
+			// from "client connected, service slow". Return "connected" so a
+			// running service is never falsely shown as offline.
+			return "connected"
+		}
+
+		// TCP tunnel: passive read timed out (service speaks first — SSH, SMTP,
+		// etc. — but nothing arrived). Fall back to an HTTP HEAD probe.
+		// • If a client IS connected and the service is HTTP, it will respond →
+		//   we get data → "active".
+		// • If no client is connected, rathole buffers the HEAD but can't
+		//   forward it → second read also times out → "offline".
+		// • If the service is non-HTTP passive (rare), second read times out
+		//   too → "offline" (acceptable: we can't confirm connectivity).
+		_, _ = fmt.Fprintf(conn, "HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n2, readErr2 := conn.Read(buf)
+		if n2 > 0 {
+			return "active"
+		}
+		if isTimeout(readErr2) {
+			return "offline"
+		}
+		// EOF after HEAD: rathole forwarded but service closed immediately.
+		return "idle"
+	}
+
+	// EOF or connection reset on first read: rathole forwarded to the client,
+	// the client couldn't reach the service, and closed the channel.
 	return "idle"
 }

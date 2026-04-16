@@ -126,15 +126,14 @@ func (h *TunnelHandler) Test(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := h.svc.Probe(tunnel)
-	if status != "active" {
-		msg := "Tunnel is offline — no client connected"
-		if status == "idle" {
-			msg = "Tunnel is connected but nothing is listening on port " + itoa(tunnel.LocalPort) + " on the client"
-		}
-		response.BadRequest(w, msg)
-		return
+	switch status {
+	case "active", "connected":
+		response.Success(w, map[string]string{"status": status})
+	case "idle":
+		response.BadRequest(w, "Tunnel is connected but nothing is listening on port "+itoa(tunnel.LocalPort)+" on the client")
+	default:
+		response.BadRequest(w, "Tunnel is offline — no client connected")
 	}
-	response.Success(w, map[string]string{"status": status})
 }
 
 func itoa(n int) string {
