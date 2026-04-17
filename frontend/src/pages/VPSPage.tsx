@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Copy, Check, ExternalLink, RefreshCw, Globe, Lock, ShieldAlert } from 'lucide-react'
+import { Copy, Check, ExternalLink, RefreshCw, Globe, Lock, ShieldAlert, Server, Network, Activity } from 'lucide-react'
 import { localApi } from '../api/local'
 import { updateApi } from '../api/update'
+import { machinesApi } from '../api/machines'
+import { tunnelsApi } from '../api/tunnels'
 import StatusBadge from '../components/StatusBadge'
 import { toast } from '../lib/toast'
 
@@ -29,11 +31,20 @@ export default function ServerPage() {
     queryFn: () => localApi.status(),
     refetchInterval: 15000,
   })
-
   const { data: updateInfo } = useQuery({
     queryKey: ['update-check'],
     queryFn: () => updateApi.check(),
     staleTime: 60_000,
+  })
+  const { data: machinesData } = useQuery({
+    queryKey: ['machines'],
+    queryFn: () => machinesApi.list(),
+    refetchInterval: 30000,
+  })
+  const { data: tunnelsData } = useQuery({
+    queryKey: ['tunnels'],
+    queryFn: () => tunnelsApi.list(),
+    refetchInterval: 30000,
   })
 
   const dashboardMutation = useMutation({
@@ -52,10 +63,14 @@ export default function ServerPage() {
 
   if (isLoading) return <div className="text-gray-400 text-center py-12">Loading…</div>
 
+  const machines = machinesData?.data ?? []
+  const tunnels = tunnelsData?.data ?? []
   const bothActive = status?.caddy_active === 'active' && status?.rathole_active === 'active'
+  const connectedMachines = machines.filter(m => m.status === 'active' || m.status === 'connected').length
+  const activeTunnels = tunnels.filter(t => t.status === 'active').length
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">This Server</h1>
@@ -66,157 +81,196 @@ export default function ServerPage() {
         </button>
       </div>
 
-      {/* Domain + overall status */}
-      <div className="bg-white rounded-xl shadow-sm border p-6">
-        <div className="flex items-center gap-3 mb-4">
-          <StatusBadge status={bothActive ? 'active' : 'inactive'} />
-          <span className="font-semibold text-gray-900">{status?.domain || 'No domain configured'}</span>
-        </div>
-        {status?.domain && (
-          <a
-            href={`https://router.${status.domain}`}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:underline"
-          >
-            <ExternalLink size={14} />
-            https://router.{status.domain}
-          </a>
-        )}
-        {!status?.domain && (
-          <p className="text-sm text-amber-600">
-            Domain not configured. Go through the setup wizard to set one.
-          </p>
-        )}
-      </div>
+      <div className="grid grid-cols-3 gap-6">
+        {/* Left column — main panels */}
+        <div className="col-span-2 space-y-6">
 
-      {/* Service status */}
-      <div className="bg-white rounded-xl shadow-sm border p-6">
-        <h2 className="text-base font-semibold text-gray-900 mb-3">Systemd Services</h2>
-        <div className="divide-y">
-          <ServiceRow label="caddy.service (reverse proxy)" active={status?.caddy_installed ? (status.caddy_active || 'unknown') : 'not-installed'} />
-          <ServiceRow label="rathole-server.service (tunnel server)" active={status?.rathole_installed ? (status.rathole_active || 'unknown') : 'not-installed'} />
-        </div>
-      </div>
-
-      {/* Port access */}
-      <div className="bg-white rounded-xl shadow-sm border p-6">
-        <h2 className="text-base font-semibold text-gray-900 mb-4">Port Access</h2>
-        <div className="space-y-4">
-          {/* Port 22 — always open */}
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="text-sm font-medium text-gray-800">Port 22 — VPS SSH</div>
-              <div className="text-xs text-gray-500 mt-0.5">
-                Always open. Required for server management — closing it via iptables risks permanent lockout.
-                To restrict by IP, use the Firewall tab custom rules (e.g. <code className="bg-gray-100 px-1 rounded">-s 1.2.3.4 -p tcp --dport 22 -j ACCEPT</code> then drop all others).
-              </div>
+          {/* Domain + overall status */}
+          <div className="bg-white rounded-xl shadow-sm border p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <StatusBadge status={bothActive ? 'active' : 'inactive'} />
+              <span className="font-semibold text-gray-900">{status?.domain || 'No domain configured'}</span>
             </div>
-            <span className="shrink-0 text-xs font-medium px-2 py-1 rounded-full bg-green-100 text-green-700 flex items-center gap-1">
-              <Globe size={11} /> Public
-            </span>
+            {status?.domain && (
+              <a
+                href={`https://router.${status.domain}`}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:underline"
+              >
+                <ExternalLink size={14} />
+                https://router.{status.domain}
+              </a>
+            )}
+            {!status?.domain && (
+              <p className="text-sm text-amber-600">
+                Domain not configured. Go through the setup wizard to set one.
+              </p>
+            )}
           </div>
 
-          {/* Port 80/443 — Caddy */}
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="text-sm font-medium text-gray-800">Ports 80 / 443 — HTTP/HTTPS</div>
-              <div className="text-xs text-gray-500 mt-0.5">Always open when Caddy is configured.</div>
+          {/* Service status */}
+          <div className="bg-white rounded-xl shadow-sm border p-6">
+            <h2 className="text-base font-semibold text-gray-900 mb-3">Systemd Services</h2>
+            <div className="divide-y">
+              <ServiceRow label="caddy.service (reverse proxy)" active={status?.caddy_installed ? (status.caddy_active || 'unknown') : 'not-installed'} />
+              <ServiceRow label="rathole-server.service (tunnel server)" active={status?.rathole_installed ? (status.rathole_active || 'unknown') : 'not-installed'} />
             </div>
-            <span className="shrink-0 text-xs font-medium px-2 py-1 rounded-full bg-green-100 text-green-700 flex items-center gap-1">
-              <Globe size={11} /> Public
-            </span>
           </div>
 
-          {/* Dashboard port — toggleable */}
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="text-sm font-medium text-gray-800">Port {status?.dashboard_port ?? 4321} — Gopher dashboard</div>
-              <div className="text-xs text-gray-500 mt-0.5">
-                {status?.dashboard_private
-                  ? <>Restricted to localhost. Access via <code className="bg-gray-100 px-1 rounded">router.{status.domain}</code>.</>
-                  : 'Publicly accessible. Anyone who knows the port can reach the dashboard login.'}
+          {/* Port access */}
+          <div className="bg-white rounded-xl shadow-sm border p-6">
+            <h2 className="text-base font-semibold text-gray-900 mb-4">Port Access</h2>
+            <div className="space-y-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-medium text-gray-800">Port 22 — VPS SSH</div>
+                  <div className="text-xs text-gray-500 mt-0.5">
+                    Always open. Required for server management — closing it via iptables risks permanent lockout.
+                    To restrict by IP, use the Firewall tab custom rules (e.g. <code className="bg-gray-100 px-1 rounded">-s 1.2.3.4 -p tcp --dport 22 -j ACCEPT</code> then drop all others).
+                  </div>
+                </div>
+                <span className="shrink-0 text-xs font-medium px-2 py-1 rounded-full bg-green-100 text-green-700 flex items-center gap-1">
+                  <Globe size={11} /> Public
+                </span>
               </div>
-              {!status?.domain && (
-                <div className="text-xs text-amber-600 mt-0.5 flex items-center gap-1">
-                  <ShieldAlert size={11} /> No domain configured — dashboard port must stay public.
+
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-medium text-gray-800">Ports 80 / 443 — HTTP/HTTPS</div>
+                  <div className="text-xs text-gray-500 mt-0.5">Always open when Caddy is configured.</div>
+                </div>
+                <span className="shrink-0 text-xs font-medium px-2 py-1 rounded-full bg-green-100 text-green-700 flex items-center gap-1">
+                  <Globe size={11} /> Public
+                </span>
+              </div>
+
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-medium text-gray-800">Port {status?.dashboard_port ?? 4321} — Gopher dashboard</div>
+                  <div className="text-xs text-gray-500 mt-0.5">
+                    {status?.dashboard_private
+                      ? <>Restricted to localhost. Access via <code className="bg-gray-100 px-1 rounded">router.{status.domain}</code>.</>
+                      : 'Publicly accessible. Anyone who knows the port can reach the dashboard login.'}
+                  </div>
+                  {!status?.domain && (
+                    <div className="text-xs text-amber-600 mt-0.5 flex items-center gap-1">
+                      <ShieldAlert size={11} /> No domain configured — dashboard port must stay public.
+                    </div>
+                  )}
+                </div>
+                <div className="shrink-0 flex gap-1.5">
+                  <button
+                    onClick={() => dashboardMutation.mutate(false)}
+                    disabled={dashboardMutation.isPending || !status?.dashboard_private}
+                    className={`text-xs font-medium px-2.5 py-1 rounded-lg border transition-colors flex items-center gap-1 ${
+                      !status?.dashboard_private
+                        ? 'bg-green-600 text-white border-green-600'
+                        : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50 disabled:opacity-50'
+                    }`}
+                  >
+                    <Globe size={11} /> Public
+                  </button>
+                  <button
+                    onClick={() => dashboardMutation.mutate(true)}
+                    disabled={dashboardMutation.isPending || status?.dashboard_private || !status?.domain || status?.firewall_mode !== 'gopher'}
+                    title={!status?.domain ? 'Requires domain + Caddy' : status?.firewall_mode !== 'gopher' ? 'Requires Gopher-managed firewall' : undefined}
+                    className={`text-xs font-medium px-2.5 py-1 rounded-lg border transition-colors flex items-center gap-1 ${
+                      status?.dashboard_private
+                        ? 'bg-slate-700 text-white border-slate-700'
+                        : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed'
+                    }`}
+                  >
+                    <Lock size={11} /> Caddy only
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        {/* Right column */}
+        <div className="space-y-6">
+
+          {/* Quick stats */}
+          <div className="bg-white rounded-xl shadow-sm border p-5 space-y-4">
+            <h2 className="text-base font-semibold text-gray-900">Overview</h2>
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-blue-50 rounded-lg">
+                  <Server size={14} className="text-blue-500" />
+                </div>
+                <div>
+                  <div className="text-xs text-gray-400">Machines</div>
+                  <div className="text-sm font-semibold text-gray-800">{connectedMachines} / {machines.length} connected</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-green-50 rounded-lg">
+                  <Network size={14} className="text-green-500" />
+                </div>
+                <div>
+                  <div className="text-xs text-gray-400">Tunnels</div>
+                  <div className="text-sm font-semibold text-gray-800">{activeTunnels} / {tunnels.length} active</div>
+                </div>
+              </div>
+              {status?.os_user && (
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-gray-50 rounded-lg">
+                    <Activity size={14} className="text-gray-400" />
+                  </div>
+                  <div>
+                    <div className="text-xs text-gray-400">Running as</div>
+                    <div className="text-sm font-semibold text-gray-800 font-mono">{status.os_user}</div>
+                  </div>
                 </div>
               )}
             </div>
-            <div className="shrink-0 flex gap-1.5">
-              <button
-                onClick={() => dashboardMutation.mutate(false)}
-                disabled={dashboardMutation.isPending || !status?.dashboard_private}
-                className={`text-xs font-medium px-2.5 py-1 rounded-lg border transition-colors flex items-center gap-1 ${
-                  !status?.dashboard_private
-                    ? 'bg-green-600 text-white border-green-600'
-                    : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50 disabled:opacity-50'
-                }`}
-              >
-                <Globe size={11} /> Public
-              </button>
-              <button
-                onClick={() => dashboardMutation.mutate(true)}
-                disabled={dashboardMutation.isPending || status?.dashboard_private || !status?.domain || status?.firewall_mode !== 'gopher'}
-                title={!status?.domain ? 'Requires domain + Caddy' : status?.firewall_mode !== 'gopher' ? 'Requires Gopher-managed firewall' : undefined}
-                className={`text-xs font-medium px-2.5 py-1 rounded-lg border transition-colors flex items-center gap-1 ${
-                  status?.dashboard_private
-                    ? 'bg-slate-700 text-white border-slate-700'
-                    : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed'
-                }`}
-              >
-                <Lock size={11} /> Caddy only
-              </button>
+          </div>
+
+          {/* Version */}
+          {updateInfo && (
+            <div className="bg-white rounded-xl shadow-sm border p-5">
+              <h2 className="text-base font-semibold text-gray-900 mb-3">Gopher Version</h2>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-gray-400">Installed</span>
+                  <span className="text-sm font-mono text-gray-700">{updateInfo.current_version}</span>
+                </div>
+                {updateInfo.update_available ? (
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-gray-400">Available</span>
+                    <span className="text-xs text-emerald-600 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                      {updateInfo.latest_version}
+                    </span>
+                  </div>
+                ) : (
+                  <p className="text-xs text-gray-400">Up to date</p>
+                )}
+              </div>
             </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Version */}
-      {updateInfo && (
-        <div className="bg-white rounded-xl shadow-sm border p-6">
-          <h2 className="text-base font-semibold text-gray-900 mb-3">Gopher Version</h2>
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-mono text-gray-700">{updateInfo.current_version}</span>
-            {updateInfo.update_available && (
-              <span className="text-xs text-emerald-600 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
-                {updateInfo.latest_version} available
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* SSH public key */}
-      <div className="bg-white rounded-xl shadow-sm border p-6">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-base font-semibold text-gray-900">Server SSH Public Key</h2>
-          {status?.ssh_public_key && (
-            <button onClick={copyKey} className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700">
-              {keyCopied ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
-              {keyCopied ? 'Copied!' : 'Copy'}
-            </button>
           )}
+
+          {/* SSH public key — collapsed by default, for advanced use */}
+          {status?.ssh_public_key && (
+            <div className="bg-white rounded-xl shadow-sm border p-5">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-sm font-semibold text-gray-700">Server Public Key</h2>
+                <button onClick={copyKey} className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-700">
+                  {keyCopied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
+                  {keyCopied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+              <p className="text-xs text-gray-400 mb-2">Added to bootstrapped machines' <code className="bg-gray-100 px-0.5 rounded">authorized_keys</code> automatically.</p>
+              <div className="bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-mono text-gray-500 break-all leading-relaxed">
+                {status.ssh_public_key.slice(0, 60)}…
+              </div>
+            </div>
+          )}
+
         </div>
-        {status?.ssh_public_key ? (
-          <>
-            <textarea
-              readOnly
-              value={status.ssh_public_key}
-              rows={3}
-              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs font-mono bg-gray-50 text-gray-600 resize-none focus:outline-none"
-            />
-            <p className="text-xs text-gray-400 mt-1">
-              This key is automatically added to <code>~/.ssh/authorized_keys</code> on every bootstrapped machine so Gopher can SSH back in through the tunnel.
-            </p>
-          </>
-        ) : (
-          <p className="text-sm text-gray-400">
-            Generated automatically when the first machine bootstraps.
-          </p>
-        )}
       </div>
     </div>
   )
 }
-
