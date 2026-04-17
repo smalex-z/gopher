@@ -40,6 +40,9 @@ export interface Tunnel {
   transport?: string   // "tcp" (default) | "udp"
   no_tls?: boolean     // skip Caddy TLS; use plain http://
   private?: boolean    // bind 127.0.0.1 (VPS-local only)
+  bot_protection_enabled?: boolean
+  bot_protection_ttl?: number      // seconds; 0 = default (86400)
+  bot_protection_allow_ip?: string // JSON array of CIDR/IP strings
   status: string
   managed?: boolean
   kind?: string

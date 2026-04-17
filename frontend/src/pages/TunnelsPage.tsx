@@ -19,9 +19,26 @@ interface FormState {
   transport: string
   no_tls: boolean
   private: boolean
+  bot_protection_enabled: boolean
+  bot_protection_ttl: number    // stored as seconds; 0 = default
+  bot_protection_allow_ip: string // newline-delimited in the textarea, JSON on wire
 }
 
-const defaultForm: FormState = { machine_id: '', name: '', subdomain: '', local_port: 3000, rathole_port: 0, transport: 'tcp', no_tls: false, private: false }
+const defaultForm: FormState = {
+  machine_id: '', name: '', subdomain: '', local_port: 3000, rathole_port: 0,
+  transport: 'tcp', no_tls: false, private: false,
+  bot_protection_enabled: false, bot_protection_ttl: 0, bot_protection_allow_ip: '',
+}
+
+function cidrToJSON(raw: string): string {
+  const entries = raw.split('\n').map(s => s.trim()).filter(Boolean)
+  return entries.length > 0 ? JSON.stringify(entries) : ''
+}
+
+function allowIPDisplay(json: string): string {
+  if (!json) return ''
+  try { return (JSON.parse(json) as string[]).join('\n') } catch { return json }
+}
 
 export default function TunnelsPage() {
   const qc = useQueryClient()
@@ -225,6 +242,9 @@ export default function TunnelsPage() {
                         )}
                         {t.no_tls && t.subdomain && (
                           <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">HTTP</span>
+                        )}
+                        {t.bot_protection_enabled && (
+                          <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-orange-50 text-orange-700 border border-orange-200">Bot Shield</span>
                         )}
                       </div>
                     </td>
@@ -447,6 +467,57 @@ export default function TunnelsPage() {
                   )}
                 </div>
               ) : null}
+
+              {/* Bot Protection — only relevant when there's a subdomain to route through */}
+              {routingEnabled && form.transport !== 'udp' && form.subdomain.trim() !== '' && (
+                <div className="border border-gray-200 rounded-lg p-3 space-y-3">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={form.bot_protection_enabled}
+                      onChange={e => setForm(f => ({ ...f, bot_protection_enabled: e.target.checked }))}
+                      className="rounded"
+                    />
+                    <span className="text-sm font-medium text-gray-700">Bot Protection <span className="text-orange-600 text-xs font-semibold">Alpha</span></span>
+                    <span className="text-xs text-gray-400 font-normal">JS proof-of-work challenge for browsers</span>
+                  </label>
+                  {form.bot_protection_enabled && (
+                    <div className="space-y-3 pl-5">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">
+                          Session TTL (hours) <span className="text-gray-400 font-normal">— 0 = 24 h default</span>
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={form.bot_protection_ttl === 0 ? '' : Math.round(form.bot_protection_ttl / 3600)}
+                          onChange={e => setForm(f => ({
+                            ...f,
+                            bot_protection_ttl: e.target.value === '' ? 0 : Number(e.target.value) * 3600,
+                          }))}
+                          placeholder="24"
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">
+                          IP Allowlist <span className="text-gray-400 font-normal">— one CIDR or IP per line, bypasses challenge</span>
+                        </label>
+                        <textarea
+                          rows={3}
+                          value={allowIPDisplay(form.bot_protection_allow_ip)}
+                          onChange={e => setForm(f => ({ ...f, bot_protection_allow_ip: cidrToJSON(e.target.value) }))}
+                          placeholder={"192.168.1.0/24\n10.0.0.1"}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none"
+                        />
+                      </div>
+                      <p className="text-xs text-orange-700 bg-orange-50 border border-orange-100 rounded px-2 py-1.5">
+                        API clients (Accept: application/json) receive 403. WebSocket connections are allowed after the cookie is set. Does not protect against L3/L4 attacks.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
               <button onClick={() => setModal({ isOpen: false })} className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm">Cancel</button>

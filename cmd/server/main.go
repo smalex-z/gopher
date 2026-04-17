@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/smalex-z/gopher/internal/api"
 	"github.com/smalex-z/gopher/internal/db"
+	"github.com/smalex-z/gopher/internal/proxy"
 	"github.com/smalex-z/gopher/internal/service"
 )
 
@@ -69,6 +71,23 @@ func runServer(args []string) {
 	localSvc.ReconcileRouterCaddyBlock()
 	localSvc.ReconcileAuthorizedKeys()
 
+	// Bot-protection middleware — runs inside the existing server, no extra port.
+	botMiddleware, botErr := proxy.NewMiddleware()
+	if botErr != nil {
+		log.Fatalf("Failed to create bot-protection middleware: %v", botErr)
+	}
+
+	// Purge expired bot sessions hourly.
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := db.PurgeBotSessions(); err != nil {
+				log.Printf("bot session purge: %v", err)
+			}
+		}
+	}()
+
 	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc)
 
 	mux := http.NewServeMux()
@@ -83,7 +102,7 @@ func runServer(args []string) {
 	}
 
 	log.Printf("Server starting on :%s", *port)
-	if err := http.ListenAndServe(":"+*port, mux); err != nil {
+	if err := http.ListenAndServe(":"+*port, botMiddleware.Wrap(mux)); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }

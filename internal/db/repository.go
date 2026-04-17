@@ -337,3 +337,27 @@ func CreateFirewallRule(rule *FirewallRule) error {
 func DeleteFirewallRule(id string) error {
 	return DB.Delete(&FirewallRule{}, "id = ?", id).Error
 }
+
+// Bot Session Repository
+
+// GetTunnelBySubdomain returns the tunnel with the given subdomain value.
+func GetTunnelBySubdomain(subdomain string) (*Tunnel, error) {
+	var t Tunnel
+	if err := DB.Where("subdomain = ?", subdomain).First(&t).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "tunnel", ID: subdomain}
+		}
+		return nil, err
+	}
+	return &t, nil
+}
+
+// CreateBotSession persists a newly issued bot challenge session.
+func CreateBotSession(s *BotSession) error {
+	return DB.Create(s).Error
+}
+
+// PurgeBotSessions deletes all expired bot sessions.
+func PurgeBotSessions() error {
+	return DB.Where("expires_at < ?", gorm.Expr("datetime('now')")).Delete(&BotSession{}).Error
+}
