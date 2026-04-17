@@ -47,12 +47,20 @@ func (s *LocalSetupService) ReconcileRouterCaddyBlock() {
 	_ = exec.Command("sudo", "systemctl", "reload-or-restart", "caddy").Run() // #nosec G204
 }
 
-func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool) string {
+func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool, botProtected bool) string {
 	scheme := ""
 	if noTLS {
 		scheme = "http://"
 	}
-	return fmt.Sprintf("%s%s.%s {\n    reverse_proxy localhost:%d\n}\n", scheme, subdomain, domain, ratholePort)
+	// Bot-protected tunnels route through the Gopher server itself (same port
+	// as the dashboard) so the bot-protection middleware can intercept requests
+	// before they reach rathole. Host header routing distinguishes tunnel
+	// traffic from dashboard traffic.
+	upstreamPort := ratholePort
+	if botProtected {
+		upstreamPort = dashboardPort
+	}
+	return fmt.Sprintf("%s%s.%s {\n    reverse_proxy localhost:%d\n}\n", scheme, subdomain, domain, upstreamPort)
 }
 
 func extractCaddyCustomBody(content string) string {

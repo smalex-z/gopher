@@ -2,6 +2,16 @@ package db
 
 import "time"
 
+// BotSession records a browser that has passed the PoW challenge for a tunnel.
+type BotSession struct {
+	ID        string    `json:"id" gorm:"primaryKey"`
+	TunnelID  string    `json:"tunnel_id" gorm:"index"`
+	IP        string    `json:"ip"`
+	UserAgent string    `json:"user_agent"`
+	IssuedAt  time.Time `json:"issued_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 type VPSConfig struct {
 	ID            string    `json:"id" gorm:"primaryKey"`
 	Host          string    `json:"host"`
@@ -46,6 +56,10 @@ type Tunnel struct {
 	Transport    string    `json:"transport"`  // "tcp" (default) or "udp"
 	NoTLS        bool      `json:"no_tls"`     // skip Caddy HTTPS; use plain http://
 	Private      bool      `json:"private"`    // bind 127.0.0.1 (VPS-local only) instead of 0.0.0.0
+	// Bot protection — opt-in per tunnel, HTTP subdomain tunnels only.
+	BotProtectionEnabled bool   `json:"bot_protection_enabled"`
+	BotProtectionTTL     int    `json:"bot_protection_ttl"`      // session TTL in seconds; 0 = default (86400)
+	BotProtectionAllowIP string `json:"bot_protection_allow_ip"` // JSON array of CIDR/IP strings
 	Status       string    `json:"status"`
 	Managed      bool      `json:"managed,omitempty" gorm:"-"`
 	Kind         string    `json:"kind,omitempty" gorm:"-"`

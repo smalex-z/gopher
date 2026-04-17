@@ -24,6 +24,7 @@ func SetDashboardPort(port int) {
 	dashboardPort = port
 }
 
+
 // LocalServiceStatus is returned by GET /api/local/status.
 type LocalServiceStatus struct {
 	CaddyInstalled       bool   `json:"caddy_installed"`

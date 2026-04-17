@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"log"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -156,21 +157,27 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 		}
 	}
 
+	// Bot protection requires a subdomain (needs Host-header routing through proxy).
+	botProtection := req.BotProtectionEnabled && req.Subdomain != "" && transport != "udp"
+
 	tunnel := &db.Tunnel{
-		ID:           shortToken(),
-		MachineID:    req.MachineID,
-		Name:         req.Name,
-		Subdomain:    req.Subdomain,
-		LocalPort:    req.LocalPort,
-		RatholePort:  ratholePort,
-		RatholeToken: shortToken(),
-		Protocol:     "tcp",
-		Transport:    transport,
-		NoTLS:        req.NoTLS,
-		Private:      req.Private,
-		Status:       "inactive",
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		ID:                   shortToken(),
+		MachineID:            req.MachineID,
+		Name:                 req.Name,
+		Subdomain:            req.Subdomain,
+		LocalPort:            req.LocalPort,
+		RatholePort:          ratholePort,
+		RatholeToken:         shortToken(),
+		Protocol:             "tcp",
+		Transport:            transport,
+		NoTLS:                req.NoTLS,
+		Private:              req.Private,
+		BotProtectionEnabled: botProtection,
+		BotProtectionTTL:     req.BotProtectionTTL,
+		BotProtectionAllowIP: req.BotProtectionAllowIP,
+		Status:               "inactive",
+		CreatedAt:            time.Now(),
+		UpdatedAt:            time.Now(),
 	}
 
 	if err := db.CreateTunnel(tunnel); err != nil {
@@ -236,6 +243,7 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 	}
 
 	oldPrivate := tunnel.Private
+	oldBotProtection := tunnel.BotProtectionEnabled
 	tunnel.Name = req.Name
 	tunnel.LocalPort = req.LocalPort
 	tunnel.Private = req.Private
@@ -243,6 +251,10 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 	if req.Private {
 		tunnel.Subdomain = ""
 	}
+	// Bot protection requires a subdomain and TCP transport.
+	tunnel.BotProtectionEnabled = req.BotProtectionEnabled && tunnel.Subdomain != "" && tunnel.Transport != "udp"
+	tunnel.BotProtectionTTL = req.BotProtectionTTL
+	tunnel.BotProtectionAllowIP = req.BotProtectionAllowIP
 	tunnel.UpdatedAt = time.Now()
 
 	if err := db.UpdateTunnel(tunnel); err != nil {
@@ -256,6 +268,20 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 			log.Printf("tunnel update: reconcile failed: %v", err)
 		}
 		ApplyTunnelPort(tunnel.RatholePort, tunnel.Transport, tunnel.Private)
+	}
+
+	// If bot protection toggled, rewrite the Caddy block so the upstream
+	// switches between rathole port (unprotected) and proxy port (protected).
+	if oldBotProtection != tunnel.BotProtectionEnabled && tunnel.Subdomain != "" && s.local != nil {
+		if svcSettings, svcErr := db.GetSettings(); svcErr == nil && svcSettings.Domain != "" {
+			managedPath := managedTunnelCaddyPath(tunnel.ID)
+			block := buildTunnelCaddyBlock(tunnel.Subdomain, svcSettings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled)
+			if writeErr := writeLocalFile(managedPath, block); writeErr != nil {
+				log.Printf("tunnel update: failed to rewrite Caddy block for %s: %v", tunnel.ID, writeErr)
+			} else {
+				_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
+			}
+		}
 	}
 
 	return tunnel, nil
