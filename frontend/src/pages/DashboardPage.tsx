@@ -322,11 +322,6 @@ export default function DashboardPage() {
       >
         <div className="flex items-center gap-2">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-gray-400">
-            <circle cx="3" cy="8" r="2"/>
-            <circle cx="13" cy="3" r="2"/>
-            <circle cx="13" cy="13" r="2"/>
-            <line x1="5" y1="7.3" x2="11" y2="3.7"/>
-            <line x1="5" y1="8.7" x2="11" y2="12.3"/>
           </svg>
           <span className="text-sm font-medium text-gray-600">Network Map</span>
           <span className="text-xs text-gray-400">— visual overview of all tunnels and machines</span>
