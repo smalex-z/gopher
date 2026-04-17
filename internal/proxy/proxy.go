@@ -73,11 +73,24 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 func (m *Middleware) handleProxy(w http.ResponseWriter, r *http.Request, tunnel *db.Tunnel) {
 	ip := clientIP(r)
 
+	// IP allowlist: bypass everything.
 	if isIPAllowed(tunnel.BotProtectionAllowIP, ip) {
 		m.forward(w, r, tunnel)
 		return
 	}
 
+	// Valid cookie: forward unconditionally — this covers both normal page
+	// requests and browser-side fetch/XHR calls (which send Accept:
+	// application/json). Once the browser has passed the challenge, all of
+	// its requests work regardless of Accept header.
+	if m.hasCookie(r, tunnel) {
+		m.forward(w, r, tunnel)
+		return
+	}
+
+	// No valid cookie from here on. Decide how to respond based on client type.
+
+	// API/non-browser clients can't complete an HTML challenge; return JSON.
 	if isAPIClient(r) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
@@ -85,18 +98,9 @@ func (m *Middleware) handleProxy(w http.ResponseWriter, r *http.Request, tunnel 
 		return
 	}
 
-	// WebSocket: valid cookie required; can't show an HTML challenge over WS.
+	// WebSocket upgrades can't display a challenge page either.
 	if isWebSocketUpgrade(r) {
-		if !m.hasCookie(r, tunnel) {
-			http.Error(w, "403 Forbidden — complete browser verification first", http.StatusForbidden)
-			return
-		}
-		m.forward(w, r, tunnel)
-		return
-	}
-
-	if m.hasCookie(r, tunnel) {
-		m.forward(w, r, tunnel)
+		http.Error(w, "403 Forbidden — complete browser verification first", http.StatusForbidden)
 		return
 	}
 

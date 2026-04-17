@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { Network, ClipboardCopy, ArrowRight, Globe, Lock, Terminal } from 'lucide-react'
+import { Network, ClipboardCopy, ArrowRight, Globe, Lock, Terminal, Info, AlertTriangle } from 'lucide-react'
 import { tunnelsApi } from '../api/tunnels'
 import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
@@ -359,7 +359,22 @@ export default function TunnelsPage() {
                   )}
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Visibility</label>
+                  <div className="flex items-center gap-1 mb-2">
+                    <label className="block text-sm font-medium text-gray-700">Visibility</label>
+                    <span className="relative group">
+                      <Info size={13} className="text-gray-400 cursor-help" />
+                      <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-64 bg-gray-900 text-white text-xs rounded-lg px-3 py-2 hidden group-hover:block z-50 shadow-lg pointer-events-none">
+                        <p><strong>Private</strong> binds 127.0.0.1 — the port is only reachable from the VPS itself, not the public internet.</p>
+                        <p className="mt-1"><strong>Public</strong> binds 0.0.0.0 — the port is open on all interfaces.</p>
+                        {routingEnabled && form.subdomain.trim() !== '' && (
+                          <p className="mt-1 text-blue-300">Since you have a subdomain configured, traffic will be routed through Caddy — keeping the port private is recommended.</p>
+                        )}
+                        {routingEnabled && form.subdomain.trim() === '' && (
+                          <p className="mt-1 text-gray-400">If you add a subdomain, Caddy will handle routing and you can safely keep the port private.</p>
+                        )}
+                      </div>
+                    </span>
+                  </div>
                   <div className="flex gap-2">
                     {([false, true] as const).map(priv => (
                       <button key={String(priv)} type="button"
@@ -373,9 +388,6 @@ export default function TunnelsPage() {
                       </button>
                     ))}
                   </div>
-                  {form.private && (
-                    <p className="text-xs text-slate-600 mt-1">Binds 127.0.0.1 — VPS-local only.</p>
-                  )}
                 </div>
               </div>
 
@@ -431,44 +443,48 @@ export default function TunnelsPage() {
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Subdomain
-                    <span className="ml-1 font-normal text-gray-400 text-xs">(optional — HTTP web apps only)</span>
+                    <span className="ml-1 font-normal text-gray-400 text-xs">(optional — exposes service via HTTPS subdomain)</span>
                   </label>
                   <input type="text" value={form.subdomain} onChange={e => setForm(f => ({ ...f, subdomain: e.target.value }))} placeholder="photos"
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                  {form.subdomain && (
-                    <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800 mt-2">
-                      <strong>HTTP traffic only via subdomain.</strong> Caddy proxies subdomain → local port over plain HTTP.
-                      For raw TCP (SSH, databases), use the server port directly — no subdomain needed.
-                    </div>
-                  )}
-                  {domain && form.subdomain ? (
-                    <>
-                      <div className={`mt-1 text-xs px-2 py-1 rounded font-mono ${form.private ? 'bg-slate-50 text-slate-700' : 'bg-blue-50 text-blue-700'}`}>
-                        {form.no_tls ? 'http' : 'https'}://{form.subdomain}.{domain} → localhost:{form.local_port}
-                      </div>
-                      {form.private && (
-                        <p className="text-xs text-slate-500 mt-1">
-                          Subdomain routes through Caddy — accessible publicly via reverse proxy even though the tunnel port is localhost-only.
+                  {form.subdomain ? (
+                    <div className="mt-2 space-y-2">
+                      {domain && (
+                        <div className="text-xs px-2 py-1 rounded font-mono bg-blue-50 text-blue-700">
+                          {form.no_tls ? 'http' : 'https'}://{form.subdomain}.{domain} → localhost:{form.local_port}
+                        </div>
+                      )}
+                      {/* Contextual hint — SSH port escalates to a warning */}
+                      {form.local_port === 22 ? (
+                        <p className="flex items-start gap-1.5 text-xs text-amber-700">
+                          <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                          Port 22 is SSH — subdomain routing only works for HTTP/HTTPS. SSH connections use the server port directly, not a subdomain.
+                        </p>
+                      ) : (
+                        <p className="flex items-start gap-1.5 text-xs text-gray-400">
+                          <Info size={13} className="mt-0.5 shrink-0" />
+                          Subdomain routing is HTTP/HTTPS only. For SSH or databases, connect via the server port directly — no subdomain needed.
                         </p>
                       )}
-                      <label className="flex items-center gap-2 mt-2 text-sm text-gray-700 cursor-pointer select-none">
-                        <input type="checkbox" checked={form.no_tls}
-                          onChange={e => setForm(f => ({ ...f, no_tls: e.target.checked }))}
-                          className="rounded" />
-                        <span>HTTP only <span className="text-gray-400 font-normal text-xs">(skip TLS certificate — useful for internal services)</span></span>
-                      </label>
-                    </>
+                      {domain && (
+                        <div className="border border-gray-200 rounded-lg p-3">
+                          <label className="flex items-center gap-2 cursor-pointer select-none">
+                            <input type="checkbox" checked={!form.no_tls}
+                              onChange={e => setForm(f => ({ ...f, no_tls: !e.target.checked }))}
+                              className="rounded" />
+                            <span className="text-sm font-medium text-gray-700">HTTPS</span>
+                            <span className="text-xs text-gray-400 font-normal">auto-provision TLS certificate via Caddy</span>
+                          </label>
+                        </div>
+                      )}
+                    </div>
                   ) : (
-                    <p className="text-xs text-gray-400 mt-1">
-                      {form.private
-                        ? 'Subdomain routes via Caddy reverse proxy. Leave blank for localhost-only access.'
-                        : 'Leave blank to skip HTTP subdomain routing.'}
-                    </p>
+                    <p className="text-xs text-gray-400 mt-1">Leave blank to expose by port only.</p>
                   )}
                 </div>
               ) : null}
 
-              {/* Bot Protection — only relevant when there's a subdomain to route through */}
+              {/* Bot Protection — requires subdomain (Host-header routing) */}
               {routingEnabled && form.transport !== 'udp' && form.subdomain.trim() !== '' && (
                 <div className="border border-gray-200 rounded-lg p-3 space-y-3">
                   <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -478,7 +494,7 @@ export default function TunnelsPage() {
                       onChange={e => setForm(f => ({ ...f, bot_protection_enabled: e.target.checked }))}
                       className="rounded"
                     />
-                    <span className="text-sm font-medium text-gray-700">Bot Protection <span className="text-orange-600 text-xs font-semibold">Alpha</span></span>
+                    <span className="text-sm font-medium text-gray-700">Bot Protection <span className="bg-orange-100 text-orange-700 text-xs font-semibold px-1.5 py-0.5 rounded">Alpha</span></span>
                     <span className="text-xs text-gray-400 font-normal">JS proof-of-work challenge for browsers</span>
                   </label>
                   {form.bot_protection_enabled && (

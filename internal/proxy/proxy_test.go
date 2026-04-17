@@ -186,6 +186,61 @@ func TestAPIClientGets403JSON(t *testing.T) {
 	}
 }
 
+// Once a browser passes the challenge, its own fetch() calls (which send
+// Accept: application/json) must also be forwarded — not blocked.
+func TestBrowserFetchWithCookieIsForwarded(t *testing.T) {
+	initDB(t)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	makeTunnel(t, "tun-fetch", "fetchapp", extractPort(t, backend.URL), true)
+
+	mw, _ := proxy.NewMiddleware()
+	h := mw.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+
+	// First: get a real cookie by solving PoW.
+	req1 := httptest.NewRequest("GET", "/", nil)
+	req1.Host = "fetchapp.example.com"
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req1)
+	nonce := extractNonce(t, rec1.Body.String())
+	solution := solvePoW(nonce, 5)
+
+	form := url.Values{"nonce": {nonce}, "solution": {solution}, "redirect": {"/"}}
+	req2 := httptest.NewRequest("POST", "/bot-verify", strings.NewReader(form.Encode()))
+	req2.Host = "fetchapp.example.com"
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	cookies := rec2.Result().Cookies()
+	var botCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == "gopher_bot_pass" {
+			botCookie = c
+		}
+	}
+	if botCookie == nil {
+		t.Fatal("no cookie issued")
+	}
+
+	// Now make a fetch-style request (Accept: application/json) WITH the cookie.
+	req3 := httptest.NewRequest("GET", "/api/items", nil)
+	req3.Host = "fetchapp.example.com"
+	req3.Header.Set("Accept", "application/json")
+	req3.AddCookie(botCookie)
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, req3)
+
+	if rec3.Code == http.StatusForbidden {
+		t.Error("browser fetch with valid cookie should not be blocked")
+	}
+}
+
 func TestWebSocketWithoutCookie_Rejected(t *testing.T) {
 	initDB(t)
 	makeTunnel(t, "tun-ws", "ws-protected", 20103, true)
