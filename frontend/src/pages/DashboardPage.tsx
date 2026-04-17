@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
   Server, Globe, Shield, Key, ArrowRight,
-  ShieldCheck, ShieldOff, Lock, Wifi, WifiOff,
+  ShieldCheck, ShieldOff, Lock, Wifi, WifiOff, Network, Monitor,
 } from 'lucide-react'
 import { machinesApi } from '../api/machines'
 import { tunnelsApi } from '../api/tunnels'
@@ -314,7 +314,6 @@ export default function DashboardPage() {
         </Card>
 
       </div>
-
       {/* Network map link */}
       <button
         onClick={() => navigate('/network')}
@@ -333,6 +332,35 @@ export default function DashboardPage() {
         </div>
         <ArrowRight size={14} className="text-gray-300 group-hover:text-blue-500 transition-colors" />
       </button>
+      {/* ── Activity Timeline ──────────────────────────────────────────── */}
+      {(() => {
+        const timeline = [
+          ...machines.map(m => ({ type: 'machine' as const, name: m.name, at: m.created_at })),
+          ...tunnels.map(t => ({ type: 'tunnel' as const, name: t.name, at: t.created_at })),
+        ].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime()).slice(0, 8)
+
+        return timeline.length > 0 ? (
+          <div className="bg-white rounded-xl border border-gray-200 px-5 py-4">
+            <div className="mb-3">
+              <span className="text-sm font-semibold text-gray-700">Recent Activity</span>
+            </div>
+            <div className="space-y-2.5 max-h-48 overflow-y-auto">
+              {timeline.map((item, i) => (
+                <div key={i} className="flex items-center gap-3">
+                  <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${item.type === 'machine' ? 'bg-blue-400' : 'bg-green-400'}`} />
+                  <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                    {item.type === 'machine' ? <Monitor size={11} className="text-gray-400 shrink-0" /> : <Network size={11} className="text-gray-400 shrink-0" />}
+                    <span className="text-xs text-gray-700 truncate">
+                      {item.type === 'machine' ? 'Machine' : 'Tunnel'} <span className="font-medium">{item.name}</span> {item.type === 'machine' ? 'registered' : 'created'}
+                    </span>
+                  </div>
+                  <span className="text-xs text-gray-400 shrink-0">{new Date(item.at).toLocaleDateString()}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null
+      })()}
 
     </div>
   )

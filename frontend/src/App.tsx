@@ -1,13 +1,12 @@
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { LayoutDashboard, Server, Monitor, Network, Activity, LogOut, Map, RefreshCw, Key, Shield, ShieldCheck, ChevronDown } from 'lucide-react'
+import { LayoutDashboard, Server, Monitor, Network, LogOut, Map, RefreshCw, Key, Shield, ShieldCheck, ChevronDown } from 'lucide-react'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import ToastContainer from './components/ToastContainer'
 import DashboardPage from './pages/DashboardPage'
 import VPSPage from './pages/VPSPage' // repurposed as Server Info page
 import MachinesPage from './pages/MachinesPage'
 import TunnelsPage from './pages/TunnelsPage'
-import StatusPage from './pages/StatusPage'
 import NetworkMapPage from './pages/NetworkMapPage'
 import SSHKeysPage from './pages/SSHKeysPage'
 import FirewallPage from './pages/FirewallPage'
@@ -36,18 +35,9 @@ function NavDropdown({ label, icon: Icon, items }: {
   const location = useLocation()
   const isActive = items.some(i => location.pathname.startsWith(i.to))
 
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [])
-
   return (
-    <div ref={ref} className="relative">
+    <div ref={ref} className="relative" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
       <button
-        onClick={() => setOpen(v => !v)}
         className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
           isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
         }`}
@@ -55,21 +45,23 @@ function NavDropdown({ label, icon: Icon, items }: {
         <Icon size={16} /> {label} <ChevronDown size={13} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
-        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-lg py-1 z-50 min-w-[160px]">
-          {items.map(item => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              onClick={() => setOpen(false)}
-              className={({ isActive }) =>
-                `flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
-                  isActive ? 'text-blue-700 bg-blue-50' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-                }`
-              }
-            >
-              <item.icon size={15} /> {item.label}
-            </NavLink>
-          ))}
+        <div className="absolute top-full left-0 mt-0 pt-1 bg-transparent z-50">
+          <div className="bg-white border border-gray-200 rounded-xl shadow-lg py-1 min-w-[160px]">
+            {items.map(item => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                onClick={() => setOpen(false)}
+                className={({ isActive }) =>
+                  `flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
+                    isActive ? 'text-blue-700 bg-blue-50' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+                  }`
+                }
+              >
+                <item.icon size={15} /> {item.label}
+              </NavLink>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -142,9 +134,9 @@ function AppShell() {
                     { to: '/vps', icon: Server, label: 'Server' },
                     { to: '/machines', icon: Monitor, label: 'Machines' },
                     { to: '/tunnels', icon: Network, label: 'Tunnels' },
+                    { to: '/keys', icon: Key, label: 'SSH Keys' },
                   ]}
                 />
-                <NavLink to="/network" className={navClass}><Map size={16} /> Network Map</NavLink>
                 <NavDropdown
                   label="Security"
                   icon={ShieldCheck}
@@ -153,14 +145,8 @@ function AppShell() {
                     { to: '/security', icon: ShieldCheck, label: 'Access Control' },
                   ]}
                 />
-                <NavDropdown
-                  label="More"
-                  icon={Activity}
-                  items={[
-                    { to: '/status', icon: Activity, label: 'Status' },
-                    { to: '/keys', icon: Key, label: 'SSH Keys' },
-                  ]}
-                />
+                <NavLink to="/network" className={navClass}><Map size={16} /> Network Map</NavLink>
+
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -191,7 +177,6 @@ function AppShell() {
           <Route path="/vps" element={<VPSPage />} />
           <Route path="/machines" element={<MachinesPage />} />
           <Route path="/tunnels" element={<TunnelsPage />} />
-          <Route path="/status" element={<StatusPage />} />
           <Route path="/network" element={<NetworkMapPage />} />
           <Route path="/keys" element={<SSHKeysPage />} />
           <Route path="/firewall" element={<FirewallPage />} />
