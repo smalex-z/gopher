@@ -1,0 +1,174 @@
+=== RUN   TestBuildServiceUnit
+--- PASS: TestBuildServiceUnit (0.00s)
+=== RUN   TestBuildSudoers
+--- PASS: TestBuildSudoers (0.00s)
+=== RUN   TestBuildSudoersEmpty
+--- PASS: TestBuildSudoersEmpty (0.00s)
+=== RUN   TestBuildSudoersPartial
+--- PASS: TestBuildSudoersPartial (0.00s)
+=== RUN   TestEnsureSafeRemovalPath
+=== RUN   TestEnsureSafeRemovalPath/reject_root
+=== RUN   TestEnsureSafeRemovalPath/reject_dot
+=== RUN   TestEnsureSafeRemovalPath/reject_empty
+=== RUN   TestEnsureSafeRemovalPath/reject_relative_path
+=== RUN   TestEnsureSafeRemovalPath/reject_double-dot_traversal
+=== RUN   TestEnsureSafeRemovalPath/reject_double-dot_only
+=== RUN   TestEnsureSafeRemovalPath/accept_data_dir
+--- PASS: TestEnsureSafeRemovalPath (0.00s)
+    --- PASS: TestEnsureSafeRemovalPath/reject_root (0.00s)
+    --- PASS: TestEnsureSafeRemovalPath/reject_dot (0.00s)
+    --- PASS: TestEnsureSafeRemovalPath/reject_empty (0.00s)
+    --- PASS: TestEnsureSafeRemovalPath/reject_relative_path (0.00s)
+    --- PASS: TestEnsureSafeRemovalPath/reject_double-dot_traversal (0.00s)
+    --- PASS: TestEnsureSafeRemovalPath/reject_double-dot_only (0.00s)
+    --- PASS: TestEnsureSafeRemovalPath/accept_data_dir (0.00s)
+=== RUN   TestRemoveFileIfExists
+--- PASS: TestRemoveFileIfExists (0.00s)
+=== RUN   TestIsYesResponse
+--- PASS: TestIsYesResponse (0.00s)
+=== RUN   TestIsSafeSudoersName
+=== RUN   TestIsSafeSudoersName/simple_username
+=== RUN   TestIsSafeSudoersName/username_with_hyphen
+=== RUN   TestIsSafeSudoersName/username_with_underscore
+=== RUN   TestIsSafeSudoersName/username_with_dot
+=== RUN   TestIsSafeSudoersName/path_traversal
+=== RUN   TestIsSafeSudoersName/space
+=== RUN   TestIsSafeSudoersName/empty
+--- PASS: TestIsSafeSudoersName (0.00s)
+    --- PASS: TestIsSafeSudoersName/simple_username (0.00s)
+    --- PASS: TestIsSafeSudoersName/username_with_hyphen (0.00s)
+    --- PASS: TestIsSafeSudoersName/username_with_underscore (0.00s)
+    --- PASS: TestIsSafeSudoersName/username_with_dot (0.00s)
+    --- PASS: TestIsSafeSudoersName/path_traversal (0.00s)
+    --- PASS: TestIsSafeSudoersName/space (0.00s)
+    --- PASS: TestIsSafeSudoersName/empty (0.00s)
+PASS
+ok  	github.com/smalex-z/gopher/cmd/server	0.014s
+?   	github.com/smalex-z/gopher/frontend/node_modules/flatted/golang/pkg/flatted	[no test files]
+?   	github.com/smalex-z/gopher/internal/api	[no test files]
+?   	github.com/smalex-z/gopher/internal/api/dto	[no test files]
+=== RUN   TestGenerateBootstrapScript_WarnsBeforeOverwrite
+--- PASS: TestGenerateBootstrapScript_WarnsBeforeOverwrite (0.00s)
+=== RUN   TestWebSocketDuringSetup_RejectsAfterLocalSetupDone
+
+2026/04/17 01:53:49 [31;1m/home/ubuntu/gopher/internal/db/db.go:65 [35;1mSQL logic error: no such column: ssh_public_key (1)
+[0m[33m[0.017ms] [34;1m[rows:-][0m SELECT ssh_public_key, ssh_private_key FROM app_settings WHERE id = 'singleton' LIMIT 1
+
+2026/04/17 01:53:49 [31;1m/home/ubuntu/gopher/internal/db/repository.go:298 [35;1mrecord not found
+[0m[33m[0.104ms] [34;1m[rows:0][0m SELECT * FROM `app_settings` WHERE id = 'singleton' ORDER BY `app_settings`.`id` LIMIT 1
+--- PASS: TestWebSocketDuringSetup_RejectsAfterLocalSetupDone (0.01s)
+=== RUN   TestWebSocketDuringSetup_AllowsBeforeLocalSetupDone
+
+2026/04/17 01:53:49 [31;1m/home/ubuntu/gopher/internal/db/db.go:65 [35;1mSQL logic error: no such column: ssh_public_key (1)
+[0m[33m[0.016ms] [34;1m[rows:-][0m SELECT ssh_public_key, ssh_private_key FROM app_settings WHERE id = 'singleton' LIMIT 1
+
+2026/04/17 01:53:49 [31;1m/home/ubuntu/gopher/internal/db/repository.go:298 [35;1mrecord not found
+[0m[33m[0.085ms] [34;1m[rows:0][0m SELECT * FROM `app_settings` WHERE id = 'singleton' ORDER BY `app_settings`.`id` LIMIT 1
+2026/04/17 01:53:49 WebSocket upgrade error: websocket: the client is not using the websocket protocol: 'upgrade' token not found in 'Connection' header
+--- PASS: TestWebSocketDuringSetup_AllowsBeforeLocalSetupDone (0.00s)
+PASS
+ok  	github.com/smalex-z/gopher/internal/api/handlers	0.032s
+?   	github.com/smalex-z/gopher/internal/api/response	[no test files]
+?   	github.com/smalex-z/gopher/internal/build	[no test files]
+?   	github.com/smalex-z/gopher/internal/config	[no test files]
+?   	github.com/smalex-z/gopher/internal/db	[no test files]
+?   	github.com/smalex-z/gopher/internal/errors	[no test files]
+=== RUN   TestBuildManagedCaddyfile_UsesImportLayout
+--- PASS: TestBuildManagedCaddyfile_UsesImportLayout (0.00s)
+=== RUN   TestBuildManagedCaddyfile_MigratesLegacyFileIntoCustomSection
+--- PASS: TestBuildManagedCaddyfile_MigratesLegacyFileIntoCustomSection (0.00s)
+=== RUN   TestManagedCaddyPaths
+--- PASS: TestManagedCaddyPaths (0.00s)
+=== RUN   TestBuildClientTunnelSection_UsesServerStyleDelimiters
+--- PASS: TestBuildClientTunnelSection_UsesServerStyleDelimiters (0.00s)
+=== RUN   TestGenerateMachineSSHClientConfig_UsesServerStyleDelimiters
+--- PASS: TestGenerateMachineSSHClientConfig_UsesServerStyleDelimiters (0.00s)
+=== RUN   TestRemoveClientManagedSection_RemovesMarkersAndBlock
+--- PASS: TestRemoveClientManagedSection_RemovesMarkersAndBlock (0.00s)
+=== RUN   TestMergeClientManagedConfig_PreservesUnmanagedAndRebuildsManaged
+--- PASS: TestMergeClientManagedConfig_PreservesUnmanagedAndRebuildsManaged (0.00s)
+=== RUN   TestMergeClientManagedConfig_EmptyExistingRequiresHost
+--- PASS: TestMergeClientManagedConfig_EmptyExistingRequiresHost (0.00s)
+=== RUN   TestTunnelDelete_OrderClientServerCaddy
+
+2026/04/17 01:53:50 [31;1m/home/ubuntu/gopher/internal/db/db.go:65 [35;1mSQL logic error: no such column: ssh_public_key (1)
+[0m[33m[0.017ms] [34;1m[rows:-][0m SELECT ssh_public_key, ssh_private_key FROM app_settings WHERE id = 'singleton' LIMIT 1
+
+2026/04/17 01:53:50 [31;1m/home/ubuntu/gopher/internal/db/repository.go:298 [35;1mrecord not found
+[0m[33m[0.061ms] [34;1m[rows:0][0m SELECT * FROM `app_settings` WHERE id = 'singleton' ORDER BY `app_settings`.`id` LIMIT 1
+
+2026/04/17 01:53:50 [31;1m/home/ubuntu/gopher/internal/db/repository.go:88 [35;1mrecord not found
+[0m[33m[0.097ms] [34;1m[rows:0][0m SELECT * FROM `tunnels` WHERE id = "t1" ORDER BY `tunnels`.`id` LIMIT 1
+--- PASS: TestTunnelDelete_OrderClientServerCaddy (0.01s)
+=== RUN   TestTunnelDelete_RejectsMachineSSHTunnelID
+
+2026/04/17 01:53:50 [31;1m/home/ubuntu/gopher/internal/db/db.go:65 [35;1mSQL logic error: no such column: ssh_public_key (1)
+[0m[33m[0.016ms] [34;1m[rows:-][0m SELECT ssh_public_key, ssh_private_key FROM app_settings WHERE id = 'singleton' LIMIT 1
+--- PASS: TestTunnelDelete_RejectsMachineSSHTunnelID (0.00s)
+=== RUN   TestTunnelDelete_RejectsPort22Tunnel
+
+2026/04/17 01:53:50 [31;1m/home/ubuntu/gopher/internal/db/db.go:65 [35;1mSQL logic error: no such column: ssh_public_key (1)
+[0m[33m[0.015ms] [34;1m[rows:-][0m SELECT ssh_public_key, ssh_private_key FROM app_settings WHERE id = 'singleton' LIMIT 1
+--- PASS: TestTunnelDelete_RejectsPort22Tunnel (0.01s)
+=== RUN   TestTunnelList_IncludesMachineSSHTunnel
+
+2026/04/17 01:53:50 [31;1m/home/ubuntu/gopher/internal/db/db.go:65 [35;1mSQL logic error: no such column: ssh_public_key (1)
+[0m[33m[0.014ms] [34;1m[rows:-][0m SELECT ssh_public_key, ssh_private_key FROM app_settings WHERE id = 'singleton' LIMIT 1
+--- PASS: TestTunnelList_IncludesMachineSSHTunnel (0.00s)
+=== RUN   TestMachineDelete_DeletesTunnelsThenMachineClientThenMachine
+
+2026/04/17 01:53:50 [31;1m/home/ubuntu/gopher/internal/db/db.go:65 [35;1mSQL logic error: no such column: ssh_public_key (1)
+[0m[33m[0.014ms] [34;1m[rows:-][0m SELECT ssh_public_key, ssh_private_key FROM app_settings WHERE id = 'singleton' LIMIT 1
+
+2026/04/17 01:53:50 [31;1m/home/ubuntu/gopher/internal/db/repository.go:47 [35;1mrecord not found
+[0m[33m[0.047ms] [34;1m[rows:0][0m SELECT * FROM `machines` WHERE id = "m1" ORDER BY `machines`.`id` LIMIT 1
+
+2026/04/17 01:53:50 [31;1m/home/ubuntu/gopher/internal/db/repository.go:88 [35;1mrecord not found
+[0m[33m[0.080ms] [34;1m[rows:0][0m SELECT * FROM `tunnels` WHERE id = "t1" ORDER BY `tunnels`.`id` LIMIT 1
+
+2026/04/17 01:53:50 [31;1m/home/ubuntu/gopher/internal/db/repository.go:88 [35;1mrecord not found
+[0m[33m[0.095ms] [34;1m[rows:0][0m SELECT * FROM `tunnels` WHERE id = "t2" ORDER BY `tunnels`.`id` LIMIT 1
+--- PASS: TestMachineDelete_DeletesTunnelsThenMachineClientThenMachine (0.01s)
+PASS
+ok  	github.com/smalex-z/gopher/internal/service	0.049s
+?   	github.com/smalex-z/gopher/internal/ssh	[no test files]
+=== RUN   TestGenerateRatholeServerConfig
+--- PASS: TestGenerateRatholeServerConfig (0.00s)
+=== RUN   TestValidateDuplicates
+--- PASS: TestValidateDuplicates (0.00s)
+=== RUN   TestValidateOrphans
+--- PASS: TestValidateOrphans (0.00s)
+=== RUN   TestValidateMissing
+--- PASS: TestValidateMissing (0.00s)
+=== RUN   TestValidateValid
+--- PASS: TestValidateValid (0.00s)
+=== RUN   TestValidateBackwardCompat
+--- PASS: TestValidateBackwardCompat (0.00s)
+=== RUN   TestGenerateSkipsIncomplete
+--- PASS: TestGenerateSkipsIncomplete (0.00s)
+=== RUN   TestParseUnclosedMarker
+--- PASS: TestParseUnclosedMarker (0.00s)
+=== RUN   TestParseMarkerMismatch
+--- PASS: TestParseMarkerMismatch (0.00s)
+=== RUN   TestParseOrphanedEndMarker
+--- PASS: TestParseOrphanedEndMarker (0.00s)
+=== RUN   TestValidateTokenMismatch
+--- PASS: TestValidateTokenMismatch (0.00s)
+=== RUN   TestValidatePortMismatch
+--- PASS: TestValidatePortMismatch (0.00s)
+=== RUN   TestGenerateMultipleMachinesNoDuplicates
+--- PASS: TestGenerateMultipleMachinesNoDuplicates (0.00s)
+=== RUN   TestParseExtractsTokenAndBindAddr
+--- PASS: TestParseExtractsTokenAndBindAddr (0.00s)
+=== RUN   TestGenerateMachinesBeforeTunnels
+--- PASS: TestGenerateMachinesBeforeTunnels (0.00s)
+=== RUN   TestConfigLifecycleCycle
+--- PASS: TestConfigLifecycleCycle (0.00s)
+=== RUN   TestConfigDriftDetection
+--- PASS: TestConfigDriftDetection (0.00s)
+=== RUN   TestGenerateEmptyDatabaseValidStructure
+--- PASS: TestGenerateEmptyDatabaseValidStructure (0.00s)
+=== RUN   TestGenerateAddsPlaceholderWhenAllEntriesIncomplete
+--- PASS: TestGenerateAddsPlaceholderWhenAllEntriesIncomplete (0.00s)
+PASS
+ok  	github.com/smalex-z/gopher/tests/unit	0.014s

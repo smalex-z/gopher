@@ -19,7 +19,8 @@ function typeBadge(type: FirewallEntry['type']) {
   if (type === 'tunnel')      return <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">Tunnel</span>
   if (type === 'machine-ssh') return <span className="text-xs px-1.5 py-0.5 rounded bg-purple-50 text-purple-600">Machine SSH</span>
   return <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">Custom</span>
-}
+}aslkdfsdkf;lsdfa
+asdasdas
 
 function sourceBadge(source: string) {
   if (source === '0.0.0.0/0') return <span className="flex items-center gap-0.5 text-xs text-gray-500"><Globe size={10} /> Any</span>
