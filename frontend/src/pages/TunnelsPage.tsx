@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { Network, ClipboardCopy, ArrowRight, Globe, Lock, Terminal, Info, AlertTriangle } from 'lucide-react'
+import { Network, ClipboardCopy, ArrowRight, Globe, Lock, Terminal, Info, AlertTriangle, Pencil, Trash2, Zap } from 'lucide-react'
 import { tunnelsApi } from '../api/tunnels'
 import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
@@ -9,7 +9,7 @@ import StatusBadge from '../components/StatusBadge'
 import { toast } from '../lib/toast'
 import type { Tunnel } from '../types'
 
-interface ModalState { isOpen: boolean }
+interface ModalState { isOpen: boolean; editTunnel?: Tunnel }
 interface FormState {
   machine_id: string
   name: string
@@ -58,6 +58,24 @@ export default function TunnelsPage() {
       setNextPortLoading(false)
     }
     setModal({ isOpen: true })
+  }
+
+  const openEditModal = (t: Tunnel) => {
+    setForm({
+      ...defaultForm,
+      machine_id: t.machine_id,
+      name: t.name,
+      subdomain: t.subdomain ?? '',
+      local_port: t.local_port,
+      rathole_port: t.rathole_port,
+      transport: t.transport ?? 'tcp',
+      no_tls: t.no_tls ?? false,
+      private: t.private ?? false,
+      bot_protection_enabled: t.bot_protection_enabled ?? false,
+      bot_protection_ttl: t.bot_protection_ttl ?? 0,
+      bot_protection_allow_ip: t.bot_protection_allow_ip ?? '',
+    })
+    setModal({ isOpen: true, editTunnel: t })
   }
 
   const { data: tunnelsData, isLoading } = useQuery({ queryKey: ['tunnels'], queryFn: () => tunnelsApi.list() })
@@ -249,23 +267,22 @@ export default function TunnelsPage() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex gap-2">
-                        {/* Privacy toggle — available on all tunnels including managed machine-ssh */}
+                      <div className="flex items-center gap-1">
                         <button
                           onClick={() => togglePrivate(t)}
                           disabled={updateMutation.isPending}
                           title={isPrivate ? 'Make public' : 'Make private'}
-                          className={`px-2 py-1 text-xs border rounded flex items-center gap-1 ${isPrivate
-                            ? 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-                            : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+                          className={`p-1.5 rounded border ${isPrivate
+                            ? 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
+                            : 'bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-gray-600'}`}
                         >
-                          {isPrivate ? <Globe size={11} /> : <Lock size={11} />}
-                          {isPrivate ? 'Public' : 'Private'}
+                          {isPrivate ? <Globe size={13} /> : <Lock size={13} />}
                         </button>
                         {!isProtectedTunnel && (
                           <>
-                            <button onClick={() => testTunnel(t.id)} className="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50">Test</button>
-                            <button onClick={() => handleDelete(t.id)} className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100">Delete</button>
+                            <button onClick={() => openEditModal(t)} title="Edit tunnel" className="p-1.5 rounded border bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-gray-600"><Pencil size={13} /></button>
+                            <button onClick={() => testTunnel(t.id)} title="Test connection" className="p-1.5 rounded border bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-blue-600"><Zap size={13} /></button>
+                            <button onClick={() => handleDelete(t.id)} title="Delete tunnel" className="p-1.5 rounded border bg-white text-red-400 border-red-100 hover:bg-red-50 hover:text-red-600"><Trash2 size={13} /></button>
                           </>
                         )}
                       </div>
@@ -298,18 +315,20 @@ export default function TunnelsPage() {
         <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg">
             <div className="flex items-center justify-between p-4 border-b">
-              <h2 className="text-lg font-semibold">Add Tunnel</h2>
+              <h2 className="text-lg font-semibold">{modal.editTunnel ? 'Edit Tunnel' : 'Add Tunnel'}</h2>
               <button onClick={() => setModal({ isOpen: false })} className="text-gray-400 hover:text-gray-600 text-xl">×</button>
             </div>
             {(() => {
-              const serverPortConflict = form.rathole_port > 0 && (
+              const isEdit = Boolean(modal.editTunnel)
+              const serverPortConflict = !isEdit && form.rathole_port > 0 && (
                 tunnels.some(t => t.rathole_port === form.rathole_port) ||
                 machines.some(m => m.tunnel_port === form.rathole_port)
               )
-              const localPortConflict = form.local_port > 0 && form.machine_id !== '' &&
+              const localPortConflict = !isEdit && form.local_port > 0 && form.machine_id !== '' &&
                 tunnels.some(t => t.machine_id === form.machine_id && t.local_port === form.local_port)
               const canCreate = form.machine_id !== '' && form.name.trim() !== '' &&
                 form.rathole_port > 0 && !serverPortConflict && !localPortConflict && !createMutation.isPending
+              const canSave = form.name.trim() !== '' && !updateMutation.isPending
               return (
             <>
             <div className="p-4 space-y-4">
@@ -320,6 +339,15 @@ export default function TunnelsPage() {
                 </div>
               )}
 
+              {isEdit ? (
+                /* Edit mode: show a read-only summary of the fixed fields */
+                <div className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs text-gray-600 space-y-0.5">
+                  <div><span className="font-medium text-gray-700">Machine:</span> {getMachineName(modal.editTunnel!.machine_id)}</div>
+                  <div><span className="font-medium text-gray-700">Port:</span> <span className="font-mono">{displayHost ?? 'server'}:{modal.editTunnel!.rathole_port} → localhost:{modal.editTunnel!.local_port}</span></div>
+                  <div><span className="font-medium text-gray-700">Transport:</span> {(modal.editTunnel!.transport ?? 'tcp').toUpperCase()}</div>
+                </div>
+              ) : (
+                <>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Machine</label>
                 <select
@@ -330,12 +358,6 @@ export default function TunnelsPage() {
                   <option value="">Select a machine...</option>
                   {machines.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                 </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
-                <input type="text" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="My Web App"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
               </div>
 
               <div className="flex gap-4">
@@ -438,6 +460,14 @@ export default function TunnelsPage() {
                   </p>
                 )}
               </div>
+                </>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                <input type="text" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="My Web App"
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              </div>
 
               {routingEnabled && form.transport !== 'udp' ? (
                 <div>
@@ -537,12 +567,32 @@ export default function TunnelsPage() {
             </div>
             <div className="flex justify-end gap-2 p-4 border-t">
               <button onClick={() => setModal({ isOpen: false })} className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm">Cancel</button>
-              <button
-                onClick={() => createMutation.mutate({ ...form, subdomain: routingEnabled && form.transport !== 'udp' ? form.subdomain : '' })}
-                disabled={!canCreate}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-50 disabled:cursor-not-allowed">
-                {createMutation.isPending ? 'Creating...' : 'Create Tunnel'}
-              </button>
+              {isEdit ? (
+                <button
+                  onClick={() => updateMutation.mutate({
+                    id: modal.editTunnel!.id,
+                    data: {
+                      name: form.name,
+                      subdomain: routingEnabled && form.transport !== 'udp' ? form.subdomain : '',
+                      local_port: form.local_port,
+                      private: form.private,
+                      bot_protection_enabled: form.bot_protection_enabled,
+                      bot_protection_ttl: form.bot_protection_ttl,
+                      bot_protection_allow_ip: form.bot_protection_allow_ip,
+                    },
+                  }, { onSuccess: () => { qc.invalidateQueries({ queryKey: ['tunnels'] }); setModal({ isOpen: false }); toast.success('Tunnel updated!') }, onError: (e: Error) => toast.error(e.message) })}
+                  disabled={!canSave}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-50 disabled:cursor-not-allowed">
+                  {updateMutation.isPending ? 'Saving...' : 'Save Changes'}
+                </button>
+              ) : (
+                <button
+                  onClick={() => createMutation.mutate({ ...form, subdomain: routingEnabled && form.transport !== 'udp' ? form.subdomain : '' })}
+                  disabled={!canCreate}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-50 disabled:cursor-not-allowed">
+                  {createMutation.isPending ? 'Creating...' : 'Create Tunnel'}
+                </button>
+              )}
             </div>
             </>
           )
