@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/smalex-z/gopher/internal/api/response"
+	"github.com/smalex-z/gopher/internal/db"
 	"github.com/smalex-z/gopher/internal/service"
 )
 
@@ -35,4 +37,32 @@ func (h *UpdateHandler) Apply(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "Update applied, server restarting",
 	})
+}
+
+// SetChannel updates the update channel preference (stable / beta / alpha).
+func (h *UpdateHandler) SetChannel(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Channel string `json:"channel"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.BadRequest(w, "invalid request body")
+		return
+	}
+	switch body.Channel {
+	case "stable", "beta", "alpha":
+	default:
+		response.BadRequest(w, "channel must be one of: stable, beta, alpha")
+		return
+	}
+	settings, err := db.GetSettings()
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	settings.UpdateChannel = body.Channel
+	if err := db.SaveSettings(settings); err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"channel": body.Channel})
 }

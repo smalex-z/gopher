@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/smalex-z/gopher/internal/build"
+	"github.com/smalex-z/gopher/internal/db"
 )
 
 const githubRepo = "smalex-z/gopher"
@@ -24,6 +25,7 @@ type UpdateInfo struct {
 	CurrentVersion  string `json:"current_version"`
 	LatestVersion   string `json:"latest_version"`
 	UpdateAvailable bool   `json:"update_available"`
+	Channel         string `json:"channel"`
 }
 
 type githubRelease struct {
@@ -47,18 +49,49 @@ func NewUpdateService() *UpdateService {
 	return &UpdateService{}
 }
 
+// inferChannelFromVersion derives a sensible default channel from the running
+// binary's version tag so that, e.g., a beta build defaults to the beta stream
+// without requiring any explicit configuration.
+func inferChannelFromVersion(version string) string {
+	v := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(version), "v"))
+	idx := strings.Index(v, "-")
+	if idx < 0 {
+		return "stable"
+	}
+	pre := v[idx+1:]
+	if strings.Contains(pre, "alpha") {
+		return "alpha"
+	}
+	if strings.Contains(pre, "beta") {
+		return "beta"
+	}
+	// Unknown pre-release label — use alpha (most permissive) so the user
+	// doesn't miss updates.
+	return "alpha"
+}
+
+func settingsChannel() string {
+	settings, err := db.GetSettings()
+	if err == nil && settings != nil && settings.UpdateChannel != "" {
+		return settings.UpdateChannel
+	}
+	return inferChannelFromVersion(build.Version)
+}
+
 func (s *UpdateService) Check() (*UpdateInfo, error) {
+	channel := settingsChannel()
 	info := &UpdateInfo{
 		CurrentVersion:  build.Version,
 		LatestVersion:   build.Version,
 		UpdateAvailable: false,
+		Channel:         channel,
 	}
 
 	if build.Version == "dev" {
 		return info, nil
 	}
 
-	release, err := fetchLatestRelease(build.Version)
+	release, err := fetchLatestReleaseForChannel(channel)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +102,7 @@ func (s *UpdateService) Check() (*UpdateInfo, error) {
 }
 
 func (s *UpdateService) Apply() error {
-	release, err := fetchLatestRelease(build.Version)
+	release, err := fetchLatestReleaseForChannel(settingsChannel())
 	if err != nil {
 		return err
 	}
@@ -206,42 +239,64 @@ func buildServiceSudoers(username string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func fetchLatestRelease(currentVersion string) (*githubRelease, error) {
-	if isPrereleaseTag(currentVersion) {
-		return fetchLatestReleaseIncludingPrerelease()
+// releaseMatchesChannel returns true if the release should be considered for
+// the given channel. Stable releases are always included; beta excludes alpha
+// pre-releases; alpha includes everything that isn't a draft.
+func releaseMatchesChannel(r *githubRelease, channel string) bool {
+	if r.Draft || strings.TrimSpace(r.TagName) == "" {
+		return false
 	}
-
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo)
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "gopher/"+build.Version)
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to reach GitHub API: %w", err)
+	sv := parseSemver(r.TagName)
+	if sv == nil {
+		return false
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
+	pre := sv.prerelease
+	switch channel {
+	case "alpha":
+		return true
+	case "beta":
+		// stable releases and beta pre-releases; skip alpha
+		return pre == "" || (strings.Contains(pre, "beta") && !strings.Contains(pre, "alpha"))
+	default: // "stable"
+		return pre == ""
 	}
-
-	var release githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return nil, fmt.Errorf("failed to parse release info: %w", err)
-	}
-	return &release, nil
 }
 
-func fetchLatestReleaseIncludingPrerelease() (*githubRelease, error) {
+// fetchLatestReleaseForChannel returns the best (newest) release that matches
+// the requested channel. For stable it uses the /releases/latest shortcut;
+// for beta/alpha it pages through recent releases and filters client-side.
+func fetchLatestReleaseForChannel(channel string) (*githubRelease, error) {
+	if channel == "stable" {
+		url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo)
+		req, _ := http.NewRequest("GET", url, nil)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("User-Agent", "gopher/"+build.Version)
+
+		httpClient := &http.Client{Timeout: 10 * time.Second}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to reach GitHub API: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
+		}
+		var release githubRelease
+		if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+			return nil, fmt.Errorf("failed to parse release info: %w", err)
+		}
+		return &release, nil
+	}
+
+	// beta / alpha — fetch list and pick the best matching release
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=30", githubRepo)
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "gopher/"+build.Version)
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to reach GitHub API: %w", err)
 	}
@@ -259,7 +314,7 @@ func fetchLatestReleaseIncludingPrerelease() (*githubRelease, error) {
 	var best *githubRelease
 	for i := range releases {
 		r := &releases[i]
-		if r.Draft || strings.TrimSpace(r.TagName) == "" {
+		if !releaseMatchesChannel(r, channel) {
 			continue
 		}
 		if best == nil || isNewer(r.TagName, best.TagName) {
@@ -268,9 +323,8 @@ func fetchLatestReleaseIncludingPrerelease() (*githubRelease, error) {
 	}
 
 	if best == nil {
-		return nil, fmt.Errorf("no releases found")
+		return nil, fmt.Errorf("no releases found for channel %q", channel)
 	}
-
 	return best, nil
 }
 
@@ -453,7 +507,3 @@ func parseNumericIdentifier(s string) (int, bool) {
 	return n, true
 }
 
-func isPrereleaseTag(version string) bool {
-	v := strings.TrimPrefix(strings.TrimSpace(version), "v")
-	return strings.Contains(v, "-")
-}

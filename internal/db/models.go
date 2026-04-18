@@ -110,6 +110,8 @@ type AppSettings struct {
 	Fail2banFindTime  int    `json:"fail2ban_find_time"`  // seconds, default 300
 	Fail2banBanTime   int    `json:"fail2ban_ban_time"`   // seconds, default 3600
 	Fail2banIgnoreIPs string `json:"fail2ban_ignore_ips"` // JSON array of whitelisted CIDRs/IPs
+	// UpdateChannel controls which release stream to track: "stable" (default), "beta", or "alpha".
+	UpdateChannel string `json:"update_channel"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

@@ -153,6 +153,7 @@ func NewRouter(
 			r.Route("/update", func(r chi.Router) {
 				r.Get("/check", updateH.Check)
 				r.Post("/apply", updateH.Apply)
+				r.Post("/channel", updateH.SetChannel)
 			})
 		})
 	})

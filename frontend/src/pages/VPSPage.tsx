@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Copy, Check, ExternalLink, RefreshCw, Globe, Lock, ShieldAlert, Server, Network, Activity } from 'lucide-react'
 import { localApi } from '../api/local'
-import { updateApi } from '../api/update'
+import { updateApi, type UpdateChannel } from '../api/update'
 import { machinesApi } from '../api/machines'
 import { tunnelsApi } from '../api/tunnels'
 import StatusBadge from '../components/StatusBadge'
@@ -50,6 +50,12 @@ export default function ServerPage() {
   const dashboardMutation = useMutation({
     mutationFn: (dashboardPrivate: boolean) => localApi.setServerPorts(dashboardPrivate),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['local-status'] }),
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const channelMutation = useMutation({
+    mutationFn: (channel: UpdateChannel) => updateApi.setChannel(channel),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['update-check'] }),
     onError: (e: Error) => toast.error(e.message),
   })
 
@@ -233,7 +239,7 @@ export default function ServerPage() {
           {updateInfo && (
             <div className="bg-white rounded-xl shadow-sm border p-5">
               <h2 className="text-base font-semibold text-gray-900 mb-3">Gopher Version</h2>
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-gray-400">Installed</span>
                   <span className="text-sm font-mono text-gray-700">{updateInfo.current_version}</span>
@@ -248,6 +254,29 @@ export default function ServerPage() {
                 ) : (
                   <p className="text-xs text-gray-400">Up to date</p>
                 )}
+                <div className="pt-1 border-t">
+                  <div className="text-xs text-gray-400 mb-1.5">Update channel</div>
+                  <div className="flex gap-1">
+                    {(['stable', 'beta', 'alpha'] as UpdateChannel[]).map(ch => (
+                      <button
+                        key={ch}
+                        onClick={() => channelMutation.mutate(ch)}
+                        disabled={channelMutation.isPending}
+                        className={`flex-1 text-xs font-medium py-1 rounded-lg border transition-colors capitalize ${
+                          updateInfo.channel === ch
+                            ? ch === 'stable'
+                              ? 'bg-blue-600 text-white border-blue-600'
+                              : ch === 'beta'
+                              ? 'bg-amber-500 text-white border-amber-500'
+                              : 'bg-purple-600 text-white border-purple-600'
+                            : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50 disabled:opacity-50'
+                        }`}
+                      >
+                        {ch}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
           )}
