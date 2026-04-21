@@ -412,7 +412,7 @@ func extractPort(t *testing.T, rawURL string) int {
 		t.Fatalf("parse url %q: %v", rawURL, err)
 	}
 	var port int
-	fmt.Sscanf(u.Port(), "%d", &port)
+	_, _ = fmt.Sscanf(u.Port(), "%d", &port)
 	return port
 }
 

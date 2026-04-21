@@ -210,8 +210,8 @@ func addToAuthorizedKeys(pubKey string) error {
 		if err2 := exec.Command("sudo", "mkdir", "-p", sshDir).Run(); err2 != nil { // #nosec G204
 			return fmt.Errorf("mkdir %s: %w", sshDir, err2)
 		}
-		exec.Command("sudo", "chmod", "700", sshDir).Run()                              // #nosec G204
-		exec.Command("sudo", "chown", u.Username+":"+u.Username, sshDir).Run()          // #nosec G204
+		_ = exec.Command("sudo", "chmod", "700", sshDir).Run()                              // #nosec G204
+		_ = exec.Command("sudo", "chown", u.Username+":"+u.Username, sshDir).Run()          // #nosec G204
 	}
 
 	// Read existing content.
@@ -248,8 +248,8 @@ func addToAuthorizedKeys(pubKey string) error {
 		if err2 := cmd.Run(); err2 != nil {
 			return err2
 		}
-		exec.Command("sudo", "chmod", "600", path).Run()                             // #nosec G204
-		exec.Command("sudo", "chown", u.Username+":"+u.Username, path).Run()         // #nosec G204
+		_ = exec.Command("sudo", "chmod", "600", path).Run()                             // #nosec G204
+		_ = exec.Command("sudo", "chown", u.Username+":"+u.Username, path).Run()         // #nosec G204
 	}
 	return nil
 }
@@ -300,8 +300,8 @@ func removeFromAuthorizedKeys(pubKey string) error {
 		if err2 := cmd.Run(); err2 != nil {
 			return err2
 		}
-		exec.Command("sudo", "chmod", "600", path).Run()                             // #nosec G204
-		exec.Command("sudo", "chown", u.Username+":"+u.Username, path).Run()         // #nosec G204
+		_ = exec.Command("sudo", "chmod", "600", path).Run()                             // #nosec G204
+		_ = exec.Command("sudo", "chown", u.Username+":"+u.Username, path).Run()         // #nosec G204
 	}
 	return nil
 }

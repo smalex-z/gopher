@@ -120,7 +120,7 @@ func (s *MachineService) Deploy(id string) error {
 		return err
 	}
 
-	go s.deploy.DeployClient(machine)
+	go s.deploy.DeployClient(machine) //nolint:errcheck
 	return nil
 }
 

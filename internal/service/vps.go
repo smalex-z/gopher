@@ -85,7 +85,7 @@ func (s *VPSService) Bootstrap() error {
 	if err != nil {
 		return err
 	}
-	go s.deploy.Bootstrap(vps)
+	go s.deploy.Bootstrap(vps) //nolint:errcheck
 	return nil
 }
 
@@ -94,7 +94,7 @@ func (s *VPSService) Deploy() error {
 	if err != nil {
 		return err
 	}
-	go s.deploy.DeployVPS(vps)
+	go s.deploy.DeployVPS(vps) //nolint:errcheck
 	return nil
 }
 
