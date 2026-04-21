@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Server, Copy, Check, ChevronDown, ChevronRight, Plus, Key, Lock, Terminal, ClipboardCopy, Globe, CheckCircle, Loader2 } from 'lucide-react'
@@ -67,7 +67,7 @@ export default function MachinesPage() {
   const { data: keysRes } = useQuery({ queryKey: ['ssh-keys'], queryFn: () => localApi.listSSHKeys() })
   const { data: vpsRes } = useQuery({ queryKey: ['vps'], queryFn: () => vpsApi.get() })
   const { data: firewallRes } = useQuery({ queryKey: ['firewall-overview'], queryFn: () => localApi.firewallOverview() })
-  const machines: Machine[] = data?.data ?? []
+  const machines: Machine[] = useMemo(() => data?.data ?? [], [data])
   const sshKeys: SSHKey[] = keysRes?.data ?? []
   const vps = vpsRes?.data
   const domain = localStatus?.domain ?? ''
