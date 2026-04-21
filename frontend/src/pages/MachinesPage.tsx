@@ -1,7 +1,7 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Server, Copy, Check, ChevronDown, ChevronRight, Plus, Key, Lock, Terminal, ClipboardCopy, Globe } from 'lucide-react'
+import { Server, Copy, Check, ChevronDown, ChevronRight, Plus, Key, Lock, Terminal, ClipboardCopy, Globe, CheckCircle, Loader2 } from 'lucide-react'
 import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
 import { vpsApi } from '../api/vps'
@@ -38,12 +38,15 @@ const WindowsIcon = () => (
   </svg>
 )
 
-interface BootstrapModal { isOpen: boolean; command: string; token: string; expiresAt: string }
+type BootstrapPhase = 'waiting' | 'success' | 'timeout'
+interface BootstrapModal { isOpen: boolean; command: string; token: string; expiresAt: string; phase: BootstrapPhase }
 
 export default function MachinesPage() {
   const qc = useQueryClient()
   const navigate = useNavigate()
-  const [bootstrapModal, setBootstrapModal] = useState<BootstrapModal>({ isOpen: false, command: '', token: '', expiresAt: '' })
+  const [bootstrapModal, setBootstrapModal] = useState<BootstrapModal>({ isOpen: false, command: '', token: '', expiresAt: '', phase: 'waiting' })
+  const knownMachineIds = useRef<Set<string>>(new Set())
+  const bootstrapTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [configModal, setConfigModal] = useState(false)
   const [tunnelPortInput, setTunnelPortInput] = useState('')
   const [sshKeyInput, setSSHKeyInput] = useState('')
@@ -55,7 +58,11 @@ export default function MachinesPage() {
   const [reassignKeyID, setReassignKeyID] = useState('')
   const [jumpboxOS, setJumpboxOS] = useState<JumpboxOS>('unix')
 
-  const { data, isLoading } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list() })
+  const { data, isLoading } = useQuery({
+    queryKey: ['machines'],
+    queryFn: () => machinesApi.list(),
+    refetchInterval: bootstrapModal.isOpen && bootstrapModal.phase === 'waiting' ? 3000 : false,
+  })
   const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
   const { data: keysRes } = useQuery({ queryKey: ['ssh-keys'], queryFn: () => localApi.listSSHKeys() })
   const { data: vpsRes } = useQuery({ queryKey: ['vps'], queryFn: () => vpsApi.get() })
@@ -104,6 +111,22 @@ export default function MachinesPage() {
     ? (domainIP && routerIP && domainIP === routerIP ? domain : `router.${domain}`)
     : ''
 
+  // Detect new machine registration while bootstrap modal is open
+  useEffect(() => {
+    if (!bootstrapModal.isOpen || bootstrapModal.phase !== 'waiting') return
+    const newMachine = machines.find(m => !knownMachineIds.current.has(m.id))
+    if (!newMachine) return
+    if (bootstrapTimeoutRef.current) clearTimeout(bootstrapTimeoutRef.current)
+    setBootstrapModal(prev => ({ ...prev, phase: 'success' }))
+    qc.invalidateQueries({ queryKey: ['tunnels'] })
+    setTimeout(() => {
+      setBootstrapModal(prev => ({ ...prev, isOpen: false, phase: 'waiting' }))
+    }, 2000)
+  }, [machines, bootstrapModal.isOpen, bootstrapModal.phase, qc])
+
+  // Clean up timeout on unmount
+  useEffect(() => () => { if (bootstrapTimeoutRef.current) clearTimeout(bootstrapTimeoutRef.current) }, [])
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => machinesApi.delete(id),
     onSuccess: () => {
@@ -140,13 +163,20 @@ export default function MachinesPage() {
     try {
       const result = await vpsApi.generateToken(port, keyID, publicSSHInput)
       if (result?.data) {
+        // Snapshot current machine IDs so we can detect the new registration
+        knownMachineIds.current = new Set(machines.map(m => m.id))
         setConfigModal(false)
         setBootstrapModal({
           isOpen: true,
           command: result.data.bootstrap_command,
           token: result.data.token,
           expiresAt: result.data.expires_at,
+          phase: 'waiting',
         })
+        // 10-minute timeout
+        bootstrapTimeoutRef.current = setTimeout(() => {
+          setBootstrapModal(prev => prev.phase === 'waiting' ? { ...prev, phase: 'timeout' } : prev)
+        }, 10 * 60 * 1000)
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to generate token')
@@ -506,47 +536,75 @@ export default function MachinesPage() {
             <div className="flex items-center justify-between p-4 border-b">
               <h2 className="text-lg font-semibold">Bootstrap New Machine</h2>
               <button
-                onClick={() => setBootstrapModal(m => ({ ...m, isOpen: false }))}
+                onClick={() => {
+                  if (bootstrapTimeoutRef.current) clearTimeout(bootstrapTimeoutRef.current)
+                  setBootstrapModal(m => ({ ...m, isOpen: false, phase: 'waiting' }))
+                }}
                 className="text-gray-400 hover:text-gray-600 text-xl"
               >
                 ×
               </button>
             </div>
-            <div className="p-4 space-y-4">
-              <p className="text-sm text-gray-600">
-                Run this command on the machine you want to register. The machine will self-configure and establish a reverse SSH tunnel to the VPS.
-              </p>
-              <div className="relative">
-                <pre className="bg-gray-900 text-green-400 text-xs rounded-lg p-4 pr-12 overflow-x-auto whitespace-pre-wrap break-all">
-                  {bootstrapModal.command}
-                </pre>
-                <button
-                  onClick={copyCommand}
-                  className="absolute top-2 right-2 p-1.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
-                  title="Copy command"
-                >
-                  {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-                </button>
+
+            {bootstrapModal.phase === 'success' ? (
+              <div className="p-8 flex flex-col items-center gap-3 text-center">
+                <CheckCircle size={48} className="text-green-500" />
+                <h3 className="text-lg font-semibold text-gray-900">Machine registered!</h3>
+                <p className="text-sm text-gray-500">The machine connected and configured itself successfully.</p>
               </div>
-              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                ⏱ Token expires at: {new Date(bootstrapModal.expiresAt).toLocaleString()} (1 hour)
+            ) : (
+              <div className="p-4 space-y-4">
+                <p className="text-sm text-gray-600">
+                  Run this command on the machine you want to register. The machine will self-configure and establish a reverse SSH tunnel to the VPS.
+                </p>
+                <div className="relative">
+                  <pre className="bg-gray-900 text-green-400 text-xs rounded-lg p-4 pr-12 overflow-x-auto whitespace-pre-wrap break-all">
+                    {bootstrapModal.command}
+                  </pre>
+                  <button
+                    onClick={copyCommand}
+                    className="absolute top-2 right-2 p-1.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
+                    title="Copy command"
+                  >
+                    {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+                  </button>
+                </div>
+                <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  ⏱ Token expires at: {new Date(bootstrapModal.expiresAt).toLocaleString()} (1 hour)
+                </div>
+                <div className="text-xs text-gray-400 space-y-1">
+                  <p>The script will:</p>
+                  <ol className="list-decimal ml-4 space-y-0.5">
+                    <li>Register the machine with this Gopher instance</li>
+                    <li>Install the VPS SSH public key in <code className="bg-gray-100 px-1 rounded">~/.ssh/authorized_keys</code></li>
+                    <li>Install and configure rathole as a reverse tunnel client</li>
+                    <li>Enable a systemd service to keep the tunnel running</li>
+                  </ol>
+                </div>
+                {/* Waiting / timeout indicator */}
+                <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 ${
+                  bootstrapModal.phase === 'timeout'
+                    ? 'bg-amber-50 border border-amber-200 text-amber-700'
+                    : 'bg-blue-50 border border-blue-100 text-blue-600'
+                }`}>
+                  {bootstrapModal.phase === 'timeout' ? (
+                    <>⚠ Still waiting — bootstrap is taking longer than expected. Check the machine for errors.</>
+                  ) : (
+                    <><Loader2 size={12} className="animate-spin shrink-0" /> Waiting for machine to connect…</>
+                  )}
+                </div>
               </div>
-              <div className="text-xs text-gray-400 space-y-1">
-                <p>The script will:</p>
-                <ol className="list-decimal ml-4 space-y-0.5">
-                  <li>Register the machine with this Gopher instance</li>
-                  <li>Install the VPS SSH public key in <code className="bg-gray-100 px-1 rounded">~/.ssh/authorized_keys</code></li>
-                  <li>Install and configure rathole as a reverse tunnel client</li>
-                  <li>Enable a systemd service to keep the tunnel running</li>
-                </ol>
-              </div>
-            </div>
+            )}
+
             <div className="flex justify-end p-4 border-t">
               <button
-                onClick={() => setBootstrapModal(m => ({ ...m, isOpen: false }))}
+                onClick={() => {
+                  if (bootstrapTimeoutRef.current) clearTimeout(bootstrapTimeoutRef.current)
+                  setBootstrapModal(m => ({ ...m, isOpen: false, phase: 'waiting' }))
+                }}
                 className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm"
               >
-                Close
+                {bootstrapModal.phase === 'success' ? 'Done' : 'Close'}
               </button>
             </div>
           </div>
