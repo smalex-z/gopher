@@ -363,8 +363,3 @@ func generateToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// logAuthEvent is kept for external callers (e.g. bootstrap) that don't have
-// an AuthService reference.
-func logAuthEvent(event, ip string) {
-	log.Printf("gopher-auth: %s ip=%s", event, ip)
-}

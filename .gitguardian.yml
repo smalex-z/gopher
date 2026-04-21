@@ -1,0 +1,5 @@
+version: 2
+
+ignore-paths:
+  - "**/*_test.go"
+  - "tests/**"

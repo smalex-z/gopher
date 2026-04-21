@@ -4,7 +4,6 @@ import (
 	"bytes"
 	_ "embed"
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 	"text/template"
@@ -136,22 +135,6 @@ func extractPortFromBindAddr(bindAddr string) int {
 		return 0
 	}
 	port, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-	if err != nil {
-		return 0
-	}
-	return port
-}
-
-// extractPortFromAddr extracts the port number from "host:PORT" format
-func extractPortFromAddr(addr string) int {
-	if addr == "" {
-		return 0
-	}
-	_, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return 0
-	}
-	port, err := strconv.Atoi(portStr)
 	if err != nil {
 		return 0
 	}

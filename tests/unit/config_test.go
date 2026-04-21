@@ -389,15 +389,13 @@ bind_addr = "0.0.0.0:25000"
 # gopher-tunnel-end: my-tunnel
 `
 
-	result := config.ValidateRatholeConfig(cfg, []db.Machine{}, []db.Tunnel{})
-
 	// If validation checks can access parsed config directly, verify token/bind_addr were extracted
 	// For now, we validate a machine with the same ID and token should pass
 	tunnels := []db.Tunnel{
 		{ID: "my-tunnel", RatholePort: 25000, RatholeToken: "secret-token-123", CreatedAt: time.Now(), UpdatedAt: time.Now()},
 	}
 
-	result = config.ValidateRatholeConfig(cfg, []db.Machine{}, tunnels)
+	result := config.ValidateRatholeConfig(cfg, []db.Machine{}, tunnels)
 
 	if !result.Valid {
 		t.Errorf("Should correctly extract token and bind_addr. Errors: %v", result.Errors)

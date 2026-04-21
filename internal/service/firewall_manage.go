@@ -489,11 +489,3 @@ func persistRules() {
 		_ = writeLocalFile(savePath, string(out))
 	}
 }
-
-// iptablesMakePublic makes a private port publicly reachable again.
-func iptablesMakePublic(port int, proto string) error {
-	portStr := strconv.Itoa(port)
-	iptablesDeleteRule(gopherChain, "-p", proto, "--dport", portStr, "-s", "127.0.0.1", "-j", "ACCEPT")
-	iptablesDeleteRule(gopherChain, "-p", proto, "--dport", portStr, "-j", "DROP")
-	return iptablesOpenPort(port, proto)
-}
