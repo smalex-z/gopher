@@ -68,6 +68,7 @@ func runServer(args []string) {
 	go secSvc.SyncFail2banConfig()
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
+	localSvc.ReconcileMainCaddyfile()
 	localSvc.ReconcileRouterCaddyBlock()
 	localSvc.ReconcileAuthorizedKeys()
 
