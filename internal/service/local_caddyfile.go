@@ -25,13 +25,17 @@ func managedTunnelCaddyPath(tunnelID string) string {
 	return fmt.Sprintf("%s/gopher-tunnel-%s.caddy", caddyManagedDir, tunnelID)
 }
 
-func buildRouterCaddyBlock(domain string) string {
-	return fmt.Sprintf("router.%s {\n    reverse_proxy localhost:%d\n}\n", domain, dashboardPort)
+func buildRouterCaddyBlock(domain, bindIP string) string {
+	bind := ""
+	if bindIP != "" {
+		bind = fmt.Sprintf("    bind %s\n", bindIP)
+	}
+	return fmt.Sprintf("router.%s {\n%s    reverse_proxy localhost:%d\n}\n", domain, bind, dashboardPort)
 }
 
 // ReconcileRouterCaddyBlock rewrites the managed router Caddy file to reflect
-// the current dashboardPort. Called at startup so binary updates that change
-// the default port don't leave a stale Caddy config pointing at the old port.
+// the current dashboardPort and bindIP. Called at startup so binary updates that
+// change the default port don't leave a stale Caddy config pointing at the old port.
 func (s *LocalSetupService) ReconcileRouterCaddyBlock() {
 	if !isCommandAvailable("caddy") {
 		return
@@ -40,14 +44,14 @@ func (s *LocalSetupService) ReconcileRouterCaddyBlock() {
 	if err != nil || settings.Domain == "" || !settings.LocalSetupDone {
 		return
 	}
-	if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(settings.Domain)); err != nil {
+	if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(settings.Domain, settings.BindIP)); err != nil {
 		log.Printf("startup: failed to reconcile router Caddy block: %v", err)
 		return
 	}
 	_ = exec.Command("sudo", "systemctl", "reload-or-restart", "caddy").Run() // #nosec G204
 }
 
-func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool, botProtected bool) string {
+func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool, botProtected bool, bindIP string) string {
 	scheme := ""
 	if noTLS {
 		scheme = "http://"
@@ -60,7 +64,11 @@ func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool
 	if botProtected {
 		upstreamPort = dashboardPort
 	}
-	return fmt.Sprintf("%s%s.%s {\n    reverse_proxy localhost:%d\n}\n", scheme, subdomain, domain, upstreamPort)
+	bind := ""
+	if bindIP != "" {
+		bind = fmt.Sprintf("    bind %s\n", bindIP)
+	}
+	return fmt.Sprintf("%s%s.%s {\n%s    reverse_proxy localhost:%d\n}\n", scheme, subdomain, domain, bind, upstreamPort)
 }
 
 func extractCaddyCustomBody(content string) string {

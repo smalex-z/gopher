@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Copy, Check, ExternalLink, RefreshCw, Globe, Lock, ShieldAlert, Server, Network, Activity } from 'lucide-react'
+import { Copy, Check, ExternalLink, RefreshCw, Globe, Lock, ShieldAlert, Server, Network, Activity, AlertTriangle } from 'lucide-react'
 import { localApi } from '../api/local'
 import { updateApi, type UpdateChannel } from '../api/update'
 import { machinesApi } from '../api/machines'
@@ -25,6 +25,7 @@ function ServiceRow({ label, active }: { label: string; active: string }) {
 export default function ServerPage() {
   const qc = useQueryClient()
   const [keyCopied, setKeyCopied] = useState(false)
+  const [bindIPInput, setBindIPInput] = useState<string | null>(null)
 
   const { data: status, refetch, isLoading } = useQuery({
     queryKey: ['local-status'],
@@ -50,6 +51,16 @@ export default function ServerPage() {
   const dashboardMutation = useMutation({
     mutationFn: (dashboardPrivate: boolean) => localApi.setServerPorts(dashboardPrivate),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['local-status'] }),
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const bindIPMutation = useMutation({
+    mutationFn: (ip: string) => localApi.setBindIP(ip),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['local-status'] })
+      setBindIPInput(null)
+      toast.success('Bind IP updated. Restart Gopher for the dashboard port to rebind.')
+    },
     onError: (e: Error) => toast.error(e.message),
   })
 
@@ -191,6 +202,59 @@ export default function ServerPage() {
                   </button>
                 </div>
               </div>
+            </div>
+
+            {/* Bind IP */}
+            <div className="mt-5 pt-4 border-t">
+              <div className="flex items-start justify-between gap-4 mb-3">
+                <div>
+                  <div className="text-sm font-medium text-gray-800">Bind IP</div>
+                  <div className="text-xs text-gray-500 mt-0.5">
+                    Restrict all public listeners (rathole ports, Caddy, dashboard) to a single IP.
+                    Useful on multi-homed hosts so other services can share the same ports on a different IP.
+                  </div>
+                  {!status?.bind_ip && (status?.host_ips?.length ?? 0) > 1 && (
+                    <div className="flex items-center gap-1 text-xs text-amber-600 mt-1">
+                      <AlertTriangle size={11} />
+                      Multiple IPs detected ({status!.host_ips.join(', ')}) — Gopher is listening on all of them (0.0.0.0).
+                    </div>
+                  )}
+                </div>
+                <span className="shrink-0 text-xs font-mono font-medium px-2 py-1 rounded-full bg-gray-100 text-gray-600">
+                  {status?.bind_ip || '0.0.0.0'}
+                </span>
+              </div>
+              <div className="flex gap-2 items-center">
+                <input
+                  type="text"
+                  placeholder={status?.bind_ip || '0.0.0.0 (all interfaces)'}
+                  value={bindIPInput ?? (status?.bind_ip || '')}
+                  onChange={e => setBindIPInput(e.target.value)}
+                  className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-1.5 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <button
+                  onClick={() => bindIPMutation.mutate(bindIPInput ?? '')}
+                  disabled={bindIPMutation.isPending || bindIPInput === null}
+                  className="text-xs font-medium px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {bindIPMutation.isPending ? 'Saving…' : 'Save'}
+                </button>
+                {(status?.bind_ip || bindIPInput) && (
+                  <button
+                    onClick={() => { setBindIPInput(''); bindIPMutation.mutate('') }}
+                    disabled={bindIPMutation.isPending}
+                    className="text-xs font-medium px-3 py-1.5 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              {status?.bind_ip && (
+                <p className="text-xs text-amber-600 mt-1.5 flex items-center gap-1">
+                  <AlertTriangle size={11} />
+                  Dashboard port rebind requires a Gopher service restart.
+                </p>
+              )}
             </div>
           </div>
 

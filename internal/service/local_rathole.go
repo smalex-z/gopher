@@ -59,7 +59,12 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	}
 
 	// Rebuild gopher-managed config from DB using the canonical generator.
-	managedConfig := config.GenerateRatholeServerConfig(machines, tunnels)
+	settings, _ := db.GetSettings()
+	bindIP := ""
+	if settings != nil {
+		bindIP = settings.BindIP
+	}
+	managedConfig := config.GenerateRatholeServerConfig(machines, tunnels, bindIP)
 
 	// Guardrail: never write a generated config that fails self-validation.
 	validation := config.ValidateRatholeConfig(managedConfig, machines, tunnels)
@@ -139,11 +144,11 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		if err := ensureManagedCaddyLayout(); err != nil {
 			return fmt.Errorf("failed to prepare Caddy managed layout: %w", err)
 		}
-		if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(settings.Domain)); err != nil {
+		if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(settings.Domain, settings.BindIP)); err != nil {
 			return fmt.Errorf("failed to write router Caddy file: %w", err)
 		}
 		managedPath := managedTunnelCaddyPath(tunnel.ID)
-		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled)
+		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, settings.BindIP)
 		if err := writeLocalFile(managedPath, block); err != nil {
 			return fmt.Errorf("failed to write tunnel Caddy file %s: %w", managedPath, err)
 		}

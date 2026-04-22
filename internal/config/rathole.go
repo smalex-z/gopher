@@ -66,13 +66,18 @@ local_addr = "0.0.0.0:22"
 // GenerateRatholeServerConfig generates a complete rathole server config from scratch
 // using Gopher-managed entry markers. Database is the single source of truth.
 // Never appends to existing config; always regenerates completely.
-func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel) string {
+//
+// An optional bindIP argument (e.g. "203.0.113.10") restricts all public listeners
+// to a specific IP instead of 0.0.0.0. Private tunnels always use 127.0.0.1.
+func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel, bindIP ...string) string {
+	publicHost := resolvePublicHost(bindIP...)
+
 	var buf strings.Builder
 	managedEntries := 0
 
 	// Write server section
 	buf.WriteString("[server]\n")
-	buf.WriteString("bind_addr = \"0.0.0.0:2333\"\n")
+	buf.WriteString(fmt.Sprintf("bind_addr = \"%s:2333\"\n", publicHost))
 
 	// Write machine SSH tunnels with markers
 	for _, m := range machines {
@@ -84,7 +89,7 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel) str
 		buf.WriteString(fmt.Sprintf("token = \"%s\"\n", m.RatholeSSHToken))
 		sshBindHost := "127.0.0.1"
 		if m.PublicSSH {
-			sshBindHost = "0.0.0.0"
+			sshBindHost = publicHost
 		}
 		buf.WriteString(fmt.Sprintf("bind_addr = \"%s:%d\"\n", sshBindHost, m.TunnelPort))
 		buf.WriteString(fmt.Sprintf("# gopher-machine-end: %s\n", m.ID))
@@ -103,7 +108,7 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel) str
 		buf.WriteString(fmt.Sprintf("\n# gopher-tunnel-start: %s\n", t.ID))
 		buf.WriteString(fmt.Sprintf("[server.services.tunnel-%s]\n", t.ID))
 		buf.WriteString(fmt.Sprintf("token = \"%s\"\n", token))
-		bindHost := "0.0.0.0"
+		bindHost := publicHost
 		if t.Private {
 			bindHost = "127.0.0.1"
 		}
@@ -119,10 +124,18 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel) str
 	if managedEntries == 0 {
 		buf.WriteString("\n[server.services.placeholder]\n")
 		buf.WriteString("token = \"placeholder\"\n")
-		buf.WriteString("bind_addr = \"0.0.0.0:52000\"\n")
+		buf.WriteString(fmt.Sprintf("bind_addr = \"%s:52000\"\n", publicHost))
 	}
 
 	return buf.String()
+}
+
+// resolvePublicHost returns bindIP[0] if non-empty, otherwise "0.0.0.0".
+func resolvePublicHost(bindIP ...string) string {
+	if len(bindIP) > 0 && bindIP[0] != "" {
+		return bindIP[0]
+	}
+	return "0.0.0.0"
 }
 
 // extractPortFromBindAddr extracts the port number from a "0.0.0.0:PORT" bind_addr string

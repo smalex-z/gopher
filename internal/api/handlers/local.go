@@ -327,5 +327,22 @@ func (h *LocalHandler) SetServerPorts(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, map[string]bool{"dashboard_private": body.DashboardPrivate})
 }
 
+// PUT /api/local/bind-ip — set (or clear) the bind IP for all public listeners.
+// Immediately reconciles rathole and Caddy; HTTP server requires a restart.
+func (h *LocalHandler) SetBindIP(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		BindIP string `json:"bind_ip"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.BadRequest(w, "invalid request body")
+		return
+	}
+	if err := h.svc.SetBindIP(body.BindIP); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"bind_ip": body.BindIP})
+}
+
 // validDomain matches a reasonable FQDN: labels of alphanumeric + hyphens separated by dots.
 var validDomain = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)
