@@ -496,9 +496,8 @@ func detectHostIPs() []string {
 	return ips
 }
 
-// SetBindIP persists the bind IP and immediately reconciles rathole + Caddy so
-// the change takes effect for new connections. The Gopher HTTP server itself
-// requires a service restart to rebind (noted in the UI).
+// SetBindIP persists the bind IP and immediately reconciles rathole + Caddy.
+// The Gopher HTTP server always listens on 0.0.0.0 so no restart is needed.
 func (s *LocalSetupService) SetBindIP(bindIP string) error {
 	if bindIP != "" {
 		if net.ParseIP(bindIP) == nil {

@@ -59,7 +59,7 @@ export default function ServerPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['local-status'] })
       setBindIPInput(null)
-      toast.success('Bind IP updated. Restart Gopher for the dashboard port to rebind.')
+      toast.success('Bind IP updated.')
     },
     onError: (e: Error) => toast.error(e.message),
   })
@@ -249,10 +249,10 @@ export default function ServerPage() {
                   </button>
                 )}
               </div>
-              {status?.bind_ip && (
+              {bindIPInput !== null && bindIPInput !== '' && (
                 <p className="text-xs text-amber-600 mt-1.5 flex items-center gap-1">
                   <AlertTriangle size={11} />
-                  Dashboard port rebind requires a Gopher service restart.
+                  Rathole tunnel ports and Caddy will bind to this IP. Only set this if the IP exists on this host.
                 </p>
               )}
             </div>

@@ -102,12 +102,7 @@ func runServer(args []string) {
 	}
 
 	listenAddr := ":" + *port
-	if settings, sErr := db.GetSettings(); sErr == nil && settings.BindIP != "" {
-		listenAddr = settings.BindIP + ":" + *port
-		log.Printf("Server starting on %s (bind_ip configured)", listenAddr)
-	} else {
-		log.Printf("Server starting on %s", listenAddr)
-	}
+	log.Printf("Server starting on %s", listenAddr)
 	if err := http.ListenAndServe(listenAddr, botMiddleware.Wrap(mux)); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}

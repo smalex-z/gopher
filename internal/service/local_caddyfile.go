@@ -61,14 +61,20 @@ func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool
 	// before they reach rathole. Host header routing distinguishes tunnel
 	// traffic from dashboard traffic.
 	upstreamPort := ratholePort
+	// Rathole public tunnel ports bind to bind_ip when set, so Caddy must proxy
+	// to bind_ip:ratholePort. Bot-protected tunnels proxy to Gopher itself which
+	// always listens on 0.0.0.0, so localhost is always correct for that case.
+	upstream := "localhost"
 	if botProtected {
 		upstreamPort = dashboardPort
+	} else if bindIP != "" {
+		upstream = bindIP
 	}
 	bind := ""
 	if bindIP != "" {
 		bind = fmt.Sprintf("    bind %s\n", bindIP)
 	}
-	return fmt.Sprintf("%s%s.%s {\n%s    reverse_proxy localhost:%d\n}\n", scheme, subdomain, domain, bind, upstreamPort)
+	return fmt.Sprintf("%s%s.%s {\n%s    reverse_proxy %s:%d\n}\n", scheme, subdomain, domain, bind, upstream, upstreamPort)
 }
 
 func extractCaddyCustomBody(content string) string {
