@@ -145,7 +145,11 @@ func (s *LocalSetupService) doInstall(domain, serverHost string, skipCaddy bool,
 		if data, readErr := os.ReadFile(caddyConfigPath); readErr == nil {
 			existingCaddy = string(data)
 		}
-		managedCaddy := buildManagedCaddyfile(existingCaddy)
+		bindIP := ""
+			if s, sErr := db.GetSettings(); sErr == nil {
+				bindIP = s.BindIP
+			}
+			managedCaddy := buildManagedCaddyfile(existingCaddy, bindIP)
 		managedHosts := []string{fmt.Sprintf("router.%s", domain)}
 		if tunnels, tunErr := db.GetTunnels(); tunErr == nil {
 			for _, tunnel := range tunnels {

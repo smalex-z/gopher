@@ -26,11 +26,7 @@ func managedTunnelCaddyPath(tunnelID string) string {
 }
 
 func buildRouterCaddyBlock(domain, bindIP string) string {
-	bind := ""
-	if bindIP != "" {
-		bind = fmt.Sprintf("    bind %s\n", bindIP)
-	}
-	return fmt.Sprintf("router.%s {\n%s    reverse_proxy localhost:%d\n}\n", domain, bind, dashboardPort)
+	return fmt.Sprintf("router.%s {\n    reverse_proxy localhost:%d\n}\n", domain, dashboardPort)
 }
 
 // ReconcileRouterCaddyBlock rewrites the managed router Caddy file to reflect
@@ -72,11 +68,7 @@ func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool
 		upstreamPort = dashboardPort
 		upstream = "localhost"
 	}
-	bind := ""
-	if bindIP != "" {
-		bind = fmt.Sprintf("    bind %s\n", bindIP)
-	}
-	return fmt.Sprintf("%s%s.%s {\n%s    reverse_proxy %s:%d\n}\n", scheme, subdomain, domain, bind, upstream, upstreamPort)
+	return fmt.Sprintf("%s%s.%s {\n    reverse_proxy %s:%d\n}\n", scheme, subdomain, domain, upstream, upstreamPort)
 }
 
 func extractCaddyCustomBody(content string) string {
@@ -92,7 +84,7 @@ func extractCaddyCustomBody(content string) string {
 	return strings.TrimSpace(below[:eIdx])
 }
 
-func buildManagedCaddyfile(existing string) string {
+func buildManagedCaddyfile(existing, bindIP string) string {
 	customBody := extractCaddyCustomBody(existing)
 	if customBody == "" && strings.TrimSpace(existing) != "" {
 		customBody = strings.TrimSpace(existing)
@@ -100,10 +92,18 @@ func buildManagedCaddyfile(existing string) string {
 
 	var out strings.Builder
 	out.WriteString("# Gopher managed Caddyfile\n")
-	out.WriteString("# Global options (uncomment and set email to enable HTTPS):\n")
-	out.WriteString("# {\n")
-	out.WriteString("#     email you@example.com\n")
-	out.WriteString("# }\n\n")
+	if bindIP != "" {
+		out.WriteString("{\n")
+		out.WriteString(fmt.Sprintf("    default_bind %s\n", bindIP))
+		out.WriteString("    # Uncomment and set email to enable HTTPS:\n")
+		out.WriteString("    # email you@example.com\n")
+		out.WriteString("}\n\n")
+	} else {
+		out.WriteString("# Global options (uncomment and set email to enable HTTPS):\n")
+		out.WriteString("# {\n")
+		out.WriteString("#     email you@example.com\n")
+		out.WriteString("# }\n\n")
+	}
 	out.WriteString("import /etc/caddy/conf.d/*.caddy\n\n")
 	out.WriteString(caddyCustomBeginMark + "\n")
 	out.WriteString("# Everything below this line will NOT be overwritten.\n")
@@ -123,7 +123,24 @@ func ensureManagedCaddyLayout() error {
 	if data, err := os.ReadFile(caddyConfigPath); err == nil {
 		existing = string(data)
 	}
-	return writeLocalFile(caddyConfigPath, buildManagedCaddyfile(existing))
+	bindIP := ""
+	if settings, err := db.GetSettings(); err == nil {
+		bindIP = settings.BindIP
+	}
+	return writeLocalFile(caddyConfigPath, buildManagedCaddyfile(existing, bindIP))
+}
+
+// ReconcileMainCaddyfile rewrites the main Caddyfile global options (e.g.
+// default_bind) to match current settings. Called when bind_ip changes.
+func (s *LocalSetupService) ReconcileMainCaddyfile() {
+	if !isCommandAvailable("caddy") {
+		return
+	}
+	if err := ensureManagedCaddyLayout(); err != nil {
+		log.Printf("reconcile main Caddyfile: %v", err)
+		return
+	}
+	_ = exec.Command("sudo", "systemctl", "reload-or-restart", "caddy").Run() // #nosec G204
 }
 
 // removeCaddyBlock removes a top-level site block that starts with "host {".

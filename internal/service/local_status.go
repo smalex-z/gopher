@@ -526,6 +526,7 @@ func (s *LocalSetupService) SetBindIP(bindIP string) error {
 		return err
 	}
 	_ = s.ReconcileServerConfig()
+	s.ReconcileMainCaddyfile()
 	s.ReconcileRouterCaddyBlock()
 	_ = s.reconcileAllTunnelCaddyBlocks(settings)
 	go func() {
