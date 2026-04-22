@@ -21,7 +21,7 @@ custom.example.com {
 # ===== END CUSTOM CONFIGURATION =====
 `
 
-	content := buildManagedCaddyfile(existing)
+	content := buildManagedCaddyfile(existing, "")
 	if !strings.Contains(content, "import /etc/caddy/conf.d/*.caddy") {
 		t.Fatalf("expected import-based layout, got:\n%s", content)
 	}
@@ -42,7 +42,7 @@ photos.example.com {
     reverse_proxy localhost:20005
 }
 `
-	content := buildManagedCaddyfile(existing)
+	content := buildManagedCaddyfile(existing, "")
 
 	if !strings.Contains(content, "import /etc/caddy/conf.d/*.caddy") {
 		t.Fatalf("expected import-based layout, got:\n%s", content)
