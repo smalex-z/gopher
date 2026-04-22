@@ -57,9 +57,9 @@ export default function ServerPage() {
   const bindIPMutation = useMutation({
     mutationFn: (ip: string) => localApi.setBindIP(ip),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['local-status'] })
       setBindIPInput(null)
-      toast.success('Bind IP updated.')
+      toast.success('Bind IP saved — service restarting to apply.')
+      setTimeout(() => qc.invalidateQueries({ queryKey: ['local-status'] }), 3000)
     },
     onError: (e: Error) => toast.error(e.message),
   })

@@ -166,7 +166,7 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		if attempt > 0 {
 			time.Sleep(5 * time.Second)
 		}
-		sshClient, sshDialErr = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
+		sshClient, sshDialErr = sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 		if sshDialErr == nil {
 			break
 		}
@@ -232,7 +232,7 @@ func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine
 	if err != nil {
 		return nil
 	}
-	sshClient, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
+	sshClient, err := sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 	if err != nil {
 		return err
 	}
@@ -302,7 +302,7 @@ func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
 		return fmt.Errorf("machine has no tunnel port")
 	}
 
-	sshClient, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
+	sshClient, err := sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 	if err != nil {
 		return fmt.Errorf("failed to SSH into machine via tunnel (port %d): %w", machine.TunnelPort, err)
 	}

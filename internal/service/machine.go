@@ -133,7 +133,7 @@ func (s *MachineService) Status(id string) (map[string]interface{}, error) {
 	var client *sshpkg.SSHClient
 	if machine.TunnelPort > 0 {
 		if sshKey, kerr := db.GetSSHKeyForMachine(machine); kerr == nil {
-			client, err = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, sshKey.PrivateKey)
+			client, err = sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 		}
 	}
 	if client == nil {
@@ -176,7 +176,7 @@ func (s *MachineService) RefreshNetworkInfo(id string) (map[string]interface{}, 
 	var client *sshpkg.SSHClient
 	if machine.TunnelPort > 0 {
 		if key, kerr := db.GetSSHKeyForMachine(machine); kerr == nil {
-			client, _ = sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, key.PrivateKey)
+			client, _ = sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, key.PrivateKey)
 		}
 	}
 	if client == nil && machine.Host != "" {
@@ -245,7 +245,7 @@ func (s *MachineService) ReassignSSHKey(machineID, newKeyID string) error {
 	if machine.TunnelPort == 0 {
 		return fmt.Errorf("machine has no active tunnel — cannot push key")
 	}
-	client, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, currentKey.PrivateKey)
+	client, err := sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, currentKey.PrivateKey)
 	if err != nil {
 		return fmt.Errorf("failed to connect to machine: %w", err)
 	}

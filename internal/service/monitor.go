@@ -61,7 +61,7 @@ func (s *MonitorService) checkMachine(machine db.Machine) {
 	//
 	// A banner read with a hard deadline is sufficient: sshd sends its version
 	// string immediately on connect, so any data back means the VM is reachable.
-	reachable := probeMachineSSH(machine.TunnelPort)
+	reachable := probeMachineSSH(TunnelDialHost(&machine), machine.TunnelPort)
 
 	if !reachable {
 		machine.Status = "offline"
@@ -82,8 +82,8 @@ func (s *MonitorService) checkMachine(machine db.Machine) {
 // probeMachineSSH connects to the machine's rathole tunnel port and reads the
 // SSH banner with a short deadline. Returns true only when the VM's sshd sends
 // data back, confirming the tunnel is live end-to-end.
-func probeMachineSSH(tunnelPort int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", tunnelPort), 5*time.Second)
+func probeMachineSSH(host string, tunnelPort int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, tunnelPort), 5*time.Second)
 	if err != nil {
 		return false
 	}
@@ -138,8 +138,20 @@ func (s *MonitorService) checkTunnel(t db.Tunnel) {
 // "rathole has no client" (HEAD disappears into rathole's buffer, second
 // timeout) from "client connected, HTTP service running" (HEAD elicits a
 // response).
+// tunnelProbeHost returns the IP to dial when probing a tunnel port.
+// Private tunnels always bind 127.0.0.1. Public tunnels bind BindIP (or 0.0.0.0
+// when unset, which includes loopback — so 127.0.0.1 is still reachable).
+func tunnelProbeHost(t db.Tunnel) string {
+	if !t.Private {
+		if settings, err := db.GetSettings(); err == nil && settings.BindIP != "" {
+			return settings.BindIP
+		}
+	}
+	return "127.0.0.1"
+}
+
 func probeTunnel(t db.Tunnel) string {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", t.RatholePort), 3*time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", tunnelProbeHost(t), t.RatholePort), 3*time.Second)
 	if err != nil {
 		return "offline"
 	}

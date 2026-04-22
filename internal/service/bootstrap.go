@@ -169,7 +169,7 @@ func (s *BootstrapService) awaitSSHHealth(machine *db.Machine, privateKey string
 	deadline := time.Now().Add(bootstrapSSHHealthTimeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(5 * time.Second)
-		c, err := sshpkg.NewClient("localhost", machine.TunnelPort, machine.Username, privateKey)
+		c, err := sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, privateKey)
 		if err != nil {
 			continue
 		}

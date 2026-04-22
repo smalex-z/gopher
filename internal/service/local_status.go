@@ -25,6 +25,19 @@ func SetDashboardPort(port int) {
 	dashboardPort = port
 }
 
+// TunnelDialHost returns the host Gopher should dial to reach a machine's
+// rathole tunnel port. Private SSH tunnels always bind to 127.0.0.1 so
+// "localhost" is always correct. Public SSH tunnels bind to bind_ip (when set),
+// so Gopher must dial bind_ip to reach them.
+func TunnelDialHost(m *db.Machine) string {
+	if m.PublicSSH {
+		if settings, err := db.GetSettings(); err == nil && settings.BindIP != "" {
+			return settings.BindIP
+		}
+	}
+	return "localhost"
+}
+
 
 // LocalServiceStatus is returned by GET /api/local/status.
 type LocalServiceStatus struct {
@@ -496,8 +509,8 @@ func detectHostIPs() []string {
 	return ips
 }
 
-// SetBindIP persists the bind IP and immediately reconciles rathole + Caddy.
-// The Gopher HTTP server always listens on 0.0.0.0 so no restart is needed.
+// SetBindIP persists the bind IP, immediately reconciles rathole + Caddy, and
+// schedules a self-restart so the HTTP server rebinds (0.0.0.0 ↔ 127.0.0.1).
 func (s *LocalSetupService) SetBindIP(bindIP string) error {
 	if bindIP != "" {
 		if net.ParseIP(bindIP) == nil {
@@ -512,12 +525,13 @@ func (s *LocalSetupService) SetBindIP(bindIP string) error {
 	if err := db.SaveSettings(settings); err != nil {
 		return err
 	}
-	// Regenerate rathole config (sends SIGHUP — no connection drops).
 	_ = s.ReconcileServerConfig()
-	// Regenerate Caddy router block (already reads BindIP from DB).
 	s.ReconcileRouterCaddyBlock()
-	// Reconcile all existing tunnel Caddy blocks.
 	_ = s.reconcileAllTunnelCaddyBlocks(settings)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		_ = exec.Command("sudo", "systemctl", "restart", "gopher").Run() // #nosec G204
+	}()
 	return nil
 }
 

@@ -108,6 +108,8 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel, bin
 		buf.WriteString(fmt.Sprintf("\n# gopher-tunnel-start: %s\n", t.ID))
 		buf.WriteString(fmt.Sprintf("[server.services.tunnel-%s]\n", t.ID))
 		buf.WriteString(fmt.Sprintf("token = \"%s\"\n", token))
+		// Private tunnels: 127.0.0.1 — only Caddy needs to reach them.
+		// Public tunnels: bind_ip (or 0.0.0.0) — externally accessible.
 		bindHost := publicHost
 		if t.Private {
 			bindHost = "127.0.0.1"

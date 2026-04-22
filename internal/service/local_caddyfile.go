@@ -60,15 +60,17 @@ func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool
 	// as the dashboard) so the bot-protection middleware can intercept requests
 	// before they reach rathole. Host header routing distinguishes tunnel
 	// traffic from dashboard traffic.
+	// Public tunnel rathole ports bind to bind_ip (or 0.0.0.0), so Caddy proxies
+	// to bind_ip:ratholePort. Bot-protected tunnels route to Gopher itself which
+	// is on 127.0.0.1, so those always use localhost regardless of bind_ip.
 	upstreamPort := ratholePort
-	// Rathole public tunnel ports bind to bind_ip when set, so Caddy must proxy
-	// to bind_ip:ratholePort. Bot-protected tunnels proxy to Gopher itself which
-	// always listens on 0.0.0.0, so localhost is always correct for that case.
 	upstream := "localhost"
+	if bindIP != "" {
+		upstream = bindIP
+	}
 	if botProtected {
 		upstreamPort = dashboardPort
-	} else if bindIP != "" {
-		upstream = bindIP
+		upstream = "localhost"
 	}
 	bind := ""
 	if bindIP != "" {

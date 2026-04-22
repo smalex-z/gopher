@@ -102,6 +102,11 @@ func runServer(args []string) {
 	}
 
 	listenAddr := ":" + *port
+	if settings, sErr := db.GetSettings(); sErr == nil && settings.BindIP != "" {
+		// Restrict dashboard to 127.0.0.1 — not reachable on other interfaces.
+		// Caddy still proxies to localhost:port so this is transparent to users.
+		listenAddr = "127.0.0.1:" + *port
+	}
 	log.Printf("Server starting on %s", listenAddr)
 	if err := http.ListenAndServe(listenAddr, botMiddleware.Wrap(mux)); err != nil {
 		log.Fatalf("Server failed: %v", err)
