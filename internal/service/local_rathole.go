@@ -212,7 +212,7 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	// Restart rathole-client. Bootstrap now runs the service as the SSH user,
 	// so pkill is sufficient (systemd Restart=always brings it back).
 	// sudo -n is attempted as fallback for older installs with NOPASSWD configured.
-	_, _ = sshClient.Execute("pkill -x rathole 2>/dev/null; sudo -n systemctl restart rathole-client 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true")
+	_, _ = sshClient.Execute(`pkill -x rathole 2>/dev/null; { [ "$(id -u)" -eq 0 ] && systemctl restart rathole-client || sudo -n systemctl restart rathole-client; } 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true`)
 
 	return nil
 }
@@ -253,7 +253,7 @@ func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine
 	if err := sshClient.UploadFileSudo([]byte(updated), confPath, machine.Username); err != nil {
 		return err
 	}
-	_, _ = sshClient.Execute("pkill -x rathole 2>/dev/null; sudo -n systemctl restart rathole-client 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true")
+	_, _ = sshClient.Execute(`pkill -x rathole 2>/dev/null; { [ "$(id -u)" -eq 0 ] && systemctl restart rathole-client || sudo -n systemctl restart rathole-client; } 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true`)
 	return nil
 }
 

@@ -113,7 +113,7 @@ func (s *VPSService) Status() (map[string]interface{}, error) {
 	}
 	defer client.Close()
 
-	output, err := client.Execute("sudo systemctl status caddy rathole-server --no-pager")
+	output, err := client.Execute(`{ [ "$(id -u)" -eq 0 ] && systemctl status caddy rathole-server --no-pager || sudo systemctl status caddy rathole-server --no-pager; }`)
 	if err != nil {
 		return map[string]interface{}{
 			"connected": true,
