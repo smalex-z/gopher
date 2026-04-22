@@ -160,7 +160,13 @@ func (m *Middleware) handleVerify(w http.ResponseWriter, r *http.Request, tunnel
 // ---------------------------------------------------------------------------
 
 func (m *Middleware) forward(w http.ResponseWriter, r *http.Request, tunnel *db.Tunnel) {
-	target, _ := url.Parse(fmt.Sprintf("http://localhost:%d", tunnel.RatholePort))
+	// Bot-protected tunnel ports bind to bind_ip when set (same as other public
+	// tunnel ports), so we must proxy to bind_ip:port, not localhost:port.
+	ratholeHost := "localhost"
+	if settings, err := db.GetSettings(); err == nil && settings.BindIP != "" {
+		ratholeHost = settings.BindIP
+	}
+	target, _ := url.Parse(fmt.Sprintf("http://%s:%d", ratholeHost, tunnel.RatholePort))
 	rp := httputil.NewSingleHostReverseProxy(target)
 	rp.Director = func(req *http.Request) {
 		req.URL.Scheme = target.Scheme
