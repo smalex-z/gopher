@@ -59,7 +59,12 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	}
 
 	// Rebuild gopher-managed config from DB using the canonical generator.
-	managedConfig := config.GenerateRatholeServerConfig(machines, tunnels)
+	settings, _ := db.GetSettings()
+	bindIP := ""
+	if settings != nil {
+		bindIP = settings.BindIP
+	}
+	managedConfig := config.GenerateRatholeServerConfig(machines, tunnels, bindIP)
 
 	// Guardrail: never write a generated config that fails self-validation.
 	validation := config.ValidateRatholeConfig(managedConfig, machines, tunnels)
@@ -139,11 +144,11 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		if err := ensureManagedCaddyLayout(); err != nil {
 			return fmt.Errorf("failed to prepare Caddy managed layout: %w", err)
 		}
-		if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(settings.Domain)); err != nil {
+		if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(settings.Domain, settings.BindIP)); err != nil {
 			return fmt.Errorf("failed to write router Caddy file: %w", err)
 		}
 		managedPath := managedTunnelCaddyPath(tunnel.ID)
-		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled)
+		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, settings.BindIP)
 		if err := writeLocalFile(managedPath, block); err != nil {
 			return fmt.Errorf("failed to write tunnel Caddy file %s: %w", managedPath, err)
 		}
@@ -212,7 +217,7 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	// Restart rathole-client. Bootstrap now runs the service as the SSH user,
 	// so pkill is sufficient (systemd Restart=always brings it back).
 	// sudo -n is attempted as fallback for older installs with NOPASSWD configured.
-	_, _ = sshClient.Execute("pkill -x rathole 2>/dev/null; sudo -n systemctl restart rathole-client 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true")
+	_, _ = sshClient.Execute(`pkill -x rathole 2>/dev/null; { [ "$(id -u)" -eq 0 ] && systemctl restart rathole-client || sudo -n systemctl restart rathole-client; } 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true`)
 
 	return nil
 }
@@ -253,7 +258,7 @@ func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine
 	if err := sshClient.UploadFileSudo([]byte(updated), confPath, machine.Username); err != nil {
 		return err
 	}
-	_, _ = sshClient.Execute("pkill -x rathole 2>/dev/null; sudo -n systemctl restart rathole-client 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true")
+	_, _ = sshClient.Execute(`pkill -x rathole 2>/dev/null; { [ "$(id -u)" -eq 0 ] && systemctl restart rathole-client || sudo -n systemctl restart rathole-client; } 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true`)
 	return nil
 }
 

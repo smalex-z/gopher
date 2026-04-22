@@ -21,6 +21,10 @@ export interface LocalServiceStatus {
   os_user: string
   /** true once fail2ban has been installed and configured by Gopher */
   fail2ban_setup_done: boolean
+  /** IP address Gopher binds public listeners to. Empty string = 0.0.0.0 (all interfaces). */
+  bind_ip: string
+  /** All non-loopback IPv4 addresses on the host. More than one means multi-homed. */
+  host_ips: string[]
 }
 
 export interface FirewallStatus {
@@ -79,6 +83,8 @@ export const localApi = {
     client.post('/local/firewall/reload').then(r => r.data),
   setServerPorts: (dashboardPrivate: boolean) =>
     client.put('/local/server-ports', { dashboard_private: dashboardPrivate }).then(r => r.data),
+  setBindIP: (bindIP: string) =>
+    client.put('/local/bind-ip', { bind_ip: bindIP }).then(r => r.data),
   setupFail2ban: () =>
     client.post('/local/setup-fail2ban').then(r => r.data),
 }

@@ -162,7 +162,11 @@ func (s *LocalSetupService) doInstall(domain, serverHost string, skipCaddy bool,
 		if err := writeLocalFile(caddyConfigPath, managedCaddy); err != nil {
 			return fmt.Errorf("failed to write %s: %w", caddyConfigPath, err)
 		}
-		if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(domain)); err != nil {
+		installBindIP := ""
+		if installSettings, sErr := db.GetSettings(); sErr == nil {
+			installBindIP = installSettings.BindIP
+		}
+		if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(domain, installBindIP)); err != nil {
 			return fmt.Errorf("failed to write router Caddy file: %w", err)
 		}
 	}

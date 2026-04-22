@@ -101,8 +101,14 @@ func runServer(args []string) {
 		mux.Handle("/", spaHandler(http.FS(distFS)))
 	}
 
-	log.Printf("Server starting on :%s", *port)
-	if err := http.ListenAndServe(":"+*port, botMiddleware.Wrap(mux)); err != nil {
+	listenAddr := ":" + *port
+	if settings, sErr := db.GetSettings(); sErr == nil && settings.BindIP != "" {
+		listenAddr = settings.BindIP + ":" + *port
+		log.Printf("Server starting on %s (bind_ip configured)", listenAddr)
+	} else {
+		log.Printf("Server starting on %s", listenAddr)
+	}
+	if err := http.ListenAndServe(listenAddr, botMiddleware.Wrap(mux)); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }

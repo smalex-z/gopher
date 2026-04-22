@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -47,7 +48,12 @@ type LocalServiceStatus struct {
 	OSUser               string `json:"os_user"`
 	// Fail2banSetupDone is true once fail2ban has been installed and configured
 	// by Gopher. Used to prompt existing installs to run the fail2ban setup step.
-	Fail2banSetupDone    bool   `json:"fail2ban_setup_done"`
+	Fail2banSetupDone    bool     `json:"fail2ban_setup_done"`
+	// BindIP is the IP address Gopher binds public listeners to. Empty = 0.0.0.0.
+	BindIP               string   `json:"bind_ip"`
+	// HostIPs lists all non-loopback IPs detected on the host's network interfaces.
+	// Used by the frontend to warn when the host has multiple IPs and BindIP is unset.
+	HostIPs              []string `json:"host_ips"`
 }
 
 type LocalSetupService struct {
@@ -81,6 +87,8 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 		DashboardPort:        dashboardPort,
 		OSUser:               osUser,
 		Fail2banSetupDone:    settings.Fail2banSetupDone,
+		BindIP:               settings.BindIP,
+		HostIPs:              detectHostIPs(),
 	}
 	if key, kerr := db.GetDefaultSSHKey(); kerr == nil {
 		status.SSHPublicKey = key.PublicKey
@@ -459,6 +467,87 @@ func systemctlStatus(service string) string {
 		return s
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// detectHostIPs returns all non-loopback unicast IPv4 addresses on the host's
+// network interfaces. Used to warn when the host has multiple public IPs and
+// BindIP is unset (Gopher would then listen on all of them).
+func detectHostIPs() []string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var ips []string
+	for _, addr := range addrs {
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		if ip4 := ip.To4(); ip4 != nil {
+			ips = append(ips, ip4.String())
+		}
+	}
+	return ips
+}
+
+// SetBindIP persists the bind IP and immediately reconciles rathole + Caddy so
+// the change takes effect for new connections. The Gopher HTTP server itself
+// requires a service restart to rebind (noted in the UI).
+func (s *LocalSetupService) SetBindIP(bindIP string) error {
+	if bindIP != "" {
+		if net.ParseIP(bindIP) == nil {
+			return fmt.Errorf("invalid IP address: %q", bindIP)
+		}
+	}
+	settings, err := db.GetSettings()
+	if err != nil {
+		return err
+	}
+	settings.BindIP = bindIP
+	if err := db.SaveSettings(settings); err != nil {
+		return err
+	}
+	// Regenerate rathole config (sends SIGHUP — no connection drops).
+	_ = s.ReconcileServerConfig()
+	// Regenerate Caddy router block (already reads BindIP from DB).
+	s.ReconcileRouterCaddyBlock()
+	// Reconcile all existing tunnel Caddy blocks.
+	_ = s.reconcileAllTunnelCaddyBlocks(settings)
+	return nil
+}
+
+// reconcileAllTunnelCaddyBlocks rewrites every managed tunnel Caddy file with
+// the current BindIP and reloads Caddy once.
+func (s *LocalSetupService) reconcileAllTunnelCaddyBlocks(settings *db.AppSettings) error {
+	if settings.Domain == "" {
+		return nil
+	}
+	tunnels, err := db.GetTunnels()
+	if err != nil {
+		return err
+	}
+	reloaded := false
+	for _, t := range tunnels {
+		if t.Subdomain == "" || t.Private || t.Transport == "udp" {
+			continue
+		}
+		block := buildTunnelCaddyBlock(t.Subdomain, settings.Domain, t.RatholePort, t.NoTLS, t.BotProtectionEnabled, settings.BindIP)
+		path := managedTunnelCaddyPath(t.ID)
+		if err := writeLocalFile(path, block); err != nil {
+			return fmt.Errorf("failed to rewrite Caddy block for tunnel %s: %w", t.ID, err)
+		}
+		reloaded = true
+	}
+	if reloaded {
+		_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
+	}
+	return nil
 }
 
 // SetDashboardPrivate persists the dashboard port visibility setting and applies

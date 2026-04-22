@@ -23,9 +23,19 @@ func buildClientServiceUnit(username, ratholebin string) string {
 func DeployClient(client *SSHClient, machineID, username, config string, logWriter io.Writer) error {
 	fmt.Fprintln(logWriter, "=== Deploying Rathole Client ===")
 
+	// Resolve sudo prefix once: empty string when already root, "sudo" otherwise.
+	sudoPrefix, _ := client.Execute(`[ "$(id -u)" -eq 0 ] && echo "" || echo "sudo"`)
+	sudoPrefix = strings.TrimSpace(sudoPrefix)
+	sudo := func(cmd string) string {
+		if sudoPrefix == "" {
+			return cmd
+		}
+		return sudoPrefix + " " + cmd
+	}
+
 	// Step 0: Stop any existing service.
 	fmt.Fprintln(logWriter, "Step 0: Stopping any existing rathole-client service...")
-	_, _ = client.Execute("sudo systemctl stop rathole-client 2>/dev/null || true")
+	_, _ = client.Execute(sudo("systemctl stop rathole-client") + " 2>/dev/null || true")
 
 	fmt.Fprintln(logWriter, "Step 1: Installing rathole binary...")
 	if err := client.UploadFile([]byte(clientInstallScript), "/tmp/client-install.sh"); err != nil {
@@ -38,7 +48,7 @@ func DeployClient(client *SSHClient, machineID, username, config string, logWrit
 	fmt.Fprintln(logWriter, "Step 2: Writing rathole client config...")
 
 	// Create /etc/rathole directory and write config with proper ownership.
-	if _, err := client.Execute("sudo mkdir -p /etc/rathole"); err != nil {
+	if _, err := client.Execute(sudo("mkdir -p /etc/rathole")); err != nil {
 		return fmt.Errorf("failed to create /etc/rathole: %w", err)
 	}
 
@@ -54,27 +64,27 @@ func DeployClient(client *SSHClient, machineID, username, config string, logWrit
 	}
 
 	// Fix ownership so the SSH user can update the config later.
-	if _, err := client.Execute(fmt.Sprintf("sudo chown %s /etc/rathole /etc/rathole/client.toml", username)); err != nil {
+	if _, err := client.Execute(sudo(fmt.Sprintf("chown %s /etc/rathole /etc/rathole/client.toml", username))); err != nil {
 		return fmt.Errorf("failed to fix ownership: %w", err)
 	}
 
 	fmt.Fprintln(logWriter, "Step 3: Installing system service...")
 	serviceUnit := buildClientServiceUnit(username, ratholebin)
 
-	// Write to temp file first, then use sudo to move into place.
+	// Write to temp file first, then move into place.
 	tmpService := "/tmp/.gopher-rathole-client.service"
 	if err := client.UploadFile([]byte(serviceUnit), tmpService); err != nil {
 		return fmt.Errorf("failed to write service file: %w", err)
 	}
-	if _, err := client.Execute(fmt.Sprintf("sudo mv %s /etc/systemd/system/rathole-client.service", tmpService)); err != nil {
+	if _, err := client.Execute(sudo(fmt.Sprintf("mv %s /etc/systemd/system/rathole-client.service", tmpService))); err != nil {
 		return fmt.Errorf("failed to install service file: %w", err)
 	}
 
 	fmt.Fprintln(logWriter, "Step 4: Enabling and starting service...")
 	cmds := []string{
-		"sudo systemctl daemon-reload",
-		"sudo systemctl enable rathole-client",
-		"sudo systemctl restart rathole-client",
+		sudo("systemctl daemon-reload"),
+		sudo("systemctl enable rathole-client"),
+		sudo("systemctl restart rathole-client"),
 	}
 	if err := ExecuteCommands(client, cmds, logWriter); err != nil {
 		return fmt.Errorf("failed to enable service: %w", err)

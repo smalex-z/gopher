@@ -3,6 +3,8 @@
 
 set -euo pipefail
 
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+
 echo "Installing Caddy..."
 
 # Detect OS and architecture
@@ -25,11 +27,11 @@ tar xzf caddy.tar.gz caddy
 rm caddy.tar.gz
 
 # Move to binary location
-sudo mv caddy /usr/local/bin/caddy
-sudo chmod +x /usr/local/bin/caddy
+$SUDO mv caddy /usr/local/bin/caddy
+$SUDO chmod +x /usr/local/bin/caddy
 
 # Create caddy user/group if it doesn't exist
-sudo useradd --system --home /var/lib/caddy --shell /bin/false caddy 2>/dev/null || true
+$SUDO useradd --system --home /var/lib/caddy --shell /bin/false caddy 2>/dev/null || true
 
 echo "Caddy installed successfully"
 /usr/local/bin/caddy version

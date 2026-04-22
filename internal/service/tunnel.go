@@ -275,7 +275,7 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 	if oldBotProtection != tunnel.BotProtectionEnabled && tunnel.Subdomain != "" && s.local != nil {
 		if svcSettings, svcErr := db.GetSettings(); svcErr == nil && svcSettings.Domain != "" {
 			managedPath := managedTunnelCaddyPath(tunnel.ID)
-			block := buildTunnelCaddyBlock(tunnel.Subdomain, svcSettings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled)
+			block := buildTunnelCaddyBlock(tunnel.Subdomain, svcSettings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, svcSettings.BindIP)
 			if writeErr := writeLocalFile(managedPath, block); writeErr != nil {
 				log.Printf("tunnel update: failed to rewrite Caddy block for %s: %v", tunnel.ID, writeErr)
 			} else {

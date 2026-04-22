@@ -3,6 +3,8 @@
 
 set -euo pipefail
 
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+
 echo "Installing Rathole..."
 
 # Detect OS and architecture
@@ -28,8 +30,8 @@ unzip -q rathole.zip
 rm rathole.zip
 
 # Move to binary location
-sudo mv rathole /usr/local/bin/rathole
-sudo chmod +x /usr/local/bin/rathole
+$SUDO mv rathole /usr/local/bin/rathole
+$SUDO chmod +x /usr/local/bin/rathole
 
 echo "Rathole installed successfully"
 /usr/local/bin/rathole --version

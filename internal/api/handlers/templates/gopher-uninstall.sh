@@ -6,6 +6,8 @@
 #   gopher-uninstall --remove-tunnel <TUNNEL_ID>   Remove a specific tunnel from client.toml
 #   gopher-uninstall --remove-machine <MACHINE_ID> Remove machine SSH section from client.toml
 
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+
 CONFIG_FILE="/etc/rathole/client.toml"
 VPS_KEY_FILE="/etc/rathole/vps_key.pub"
 INSTALL_PATH="/usr/local/bin/gopher-uninstall"
@@ -26,7 +28,7 @@ remove_section() {
     $0 == e { skip=0; next }
     !skip   { print }
   ' "$_file" > "$_rs_tmp"
-  cat "$_rs_tmp" > "$_file" 2>/dev/null || sudo mv "$_rs_tmp" "$_file" 2>/dev/null || true
+  cat "$_rs_tmp" > "$_file" 2>/dev/null || $SUDO mv "$_rs_tmp" "$_file" 2>/dev/null || true
   rm -f "$_rs_tmp" 2>/dev/null || true
 }
 
@@ -41,12 +43,12 @@ if [ "$CMD" = "--remove-tunnel" ]; then
   fi
 
   _tmp=$(mktemp)
-  sudo cat "$CONFIG_FILE" > "$_tmp" 2>/dev/null || { echo "Config not found, nothing to do."; rm -f "$_tmp"; exit 0; }
+  $SUDO cat "$CONFIG_FILE" > "$_tmp" 2>/dev/null || { echo "Config not found, nothing to do."; rm -f "$_tmp"; exit 0; }
   remove_section "$_tmp" "# gopher-tunnel-start: $ARG" "# gopher-tunnel-end: $ARG"
-  sudo cp "$_tmp" "$CONFIG_FILE" 2>/dev/null || true
-  sudo chown "$(stat -c '%U' "$CONFIG_FILE" 2>/dev/null || echo root)" "$CONFIG_FILE" 2>/dev/null || true
+  $SUDO cp "$_tmp" "$CONFIG_FILE" 2>/dev/null || true
+  $SUDO chown "$(stat -c '%U' "$CONFIG_FILE" 2>/dev/null || echo root)" "$CONFIG_FILE" 2>/dev/null || true
   rm -f "$_tmp"
-  sudo systemctl restart rathole-client 2>/dev/null || true
+  $SUDO systemctl restart rathole-client 2>/dev/null || true
   echo "Removed tunnel $ARG"
   exit 0
 fi
@@ -59,12 +61,12 @@ if [ "$CMD" = "--remove-machine" ]; then
   fi
 
   _tmp=$(mktemp)
-  sudo cat "$CONFIG_FILE" > "$_tmp" 2>/dev/null || { echo "Config not found, nothing to do."; rm -f "$_tmp"; exit 0; }
+  $SUDO cat "$CONFIG_FILE" > "$_tmp" 2>/dev/null || { echo "Config not found, nothing to do."; rm -f "$_tmp"; exit 0; }
   remove_section "$_tmp" "# gopher-machine-start: $ARG" "# gopher-machine-end: $ARG"
-  sudo cp "$_tmp" "$CONFIG_FILE" 2>/dev/null || true
-  sudo chown "$(stat -c '%U' "$CONFIG_FILE" 2>/dev/null || echo root)" "$CONFIG_FILE" 2>/dev/null || true
+  $SUDO cp "$_tmp" "$CONFIG_FILE" 2>/dev/null || true
+  $SUDO chown "$(stat -c '%U' "$CONFIG_FILE" 2>/dev/null || echo root)" "$CONFIG_FILE" 2>/dev/null || true
   rm -f "$_tmp"
-  sudo systemctl restart rathole-client 2>/dev/null || true
+  $SUDO systemctl restart rathole-client 2>/dev/null || true
   echo "Removed machine $ARG SSH section"
   exit 0
 fi
@@ -100,16 +102,16 @@ if [ -f "$VPS_KEY_FILE" ]; then
 fi
 
 echo "Stopping rathole-client service..."
-sudo systemctl stop rathole-client 2>/dev/null || true
-sudo systemctl disable rathole-client 2>/dev/null || true
-sudo rm -f /etc/systemd/system/rathole-client.service 2>/dev/null || true
-sudo systemctl daemon-reload 2>/dev/null || true
+$SUDO systemctl stop rathole-client 2>/dev/null || true
+$SUDO systemctl disable rathole-client 2>/dev/null || true
+$SUDO rm -f /etc/systemd/system/rathole-client.service 2>/dev/null || true
+$SUDO systemctl daemon-reload 2>/dev/null || true
 
 echo "Removing rathole config..."
-sudo rm -rf /etc/rathole 2>/dev/null || true
+$SUDO rm -rf /etc/rathole 2>/dev/null || true
 
 echo "Removing rathole binary..."
-sudo rm -f /usr/local/bin/rathole 2>/dev/null || true
+$SUDO rm -f /usr/local/bin/rathole 2>/dev/null || true
 
 # Self-destruct last so the script can finish cleanly.
 rm -f "$INSTALL_PATH" 2>/dev/null || true

@@ -3,6 +3,8 @@
 HOST_URL="{{.HostURL}}"
 TOKEN="$1"
 
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+
 if [ -z "$TOKEN" ]; then
   echo "Usage: bash bootstrap.sh <TOKEN>"
   echo "Example: curl -s {{.HostURL}}/static/bootstrap.sh | bash -s -- TOKEN"
@@ -28,9 +30,9 @@ echo "SSH user: $SSH_USER"
 
 handle_sudo_failure() {
   echo ""
-  echo "ERROR: Failed to install system-wide service (sudo may have been cancelled)."
+  echo "ERROR: Failed to install system-wide service (requires root or sudo)."
   echo ""
-  echo "Option 1: Re-run bootstrap with sudo access:"
+  echo "Option 1: Re-run bootstrap as root:"
   echo "  sudo bash"
   echo "  # then run: curl -s {{.HostURL}}/static/bootstrap.sh | bash -s -- $TOKEN"
   echo ""
@@ -118,19 +120,19 @@ if ! command -v rathole &>/dev/null && [ ! -f "$HOME/.local/bin/rathole" ]; then
   if ! command -v unzip &>/dev/null; then
     if command -v dnf &>/dev/null; then
       echo "  unzip not found, installing via dnf..."
-      sudo dnf install -y -q unzip || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
+      $SUDO dnf install -y -q unzip || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
     elif command -v yum &>/dev/null; then
       echo "  unzip not found, installing via yum..."
-      sudo yum install -y -q unzip || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
+      $SUDO yum install -y -q unzip || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
     else
       echo "  unzip not found, installing via apt..."
-      sudo apt-get install -y unzip -qq || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
+      $SUDO apt-get install -y unzip -qq || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
     fi
   fi
   unzip -q /tmp/rathole-dl/rathole.zip -d /tmp/rathole-dl/ || { echo "ERROR: unzip failed"; exit 1; }
 
-  sudo cp /tmp/rathole-dl/rathole /usr/local/bin/rathole
-  sudo chmod +x /usr/local/bin/rathole
+  $SUDO cp /tmp/rathole-dl/rathole /usr/local/bin/rathole
+  $SUDO chmod +x /usr/local/bin/rathole
   RATHOLE_BIN=/usr/local/bin/rathole
   rm -rf /tmp/rathole-dl
 else
@@ -154,13 +156,13 @@ if [ -f "/etc/rathole/client.toml" ]; then
   esac
 fi
 
-sudo mkdir -p /etc/rathole || handle_sudo_failure
-echo "$RATHOLE_CONFIG" | sudo tee /etc/rathole/client.toml >/dev/null || handle_sudo_failure
-sudo chown "$SSH_USER" /etc/rathole/client.toml || handle_sudo_failure
+$SUDO mkdir -p /etc/rathole || handle_sudo_failure
+echo "$RATHOLE_CONFIG" | $SUDO tee /etc/rathole/client.toml >/dev/null || handle_sudo_failure
+$SUDO chown "$SSH_USER" /etc/rathole/client.toml || handle_sudo_failure
 
 # Save VPS public key so the uninstall script can remove it from authorized_keys
 # even without a live connection to the server.
-echo "$VPS_PUBLIC_KEY" | sudo tee /etc/rathole/vps_key.pub >/dev/null || true
+echo "$VPS_PUBLIC_KEY" | $SUDO tee /etc/rathole/vps_key.pub >/dev/null || true
 
 # ── Install gopher-uninstall script ──────────────────────────────────────────
 echo "Installing gopher-uninstall script..."
@@ -170,8 +172,8 @@ else
   curl -fsSL "{{.HostURL}}/static/gopher-uninstall.sh" -o /tmp/gopher-uninstall.sh || true
 fi
 if [ -s /tmp/gopher-uninstall.sh ]; then
-  sudo mv /tmp/gopher-uninstall.sh /usr/local/bin/gopher-uninstall
-  sudo chmod +x /usr/local/bin/gopher-uninstall
+  $SUDO mv /tmp/gopher-uninstall.sh /usr/local/bin/gopher-uninstall
+  $SUDO chmod +x /usr/local/bin/gopher-uninstall
   echo "  Installed to /usr/local/bin/gopher-uninstall"
 
   # Grant the current user passwordless sudo for commands the gopher server
@@ -179,8 +181,8 @@ if [ -s /tmp/gopher-uninstall.sh ]; then
   SUDOERS_FILE="/etc/sudoers.d/gopher"
   printf '%s\n' \
     "$SSH_USER ALL=(ALL) NOPASSWD: /usr/local/bin/gopher-uninstall" \
-    "$SSH_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart rathole-client" | sudo tee "$SUDOERS_FILE" >/dev/null
-  sudo chmod 0440 "$SUDOERS_FILE"
+    "$SSH_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart rathole-client" | $SUDO tee "$SUDOERS_FILE" >/dev/null
+  $SUDO chmod 0440 "$SUDOERS_FILE"
   echo "  Sudoers rule written to $SUDOERS_FILE"
 else
   echo "  WARNING: could not download gopher-uninstall script (server may be unreachable)"
@@ -189,7 +191,7 @@ fi
 
 # ── Install system-wide service ──────────────────────────────────────────────
 echo "Installing system rathole-client service..."
-sudo tee /etc/systemd/system/rathole-client.service >/dev/null <<EOF || handle_sudo_failure
+$SUDO tee /etc/systemd/system/rathole-client.service >/dev/null <<EOF || handle_sudo_failure
 [Unit]
 Description=Rathole Tunnel Client
 After=network.target
@@ -206,10 +208,10 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-sudo systemctl daemon-reload || handle_sudo_failure
-sudo systemctl enable rathole-client || handle_sudo_failure
-sudo systemctl restart rathole-client || handle_sudo_failure
-echo "  Service installed (system). Check: sudo systemctl status rathole-client"
+$SUDO systemctl daemon-reload || handle_sudo_failure
+$SUDO systemctl enable rathole-client || handle_sudo_failure
+$SUDO systemctl restart rathole-client || handle_sudo_failure
+echo "  Service installed (system). Check: systemctl status rathole-client"
 
 echo ""
 echo "=== Bootstrap complete! ==="
