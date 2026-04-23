@@ -87,4 +87,10 @@ export const localApi = {
     client.put('/local/bind-ip', { bind_ip: bindIP }).then(r => r.data),
   setupFail2ban: () =>
     client.post('/local/setup-fail2ban').then(r => r.data),
+  getExternalAPIConfig: () =>
+    client.get<{ data: { configured: boolean; via_env: boolean; key: string } }>('/local/external-api').then(r => r.data.data),
+  rotateExternalAPIKey: () =>
+    client.post<{ data: { key: string } }>('/local/external-api/rotate').then(r => r.data.data),
+  revokeExternalAPIKey: () =>
+    client.delete('/local/external-api').then(r => r.data),
 }

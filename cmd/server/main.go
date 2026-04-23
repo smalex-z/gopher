@@ -89,8 +89,7 @@ func runServer(args []string) {
 		}
 	}()
 
-	apiKey := os.Getenv("GOPHER_API_KEY")
-	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc, apiKey)
+	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc)
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", router)

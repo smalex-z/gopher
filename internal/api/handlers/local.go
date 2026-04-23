@@ -2,11 +2,14 @@ package handlers
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -342,6 +345,87 @@ func (h *LocalHandler) SetBindIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, map[string]string{"bind_ip": body.BindIP})
+}
+
+// GET /api/local/external-api
+// Returns whether the external API key is configured and where it comes from.
+// The full key is returned so the admin can copy it; it is only accessible to
+// authenticated sessions and is never included in other API responses.
+func (h *LocalHandler) GetExternalAPIConfig(w http.ResponseWriter, r *http.Request) {
+	if envKey := os.Getenv("GOPHER_API_KEY"); envKey != "" {
+		response.Success(w, map[string]interface{}{
+			"configured": true,
+			"via_env":    true,
+			"key":        envKey,
+		})
+		return
+	}
+	settings, err := db.GetSettings()
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	if settings.ExternalAPIKey == "" {
+		response.Success(w, map[string]interface{}{
+			"configured": false,
+			"via_env":    false,
+			"key":        "",
+		})
+		return
+	}
+	response.Success(w, map[string]interface{}{
+		"configured": true,
+		"via_env":    false,
+		"key":        settings.ExternalAPIKey,
+	})
+}
+
+// POST /api/local/external-api/rotate
+// Generates a new 32-byte (64 hex char) API key and persists it in AppSettings.
+// Not available when the key is sourced from the GOPHER_API_KEY env var.
+func (h *LocalHandler) RotateExternalAPIKey(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("GOPHER_API_KEY") != "" {
+		response.BadRequest(w, "API key is set via the GOPHER_API_KEY environment variable and cannot be rotated from the UI")
+		return
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		response.InternalError(w, "failed to generate key")
+		return
+	}
+	newKey := hex.EncodeToString(b)
+
+	settings, err := db.GetSettings()
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	settings.ExternalAPIKey = newKey
+	if err := db.SaveSettings(settings); err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"key": newKey})
+}
+
+// DELETE /api/local/external-api
+// Revokes the API key stored in the DB (disables the external API until a new key is generated).
+func (h *LocalHandler) RevokeExternalAPIKey(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("GOPHER_API_KEY") != "" {
+		response.BadRequest(w, "API key is set via the GOPHER_API_KEY environment variable and cannot be revoked from the UI")
+		return
+	}
+	settings, err := db.GetSettings()
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	settings.ExternalAPIKey = ""
+	if err := db.SaveSettings(settings); err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.NoContent(w)
 }
 
 // validDomain matches a reasonable FQDN: labels of alphanumeric + hyphens separated by dots.

@@ -19,7 +19,6 @@ func NewRouter(
 	localSvc *service.LocalSetupService,
 	updateSvc *service.UpdateService,
 	secSvc *service.SecurityService,
-	apiKey string,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -51,12 +50,18 @@ func NewRouter(
 
 	// External REST API — secured with API key (Authorization: Bearer <key>)
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Use(APIKeyMiddleware(apiKey))
-		r.Route("/tunnels", func(r chi.Router) {
-			r.Get("/", externalH.ListTunnels)
-			r.Post("/", externalH.CreateTunnel)
-			r.Get("/{id}", externalH.GetTunnel)
-			r.Delete("/{id}", externalH.DeleteTunnel)
+		// OpenAPI spec is public (no auth) so callers can discover the API first.
+		r.Get("/openapi.json", handlers.ServeOpenAPISpec)
+
+		// All other /api/v1 routes require a valid API key.
+		r.Group(func(r chi.Router) {
+			r.Use(APIKeyMiddleware())
+			r.Route("/tunnels", func(r chi.Router) {
+				r.Get("/", externalH.ListTunnels)
+				r.Post("/", externalH.CreateTunnel)
+				r.Get("/{id}", externalH.GetTunnel)
+				r.Delete("/{id}", externalH.DeleteTunnel)
+			})
 		})
 	})
 
@@ -124,6 +129,9 @@ func NewRouter(
 					r.Put("/{id}/default", localH.SetDefaultSSHKey)
 					r.Get("/{id}/download", localH.DownloadSSHKey)
 				})
+				r.Get("/external-api", localH.GetExternalAPIConfig)
+				r.Post("/external-api/rotate", localH.RotateExternalAPIKey)
+				r.Delete("/external-api", localH.RevokeExternalAPIKey)
 			})
 
 			r.Route("/vps", func(r chi.Router) {

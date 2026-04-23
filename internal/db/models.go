@@ -116,6 +116,9 @@ type AppSettings struct {
 	Fail2banIgnoreIPs string `json:"fail2ban_ignore_ips"` // JSON array of whitelisted CIDRs/IPs
 	// UpdateChannel controls which release stream to track: "stable" (default), "beta", or "alpha".
 	UpdateChannel string `json:"update_channel"`
+	// ExternalAPIKey is the bearer token for the /api/v1/* external REST API.
+	// If the GOPHER_API_KEY environment variable is set it takes precedence over this field.
+	ExternalAPIKey string `json:"-"` // never serialised — returned only via dedicated endpoints
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
