@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { LayoutDashboard, Server, Monitor, Network, LogOut, Map, RefreshCw, Key, Shield, ShieldCheck, ChevronDown, BookOpen } from 'lucide-react'
+import { LayoutDashboard, Server, Monitor, Network, LogOut, Map, RefreshCw, Key, Shield, ShieldCheck, ChevronDown } from 'lucide-react'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import ToastContainer from './components/ToastContainer'
 import DashboardPage from './pages/DashboardPage'
@@ -144,7 +144,6 @@ function AppShell() {
                   items={[
                     { to: '/firewall', icon: Shield, label: 'Firewall' },
                     { to: '/security', icon: ShieldCheck, label: 'Access Control' },
-                    { to: '/docs', icon: BookOpen, label: 'API Docs' },
                   ]}
                 />
                 <NavLink to="/network" className={navClass}><Map size={16} /> Network Map</NavLink>

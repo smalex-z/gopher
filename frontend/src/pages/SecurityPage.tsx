@@ -785,7 +785,7 @@ function ExternalAPISection() {
       <div className="flex items-center gap-2">
         <KeyRound size={18} className="text-gray-400" />
         <h2 className="font-semibold text-gray-900">External API</h2>
-        <a href="/docs" className="ml-auto text-xs text-blue-600 hover:underline">View API docs →</a>
+        <a href="/docs" className="ml-auto flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-xs font-medium hover:bg-blue-100 transition-colors">View API docs →</a>
       </div>
 
       <p className="text-sm text-gray-500">
