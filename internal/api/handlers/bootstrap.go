@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"strings"
 	"text/template"
+	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/smalex-z/gopher/internal/api/response"
 	"github.com/smalex-z/gopher/internal/db"
 	"github.com/smalex-z/gopher/internal/service"
@@ -92,6 +94,23 @@ func (h *BootstrapHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, resp)
+}
+
+// GET /bootstrap/{token} - serve a pre-tokenized bootstrap script for external API callers.
+// Nimbus (and similar) can run: curl <bootstrap_url> | sh
+// The returned script is a thin wrapper that invokes the main bootstrap with the token pre-filled.
+func (h *BootstrapHandler) ServeTokenizedScript(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+	bt, err := db.GetBootstrapToken(token)
+	if err != nil || bt.UsedAt != nil || time.Now().After(bt.ExpiresAt) {
+		http.Error(w, "invalid or expired token", http.StatusNotFound)
+		return
+	}
+	base := hostURL(r)
+	script := fmt.Sprintf("#!/bin/sh\nset -e\ncurl -fsSL %s/static/bootstrap.sh | bash -s -- %s\n", base, token)
+	w.Header().Set("Content-Type", "text/x-shellscript")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, script)
 }
 
 // GET /static/bootstrap.sh - serve bootstrap script dynamically

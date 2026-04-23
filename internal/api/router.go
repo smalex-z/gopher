@@ -19,6 +19,7 @@ func NewRouter(
 	localSvc *service.LocalSetupService,
 	updateSvc *service.UpdateService,
 	secSvc *service.SecurityService,
+	apiKey string,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -38,11 +39,26 @@ func NewRouter(
 	securityH := handlers.NewSecurityHandler(authSvc, secSvc)
 	debugH := handlers.NewDebugHandler()
 	updateH := handlers.NewUpdateHandler(updateSvc)
+	externalH := handlers.NewExternalAPIHandler(bootstrapSvc, tunnelSvc)
 
 	// Public: bootstrap script download and machine self-registration
 	r.Get("/static/bootstrap.sh", bootstrapH.ServeScript)
 	r.Get("/static/gopher-uninstall.sh", bootstrapH.ServeUninstallScript)
 	r.Post("/api/bootstrap", bootstrapH.Register)
+
+	// Public: pre-tokenized bootstrap script for external API callers (e.g. Nimbus)
+	r.Get("/bootstrap/{token}", bootstrapH.ServeTokenizedScript)
+
+	// External REST API — secured with API key (Authorization: Bearer <key>)
+	r.Route("/api/v1", func(r chi.Router) {
+		r.Use(APIKeyMiddleware(apiKey))
+		r.Route("/tunnels", func(r chi.Router) {
+			r.Get("/", externalH.ListTunnels)
+			r.Post("/", externalH.CreateTunnel)
+			r.Get("/{id}", externalH.GetTunnel)
+			r.Delete("/{id}", externalH.DeleteTunnel)
+		})
+	})
 
 	r.Route("/api", func(r chi.Router) {
 		// Public auth + health routes

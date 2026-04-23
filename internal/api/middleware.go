@@ -58,6 +58,25 @@ func AuthMiddleware(authSvc *service.AuthService) func(http.Handler) http.Handle
 	}
 }
 
+// APIKeyMiddleware validates Bearer token auth for the external /api/v1/* routes.
+// If apiKey is empty, all requests are rejected with 503 (feature not configured).
+func APIKeyMiddleware(apiKey string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if apiKey == "" {
+				response.Error(w, http.StatusServiceUnavailable, "external API not configured: set GOPHER_API_KEY")
+				return
+			}
+			auth := r.Header.Get("Authorization")
+			if len(auth) < 8 || auth[:7] != "Bearer " || auth[7:] != apiKey {
+				response.Error(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 type responseWriter struct {
 	http.ResponseWriter
 	status int
