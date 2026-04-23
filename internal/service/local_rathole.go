@@ -148,7 +148,7 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 			return fmt.Errorf("failed to write router Caddy file: %w", err)
 		}
 		managedPath := managedTunnelCaddyPath(tunnel.ID)
-		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, settings.BindIP)
+		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, settings.BindIP, tunnel.TLSSkipVerify)
 		if err := writeLocalFile(managedPath, block); err != nil {
 			return fmt.Errorf("failed to write tunnel Caddy file %s: %w", managedPath, err)
 		}

@@ -43,6 +43,7 @@ export interface Tunnel {
   bot_protection_enabled?: boolean
   bot_protection_ttl?: number      // seconds; 0 = default (86400)
   bot_protection_allow_ip?: string // JSON array of CIDR/IP strings
+  tls_skip_verify?: boolean        // skip upstream TLS cert verification (e.g. Proxmox)
   status: string
   managed?: boolean
   kind?: string
