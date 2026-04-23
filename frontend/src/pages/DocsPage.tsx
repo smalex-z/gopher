@@ -86,6 +86,7 @@ interface EndpointProps {
   summary: string
   description?: string
   requestFields?: Field[]
+  queryFields?: Field[]
   responseFields?: Field[]
   curlExample: string
   responseExample: string
@@ -114,6 +115,13 @@ function Endpoint(props: EndpointProps) {
             <div>
               <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Request body</h4>
               <FieldTable fields={props.requestFields} />
+            </div>
+          )}
+
+          {props.queryFields && props.queryFields.length > 0 && (
+            <div>
+              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Query parameters</h4>
+              <FieldTable fields={props.queryFields} />
             </div>
           )}
 
@@ -161,7 +169,7 @@ export default function DocsPage() {
           Generate or rotate your key in <a href="/security" className="text-blue-600 hover:underline">Access Control</a>,
           or set the <code className="font-mono text-xs bg-gray-100 px-1 rounded">GOPHER_API_KEY</code> environment variable.
         </p>
-        <CodeBlock code={`curl -H "Authorization: Bearer ${KEY}" ${BASE}/api/v1/tunnels`} />
+        <CodeBlock code={`curl -H "Authorization: Bearer ${KEY}" ${BASE}/api/v1/machines`} />
 
         <div className="rounded-xl border border-gray-200 overflow-hidden">
           <table className="w-full text-sm">
@@ -179,71 +187,188 @@ export default function DocsPage() {
         </div>
       </div>
 
-      {/* Tunnel lifecycle */}
+      {/* Workflow */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 space-y-4">
-        <h2 className="font-semibold text-gray-900">Tunnel lifecycle</h2>
+        <h2 className="font-semibold text-gray-900">Workflow</h2>
         <p className="text-sm text-gray-600">
-          Creating a tunnel is an <strong>asynchronous</strong> operation. The API returns a
-          {' '}<code className="font-mono text-xs bg-gray-100 px-1 rounded">bootstrap_url</code> — a one-time URL
-          that your VM must curl to install the rathole client and register itself. Once the VM connects,
-          Gopher automatically creates the Caddy route and the tunnel becomes <strong>active</strong>.
+          Machines and tunnels are separate resources. Bootstrap the machine first, wait for it to connect, then create tunnels on it.
+          One machine can have multiple tunnels.
         </p>
-        <div className="flex items-center gap-2 text-sm text-gray-500 flex-wrap">
-          {['pending', '→', 'active', '/', 'failed'].map((s, i) => (
+        <ol className="space-y-2 text-sm text-gray-600 list-decimal list-inside">
+          <li><strong>POST /api/v1/machines</strong> → returns <code className="font-mono text-xs bg-gray-100 px-1 rounded">bootstrap_url</code></li>
+          <li>Run <code className="font-mono text-xs bg-gray-100 px-1 rounded">curl &lt;bootstrap_url&gt; | bash</code> on the target VM</li>
+          <li>Poll <strong>GET /api/v1/machines/:id</strong> until <code className="font-mono text-xs bg-gray-100 px-1 rounded">status</code> is <span className="text-green-700 font-medium">connected</span></li>
+          <li><strong>POST /api/v1/tunnels</strong> with <code className="font-mono text-xs bg-gray-100 px-1 rounded">machine_id</code> — synchronous, returns the live tunnel URL immediately</li>
+          <li>Repeat step 4 for each additional service on that machine</li>
+          <li><strong>DELETE /api/v1/machines/:id</strong> to teardown everything when done</li>
+        </ol>
+
+        <div className="flex items-center gap-2 text-sm flex-wrap">
+          <span className="text-xs font-medium text-gray-500">Machine status:</span>
+          {['pending', '→', 'connected', '/', 'failed'].map((s, i) => (
             s === '→' || s === '/' ? (
-              <span key={i} className="text-gray-400">{s}</span>
+              <span key={i} className="text-gray-400 text-xs">{s}</span>
             ) : (
               <span key={i} className={`px-2 py-0.5 rounded-full text-xs font-medium border ${
-                s === 'active' ? 'bg-green-50 text-green-700 border-green-200' :
-                s === 'failed' ? 'bg-red-50 text-red-700 border-red-200' :
-                'bg-amber-50 text-amber-700 border-amber-200'
+                s === 'connected' ? 'bg-green-50 text-green-700 border-green-200' :
+                s === 'failed'    ? 'bg-red-50 text-red-700 border-red-200' :
+                                    'bg-amber-50 text-amber-700 border-amber-200'
               }`}>{s}</span>
             )
           ))}
         </div>
-        <ol className="space-y-1 text-sm text-gray-600 list-decimal list-inside">
-          <li><strong>POST /api/v1/tunnels</strong> → returns <code className="font-mono text-xs bg-gray-100 px-1 rounded">bootstrap_url</code>, status = <em>pending</em></li>
-          <li>Your automation runs the bootstrap URL on the target VM</li>
-          <li>VM registers; Gopher polls for connection and creates the tunnel → status = <em>active</em></li>
-          <li>Poll <strong>GET /api/v1/tunnels/:id</strong> until status is <em>active</em> or <em>failed</em></li>
-        </ol>
       </div>
 
-      {/* Endpoints */}
-      <div className="space-y-4">
-        <h2 className="font-semibold text-gray-900 text-lg">Endpoints</h2>
+      {/* Machines */}
+      <div className="space-y-3">
+        <h2 className="font-semibold text-gray-900 text-lg">Machines</h2>
 
         <Endpoint
           method="POST"
-          path="/api/v1/tunnels"
-          summary="Create a tunnel"
-          description="Provisions a new tunnel. Returns immediately with a bootstrap_url; the tunnel becomes active once the target VM runs the bootstrap script and connects."
+          path="/api/v1/machines"
+          summary="Bootstrap a machine"
+          description="Generates a one-time bootstrap token and returns a bootstrap_url. Run that URL on the target VM to install the rathole client and register the machine with Gopher. All fields are optional."
           requestFields={[
-            { name: 'subdomain', type: 'string', required: true, description: 'DNS subdomain (e.g. "myapp" → myapp.your-domain.com). Must be unique.' },
-            { name: 'target_ip', type: 'string', description: 'IP address of the service on the remote machine. Defaults to 127.0.0.1 if omitted.' },
-            { name: 'target_port', type: 'integer', required: true, description: 'Port the service listens on inside the remote machine.' },
+            { name: 'public_ssh', type: 'boolean', description: 'Expose the SSH back-tunnel publicly (default false — VPS-local only).' },
+            { name: 'ssh_key_id', type: 'string', description: "ID of the SSH key to install on the machine. Defaults to the server's default key." },
           ]}
           responseFields={[
-            { name: 'id', type: 'string', description: 'Tunnel record ID — use for GET and DELETE.' },
+            { name: 'id', type: 'string', description: 'Machine record ID — use for GET and DELETE.' },
             { name: 'status', type: 'string', description: '"pending" until the VM connects.' },
-            { name: 'subdomain', type: 'string', description: 'The subdomain you requested.' },
-            { name: 'target_ip', type: 'string', description: 'Target IP stored against this tunnel.' },
             { name: 'bootstrap_url', type: 'string', description: 'One-time URL. Run on the VM: curl <bootstrap_url> | bash' },
+            { name: 'public_ssh', type: 'boolean', description: 'Whether the SSH back-tunnel is publicly reachable.' },
             { name: 'created_at', type: 'string', description: 'ISO 8601 timestamp.' },
           ]}
-          curlExample={`curl -X POST ${BASE}/api/v1/tunnels \\
+          curlExample={`curl -X POST ${BASE}/api/v1/machines \\
   -H "Authorization: Bearer ${KEY}" \\
   -H "Content-Type: application/json" \\
-  -d '{"subdomain":"myapp","target_ip":"127.0.0.1","target_port":3000}'`}
+  -d '{"public_ssh": false}'`}
           responseExample={`{
   "success": true,
   "data": {
     "id": "a1b2c3d4e5f6a7b8",
     "status": "pending",
-    "subdomain": "myapp",
-    "target_ip": "127.0.0.1",
+    "public_ssh": false,
     "bootstrap_url": "${BASE}/bootstrap/tok_abc123...",
     "created_at": "2026-04-23T12:00:00Z"
+  }
+}`}
+        />
+
+        <Endpoint
+          method="GET"
+          path="/api/v1/machines"
+          summary="List machines"
+          description="Returns a paginated list of all externally-managed machines."
+          queryFields={[
+            { name: 'limit', type: 'integer', description: 'Max results (default 50, max 200).' },
+            { name: 'offset', type: 'integer', description: 'Pagination offset (default 0).' },
+          ]}
+          responseFields={[
+            { name: 'items', type: 'array', description: 'Array of machine objects.' },
+            { name: 'total', type: 'integer', description: 'Total number of records.' },
+            { name: 'limit', type: 'integer', description: 'Applied limit.' },
+            { name: 'offset', type: 'integer', description: 'Applied offset.' },
+          ]}
+          curlExample={`curl "${BASE}/api/v1/machines?limit=10&offset=0" \\
+  -H "Authorization: Bearer ${KEY}"`}
+          responseExample={`{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "a1b2c3d4e5f6a7b8",
+        "status": "connected",
+        "public_ssh": false,
+        "created_at": "2026-04-23T12:00:00Z"
+      }
+    ],
+    "total": 1,
+    "limit": 10,
+    "offset": 0
+  }
+}`}
+        />
+
+        <Endpoint
+          method="GET"
+          path="/api/v1/machines/{id}"
+          summary="Get a machine"
+          description="Poll this endpoint after bootstrap to check when the machine connects. Status is derived live from the underlying machine record — no separate state to manage."
+          responseFields={[
+            { name: 'id', type: 'string', description: 'Machine record ID.' },
+            { name: 'status', type: 'string', description: '"pending" | "connected" | "failed".' },
+            { name: 'public_ssh', type: 'boolean', description: 'Whether the SSH back-tunnel is public.' },
+            { name: 'error', type: 'string', description: 'Failure reason (present when failed).' },
+            { name: 'created_at', type: 'string', description: 'ISO 8601 timestamp.' },
+          ]}
+          curlExample={`curl ${BASE}/api/v1/machines/a1b2c3d4e5f6a7b8 \\
+  -H "Authorization: Bearer ${KEY}"`}
+          responseExample={`{
+  "success": true,
+  "data": {
+    "id": "a1b2c3d4e5f6a7b8",
+    "status": "connected",
+    "public_ssh": false,
+    "created_at": "2026-04-23T12:00:00Z"
+  }
+}`}
+        />
+
+        <Endpoint
+          method="DELETE"
+          path="/api/v1/machines/{id}"
+          summary="Delete a machine"
+          description="Full teardown: SSHes into the VM to remove the rathole client service, removes all associated tunnels and Caddy routes, reconciles the rathole server config, and deletes all database records. SSH failures are best-effort and non-fatal — safe to call after the VM is destroyed."
+          curlExample={`curl -X DELETE ${BASE}/api/v1/machines/a1b2c3d4e5f6a7b8 \\
+  -H "Authorization: Bearer ${KEY}"`}
+          responseExample={`HTTP 204 No Content`}
+        />
+      </div>
+
+      {/* Tunnels */}
+      <div className="space-y-3">
+        <h2 className="font-semibold text-gray-900 text-lg">Tunnels</h2>
+
+        <Endpoint
+          method="POST"
+          path="/api/v1/tunnels"
+          summary="Create a tunnel"
+          description="Creates a service tunnel on an already-connected machine. Synchronous — the tunnel is live (or failed) by the time this call returns. One machine can have multiple tunnels."
+          requestFields={[
+            { name: 'machine_id', type: 'string', required: true, description: 'ID of a connected machine (from POST /api/v1/machines).' },
+            { name: 'target_port', type: 'integer', required: true, description: 'Port the service listens on inside the remote machine.' },
+            { name: 'subdomain', type: 'string', description: 'DNS subdomain (e.g. "myapp" → myapp.your-domain.com). Auto-generated from machine name if omitted.' },
+            { name: 'target_ip', type: 'string', description: 'IP of the service on the remote machine. Defaults to 127.0.0.1.' },
+            { name: 'private', type: 'boolean', description: 'Bind tunnel to 127.0.0.1 on the VPS (not publicly reachable). Default false.' },
+            { name: 'no_tls', type: 'boolean', description: 'Skip Caddy TLS — serve plain http:// instead of https://. Default false.' },
+          ]}
+          responseFields={[
+            { name: 'id', type: 'string', description: 'Tunnel record ID.' },
+            { name: 'machine_id', type: 'string', description: 'The machine this tunnel belongs to.' },
+            { name: 'status', type: 'string', description: '"active" or "failed".' },
+            { name: 'subdomain', type: 'string', description: 'The subdomain (generated or specified).' },
+            { name: 'target_ip', type: 'string', description: 'Target IP.' },
+            { name: 'target_port', type: 'integer', description: 'Target port.' },
+            { name: 'tunnel_url', type: 'string', description: 'Public URL (present when active).' },
+            { name: 'error', type: 'string', description: 'Failure reason (present when failed).' },
+            { name: 'created_at', type: 'string', description: 'ISO 8601 timestamp.' },
+          ]}
+          curlExample={`curl -X POST ${BASE}/api/v1/tunnels \\
+  -H "Authorization: Bearer ${KEY}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"machine_id":"a1b2c3d4e5f6a7b8","target_port":3000}'`}
+          responseExample={`{
+  "success": true,
+  "data": {
+    "id": "f8e7d6c5b4a39281",
+    "machine_id": "a1b2c3d4e5f6a7b8",
+    "status": "active",
+    "subdomain": "my-server-a1b2c3",
+    "target_ip": "127.0.0.1",
+    "target_port": 3000,
+    "tunnel_url": "https://my-server-a1b2c3.your-domain.com",
+    "created_at": "2026-04-23T12:01:00Z"
   }
 }`}
         />
@@ -253,7 +378,7 @@ export default function DocsPage() {
           path="/api/v1/tunnels"
           summary="List tunnels"
           description="Returns a paginated list of all externally-managed tunnels."
-          requestFields={[
+          queryFields={[
             { name: 'limit', type: 'integer', description: 'Max results (default 50, max 200).' },
             { name: 'offset', type: 'integer', description: 'Pagination offset (default 0).' },
           ]}
@@ -270,12 +395,14 @@ export default function DocsPage() {
   "data": {
     "items": [
       {
-        "id": "a1b2c3d4e5f6a7b8",
+        "id": "f8e7d6c5b4a39281",
+        "machine_id": "a1b2c3d4e5f6a7b8",
         "status": "active",
-        "subdomain": "myapp",
+        "subdomain": "my-server-a1b2c3",
         "target_ip": "127.0.0.1",
-        "tunnel_url": "https://myapp.your-domain.com",
-        "created_at": "2026-04-23T12:00:00Z"
+        "target_port": 3000,
+        "tunnel_url": "https://my-server-a1b2c3.your-domain.com",
+        "created_at": "2026-04-23T12:01:00Z"
       }
     ],
     "total": 1,
@@ -289,27 +416,30 @@ export default function DocsPage() {
           method="GET"
           path="/api/v1/tunnels/{id}"
           summary="Get a tunnel"
-          description="Returns a single tunnel record. Poll this endpoint to check when a pending tunnel becomes active. If the bootstrap token expires before the VM registers, status is reported as failed."
           responseFields={[
             { name: 'id', type: 'string', description: 'Tunnel record ID.' },
-            { name: 'status', type: 'string', description: '"pending" | "active" | "failed".' },
+            { name: 'machine_id', type: 'string', description: 'The machine this tunnel belongs to.' },
+            { name: 'status', type: 'string', description: '"active" or "failed".' },
             { name: 'subdomain', type: 'string', description: 'The subdomain.' },
             { name: 'target_ip', type: 'string', description: 'Target IP.' },
-            { name: 'tunnel_url', type: 'string', description: 'Public HTTPS URL (present when active).' },
-            { name: 'error', type: 'string', description: 'Failure reason (present when failed).' },
+            { name: 'target_port', type: 'integer', description: 'Target port.' },
+            { name: 'tunnel_url', type: 'string', description: 'Public URL (when active).' },
+            { name: 'error', type: 'string', description: 'Failure reason (when failed).' },
             { name: 'created_at', type: 'string', description: 'ISO 8601 timestamp.' },
           ]}
-          curlExample={`curl ${BASE}/api/v1/tunnels/a1b2c3d4e5f6a7b8 \\
+          curlExample={`curl ${BASE}/api/v1/tunnels/f8e7d6c5b4a39281 \\
   -H "Authorization: Bearer ${KEY}"`}
           responseExample={`{
   "success": true,
   "data": {
-    "id": "a1b2c3d4e5f6a7b8",
+    "id": "f8e7d6c5b4a39281",
+    "machine_id": "a1b2c3d4e5f6a7b8",
     "status": "active",
-    "subdomain": "myapp",
+    "subdomain": "my-server-a1b2c3",
     "target_ip": "127.0.0.1",
-    "tunnel_url": "https://myapp.your-domain.com",
-    "created_at": "2026-04-23T12:00:00Z"
+    "target_port": 3000,
+    "tunnel_url": "https://my-server-a1b2c3.your-domain.com",
+    "created_at": "2026-04-23T12:01:00Z"
   }
 }`}
         />
@@ -318,8 +448,8 @@ export default function DocsPage() {
           method="DELETE"
           path="/api/v1/tunnels/{id}"
           summary="Delete a tunnel"
-          description="Full teardown: SSHes into the VM to remove the rathole client service, removes the Caddy route, reconciles the rathole server config, and deletes all database records. SSH failures are best-effort and non-fatal — safe to call even after the VM is destroyed."
-          curlExample={`curl -X DELETE ${BASE}/api/v1/tunnels/a1b2c3d4e5f6a7b8 \\
+          description="Removes this service tunnel only — the machine remains and can have new tunnels created on it. To tear down everything, use DELETE /api/v1/machines/:id instead."
+          curlExample={`curl -X DELETE ${BASE}/api/v1/tunnels/f8e7d6c5b4a39281 \\
   -H "Authorization: Bearer ${KEY}"`}
           responseExample={`HTTP 204 No Content`}
         />
@@ -331,7 +461,7 @@ export default function DocsPage() {
         <p className="text-sm text-gray-600">All errors return JSON with a consistent shape.</p>
         <CodeBlock code={`{
   "success": false,
-  "error": "subdomain already in use"
+  "error": "machine is not connected (status: pending)"
 }`} lang="json" />
         <div className="rounded-xl border border-gray-200 overflow-hidden">
           <table className="w-full text-sm">
@@ -342,12 +472,12 @@ export default function DocsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              <tr><td className="py-2 px-4 font-mono text-xs text-gray-600">400</td><td className="py-2 px-4 text-xs text-gray-600">Bad request — see error message</td></tr>
+              <tr><td className="py-2 px-4 font-mono text-xs text-gray-600">400</td><td className="py-2 px-4 text-xs text-gray-600">Bad request — e.g. machine not yet connected</td></tr>
               <tr><td className="py-2 px-4 font-mono text-xs text-gray-600">401</td><td className="py-2 px-4 text-xs text-gray-600">Invalid API key</td></tr>
-              <tr><td className="py-2 px-4 font-mono text-xs text-gray-600">404</td><td className="py-2 px-4 text-xs text-gray-600">Tunnel not found</td></tr>
-              <tr><td className="py-2 px-4 font-mono text-xs text-gray-600">409</td><td className="py-2 px-4 text-xs text-gray-600">Conflict — subdomain already in use</td></tr>
+              <tr><td className="py-2 px-4 font-mono text-xs text-gray-600">404</td><td className="py-2 px-4 text-xs text-gray-600">Machine or tunnel not found</td></tr>
+              <tr><td className="py-2 px-4 font-mono text-xs text-gray-600">409</td><td className="py-2 px-4 text-xs text-gray-600">Subdomain already in use</td></tr>
               <tr><td className="py-2 px-4 font-mono text-xs text-gray-600">500</td><td className="py-2 px-4 text-xs text-gray-600">Internal server error</td></tr>
-              <tr><td className="py-2 px-4 font-mono text-xs text-gray-600">503</td><td className="py-2 px-4 text-xs text-gray-600">External API not configured — generate a key first</td></tr>
+              <tr><td className="py-2 px-4 font-mono text-xs text-gray-600">503</td><td className="py-2 px-4 text-xs text-gray-600">External API not configured — generate a key in Access Control</td></tr>
             </tbody>
           </table>
         </div>
