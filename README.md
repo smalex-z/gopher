@@ -15,100 +15,19 @@ vault.yourdomain.com  → Bitwarden on Raspberry Pi (behind NAT)
 
 ---
 
-## Use Cases
+## Table of Contents
 
-**Homelab:**
-```
-photos.home.com   → Jellyfin media server
-vault.home.com    → Bitwarden password manager
-files.home.com    → Nextcloud file sync
-monitor.home.com  → Grafana dashboards
-```
-
-**Research Lab:**
-```
-jupyter.lab.edu   → Jupyter notebook server
-vnc1.lab.edu      → VNC to lab workstation
-data.lab.edu      → Dataset browser
-```
-
-**Multi-site:**
-```
-nas.example.com      → Home NAS (Maryland)
-jupyter.example.com  → Lab server (UCLA)
-media.example.com    → Friend's shared Plex
-```
-
----
-
-## Built on Caddy and rathole
-
-Gopher would not exist without two excellent open-source projects:
-
-**[Caddy](https://caddyserver.com/)** handles all HTTPS termination and subdomain routing on the VPS. It automatically provisions and renews TLS certificates via Let's Encrypt, with zero configuration required from the user. Gopher generates and manages the Caddyfile for you, but Caddy is doing the actual reverse proxying.
-
-**[rathole](https://github.com/rathole-org/rathole)** is the tunnel engine. It's a Rust-based, extremely lightweight TCP/UDP tunnel that machines use to punch through NAT and firewalls by maintaining a persistent outbound connection to the VPS. Gopher manages the rathole server config and deploys rathole client configs to each machine — but rathole is what makes the tunnels actually work.
-
-If you find Gopher useful, please consider starring those projects too.
-
----
-
-## How It Works
-
-**Setup:** Run Gopher on a public VPS. Point `*.yourdomain.com` DNS to it.
-
-**Bootstrap machines:** Run a one-liner on any private machine to install rathole client and establish an outbound tunnel to your VPS.
-
-**Create tunnels:** In Gopher's web UI, map subdomains to services: `photos.yourdomain.com` → `machine-name:2283`
-
-**Traffic flow:**
-```
-User visits photos.yourdomain.com
-  ↓
-DNS resolves to your VPS IP
-  ↓
-Caddy terminates TLS on VPS
-  ↓
-Gopher routes by subdomain
-  ↓
-rathole tunnel forwards to private machine
-  ↓
-Service responds back through tunnel
-```
-
-Key advantage: Machines connect outbound to the VPS, bypassing NAT and firewalls. The VPS routes incoming internet traffic back through those established tunnels. Your origin IPs are never exposed.
-
----
-
-## Architecture
-
-Gopher is a **self-hosted edge server** that sits between the internet and your private services:
-
-```
-Internet → Gopher VPS (your edge) → Private networks (your origins)
-```
-
-What makes it an edge server:
-
-- DNS points to Gopher, not your origins
-- TLS terminates at Gopher (via Caddy)
-- Origin IPs never exposed to the internet
-- All traffic flows through Gopher
-- Full control over routing and security
-
-Components managed by Gopher:
-
-- **Caddy** — Automatic HTTPS + reverse proxy
-- **rathole** — Secure tunnel client/server
-- **Web UI** — Tunnel and machine management
-
-Similar to Cloudflare, but:
-
-- ✅ You own the infrastructure
-- ✅ No vendor lock-in
-- ✅ No traffic limits or file size caps
-- ✅ Support for TCP/UDP (not just HTTP)
-- ✅ Full privacy (your traffic never touches third parties)
+- [Installation](#installation)
+- [Setup Workflow](#setup-workflow)
+- [How It Works](#how-it-works)
+- [Architecture](#architecture)
+- [Use Cases](#use-cases)
+- [Comparison](#comparison)
+- [Firewall Setup](#firewall-setup)
+- [VPS Recommendations](#vps-recommendations)
+- [Built on Caddy and rathole](#built-on-caddy-and-rathole)
+- [Development](#development)
+- [Contributing](#contributing)
 
 ---
 
@@ -188,6 +107,117 @@ After the wizard, you're at the main dashboard:
 - `https://photos.yourdomain.com` is live with automatic TLS in seconds
 
 Gopher supports **HTTP, raw TCP, and UDP** tunnels.
+
+---
+
+## How It Works
+
+**Setup:** Run Gopher on a public VPS. Point `*.yourdomain.com` DNS to it.
+
+**Bootstrap machines:** Run a one-liner on any private machine to install rathole client and establish an outbound tunnel to your VPS.
+
+**Create tunnels:** In Gopher's web UI, map subdomains to services: `photos.yourdomain.com` → `machine-name:2283`
+
+**Traffic flow:**
+```
+User visits photos.yourdomain.com
+  ↓
+DNS resolves to your VPS IP
+  ↓
+Caddy terminates TLS on VPS
+  ↓
+Gopher routes by subdomain
+  ↓
+rathole tunnel forwards to private machine
+  ↓
+Service responds back through tunnel
+```
+
+Key advantage: Machines connect outbound to the VPS, bypassing NAT and firewalls. The VPS routes incoming internet traffic back through those established tunnels. Your origin IPs are never exposed.
+
+---
+
+## Architecture
+
+Gopher is a **self-hosted edge server** that sits between the internet and your private services:
+
+```
+Internet → Gopher VPS (your edge) → Private networks (your origins)
+```
+
+What makes it an edge server:
+
+- DNS points to Gopher, not your origins
+- TLS terminates at Gopher (via Caddy)
+- Origin IPs never exposed to the internet
+- All traffic flows through Gopher
+- Full control over routing and security
+
+Components managed by Gopher:
+
+- **Caddy** — Automatic HTTPS + reverse proxy
+- **rathole** — Secure tunnel client/server
+- **Web UI** — Tunnel and machine management
+
+Similar to Cloudflare, but:
+
+- ✅ You own the infrastructure
+- ✅ No vendor lock-in
+- ✅ No traffic limits or file size caps
+- ✅ Support for TCP/UDP (not just HTTP)
+- ✅ Full privacy (your traffic never touches third parties)
+
+```
+gopher/
+├── cmd/server/
+│   ├── main.go                     # Entry point; embeds frontend
+│   └── frontend/dist/              # Compiled React app (embedded at build time)
+├── frontend/                       # React + TypeScript + Tailwind
+│   └── src/
+│       ├── pages/                  # Dashboard, Machines, Tunnels, Server, Setup
+│       └── components/             # UI components
+├── internal/
+│   ├── api/                        # Chi router + HTTP handlers
+│   ├── config/                     # Caddyfile + rathole TOML generation
+│   ├── db/                         # SQLite (GORM) models + migrations
+│   ├── service/                    # Business logic (install, tunnels, firewall, …)
+│   └── ssh/                        # SSH client + VPS/machine deploy scripts
+└── scripts/
+    ├── build.sh                    # Build frontend then Go binary
+    └── dev.sh                      # Dev mode with hot reload
+```
+
+**Backend:** Go 1.21+, Chi router, GORM + glebarez/sqlite (pure-Go, no CGO), golang.org/x/crypto/ssh
+
+**Frontend:** React 18 + TypeScript, Vite, Tailwind CSS — embedded in the binary via `//go:embed`
+
+**Infrastructure (managed by Gopher):** [Caddy 2](https://caddyserver.com/) for HTTPS + routing, [rathole](https://github.com/rathole-org/rathole) for tunneling
+
+---
+
+## Use Cases
+
+**Homelab:**
+```
+photos.home.com   → Jellyfin media server
+vault.home.com    → Bitwarden password manager
+files.home.com    → Nextcloud file sync
+monitor.home.com  → Grafana dashboards
+```
+
+**Research Lab:**
+```
+jupyter.lab.edu   → Jupyter notebook server
+vnc1.lab.edu      → VNC to lab workstation
+data.lab.edu      → Dataset browser
+```
+
+**Multi-site:**
+```
+nas.example.com      → Home NAS (Maryland)
+jupyter.example.com  → Lab server (UCLA)
+media.example.com    → Friend's shared Plex
+```
 
 ---
 
@@ -276,35 +306,15 @@ Alternatively, use a **Network Security Group** attached to your instance instea
 
 ---
 
-## Project Structure
+## Built on Caddy and rathole
 
-```
-gopher/
-├── cmd/server/
-│   ├── main.go                     # Entry point; embeds frontend
-│   └── frontend/dist/              # Compiled React app (embedded at build time)
-├── frontend/                       # React + TypeScript + Tailwind
-│   └── src/
-│       ├── pages/                  # Dashboard, Machines, Tunnels, Server, Setup
-│       └── components/             # UI components
-├── internal/
-│   ├── api/                        # Chi router + HTTP handlers
-│   ├── config/                     # Caddyfile + rathole TOML generation
-│   ├── db/                         # SQLite (GORM) models + migrations
-│   ├── service/                    # Business logic (install, tunnels, firewall, …)
-│   └── ssh/                        # SSH client + VPS/machine deploy scripts
-└── scripts/
-    ├── build.sh                    # Build frontend then Go binary
-    └── dev.sh                      # Dev mode with hot reload
-```
+Gopher would not exist without two excellent open-source projects:
 
-## Tech Stack
+**[Caddy](https://caddyserver.com/)** handles all HTTPS termination and subdomain routing on the VPS. It automatically provisions and renews TLS certificates via Let's Encrypt, with zero configuration required from the user. Gopher generates and manages the Caddyfile for you, but Caddy is doing the actual reverse proxying.
 
-**Backend:** Go 1.21+, Chi router, GORM + glebarez/sqlite (pure-Go, no CGO), golang.org/x/crypto/ssh
+**[rathole](https://github.com/rathole-org/rathole)** is the tunnel engine. It's a Rust-based, extremely lightweight TCP/UDP tunnel that machines use to punch through NAT and firewalls by maintaining a persistent outbound connection to the VPS. Gopher manages the rathole server config and deploys rathole client configs to each machine — but rathole is what makes the tunnels actually work.
 
-**Frontend:** React 18 + TypeScript, Vite, Tailwind CSS — embedded in the binary via `//go:embed`
-
-**Infrastructure (managed by Gopher):** [Caddy 2](https://caddyserver.com/) for HTTPS + routing, [rathole](https://github.com/rathole-org/rathole) for tunneling
+If you find Gopher useful, please consider starring those projects too.
 
 ---
 
