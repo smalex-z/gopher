@@ -39,7 +39,7 @@ func NewRouter(
 	securityH := handlers.NewSecurityHandler(authSvc, secSvc)
 	debugH := handlers.NewDebugHandler()
 	updateH := handlers.NewUpdateHandler(updateSvc)
-	externalH := handlers.NewExternalAPIHandler(bootstrapSvc, tunnelSvc)
+	externalH := handlers.NewExternalAPIHandler(bootstrapSvc, tunnelSvc, machineSvc)
 
 	// Public: bootstrap script download and machine self-registration
 	r.Get("/static/bootstrap.sh", bootstrapH.ServeScript)

@@ -269,6 +269,17 @@ func GetBootstrapToken(token string) (*BootstrapToken, error) {
 	return &bt, nil
 }
 
+func GetBootstrapTokenByID(id string) (*BootstrapToken, error) {
+	var bt BootstrapToken
+	if err := DB.First(&bt, "id = ?", id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "bootstrap_token", ID: id}
+		}
+		return nil, err
+	}
+	return &bt, nil
+}
+
 func MarkTokenUsed(tokenID, machineID string) error {
 	return DB.Model(&BootstrapToken{}).Where("id = ?", tokenID).Updates(map[string]interface{}{
 		"used_at":    DB.NowFunc(),
@@ -340,12 +351,20 @@ func DeleteFirewallRule(id string) error {
 
 // External Tunnel Repository
 
-func GetExternalTunnels() ([]ExternalTunnel, error) {
-	var tunnels []ExternalTunnel
-	if err := DB.Order("created_at DESC").Find(&tunnels).Error; err != nil {
-		return nil, err
+func GetExternalTunnels(limit, offset int) ([]ExternalTunnel, int64, error) {
+	var total int64
+	if err := DB.Model(&ExternalTunnel{}).Count(&total).Error; err != nil {
+		return nil, 0, err
 	}
-	return tunnels, nil
+	var tunnels []ExternalTunnel
+	q := DB.Order("created_at DESC").Offset(offset)
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&tunnels).Error; err != nil {
+		return nil, 0, err
+	}
+	return tunnels, total, nil
 }
 
 func GetExternalTunnel(id string) (*ExternalTunnel, error) {
