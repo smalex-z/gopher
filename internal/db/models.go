@@ -60,6 +60,9 @@ type Tunnel struct {
 	BotProtectionEnabled bool   `json:"bot_protection_enabled"`
 	BotProtectionTTL     int    `json:"bot_protection_ttl"`      // session TTL in seconds; 0 = default (86400)
 	BotProtectionAllowIP string `json:"bot_protection_allow_ip"` // JSON array of CIDR/IP strings
+	// TLSSkipVerify disables upstream TLS certificate verification in Caddy.
+	// Use for backends with self-signed certs (e.g. Proxmox, some NAS devices).
+	TLSSkipVerify bool `json:"tls_skip_verify"`
 	Status       string    `json:"status"`
 	Managed      bool      `json:"managed,omitempty" gorm:"-"`
 	Kind         string    `json:"kind,omitempty" gorm:"-"`

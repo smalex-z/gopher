@@ -47,7 +47,7 @@ func (s *LocalSetupService) ReconcileRouterCaddyBlock() {
 	_ = exec.Command("sudo", "systemctl", "reload-or-restart", "caddy").Run() // #nosec G204
 }
 
-func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool, botProtected bool, bindIP string) string {
+func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool, botProtected bool, bindIP string, tlsSkipVerify bool) string {
 	scheme := ""
 	if noTLS {
 		scheme = "http://"
@@ -67,6 +67,12 @@ func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool
 	if botProtected {
 		upstreamPort = dashboardPort
 		upstream = "localhost"
+	}
+	// TLS skip verify: only meaningful when the upstream is itself HTTPS (noTLS=false,
+	// botProtected=false) and the backend uses a self-signed cert (e.g. Proxmox).
+	if tlsSkipVerify && !noTLS && !botProtected {
+		return fmt.Sprintf("%s%s.%s {\n    reverse_proxy %s:%d {\n        transport http {\n            tls_insecure_skip_verify\n        }\n    }\n}\n",
+			scheme, subdomain, domain, upstream, upstreamPort)
 	}
 	return fmt.Sprintf("%s%s.%s {\n    reverse_proxy %s:%d\n}\n", scheme, subdomain, domain, upstream, upstreamPort)
 }

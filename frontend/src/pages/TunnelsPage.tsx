@@ -19,6 +19,7 @@ interface FormState {
   transport: string
   no_tls: boolean
   private: boolean
+  tls_skip_verify: boolean
   bot_protection_enabled: boolean
   bot_protection_ttl: number    // stored as seconds; 0 = default
   bot_protection_allow_ip: string // newline-delimited in the textarea, JSON on wire
@@ -26,7 +27,7 @@ interface FormState {
 
 const defaultForm: FormState = {
   machine_id: '', name: '', subdomain: '', local_port: 3000, rathole_port: 0,
-  transport: 'tcp', no_tls: false, private: false,
+  transport: 'tcp', no_tls: false, private: false, tls_skip_verify: false,
   bot_protection_enabled: false, bot_protection_ttl: 0, bot_protection_allow_ip: '',
 }
 
@@ -71,6 +72,7 @@ export default function TunnelsPage() {
       transport: t.transport ?? 'tcp',
       no_tls: t.no_tls ?? false,
       private: t.private ?? false,
+      tls_skip_verify: t.tls_skip_verify ?? false,
       bot_protection_enabled: t.bot_protection_enabled ?? false,
       bot_protection_ttl: t.bot_protection_ttl ?? 0,
       bot_protection_allow_ip: t.bot_protection_allow_ip ?? '',
@@ -263,6 +265,9 @@ export default function TunnelsPage() {
                         )}
                         {t.bot_protection_enabled && (
                           <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-orange-50 text-orange-700 border border-orange-200">Bot Shield</span>
+                        )}
+                        {t.tls_skip_verify && (
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-50 text-yellow-700 border border-yellow-200">Self-signed</span>
                         )}
                       </div>
                     </td>
@@ -497,14 +502,23 @@ export default function TunnelsPage() {
                         </p>
                       )}
                       {domain && (
-                        <div className="border border-gray-200 rounded-lg p-3">
+                        <div className="border border-gray-200 rounded-lg p-3 space-y-2">
                           <label className="flex items-center gap-2 cursor-pointer select-none">
                             <input type="checkbox" checked={!form.no_tls}
-                              onChange={e => setForm(f => ({ ...f, no_tls: !e.target.checked }))}
+                              onChange={e => setForm(f => ({ ...f, no_tls: !e.target.checked, tls_skip_verify: e.target.checked ? false : f.tls_skip_verify }))}
                               className="rounded" />
                             <span className="text-sm font-medium text-gray-700">HTTPS</span>
                             <span className="text-xs text-gray-400 font-normal">auto-provision TLS certificate via Caddy</span>
                           </label>
+                          {!form.no_tls && (
+                            <label className="flex items-center gap-2 cursor-pointer select-none pl-6">
+                              <input type="checkbox" checked={form.tls_skip_verify}
+                                onChange={e => setForm(f => ({ ...f, tls_skip_verify: e.target.checked }))}
+                                className="rounded" />
+                              <span className="text-sm text-gray-700">Skip upstream TLS verification</span>
+                              <span className="text-xs text-gray-400 font-normal">for self-signed certs (e.g. Proxmox)</span>
+                            </label>
+                          )}
                         </div>
                       )}
                     </div>
@@ -576,6 +590,7 @@ export default function TunnelsPage() {
                       subdomain: routingEnabled && form.transport !== 'udp' ? form.subdomain : '',
                       local_port: form.local_port,
                       private: form.private,
+                      tls_skip_verify: form.tls_skip_verify,
                       bot_protection_enabled: form.bot_protection_enabled,
                       bot_protection_ttl: form.bot_protection_ttl,
                       bot_protection_allow_ip: form.bot_protection_allow_ip,
