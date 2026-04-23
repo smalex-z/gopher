@@ -2,10 +2,11 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ShieldCheck, ShieldOff, KeyRound, RefreshCw, Copy, Check,
-  Ban, Trash2, Plus, AlertTriangle, Activity, Unplug,
+  Ban, Trash2, Plus, AlertTriangle, Activity, Unplug, Eye, EyeOff,
 } from 'lucide-react'
 import client from '../api/client'
 import { securityApi, type AuditEvent, type Fail2banStatus, type Fail2banConfig, type StaleTokenAttempt } from '../api/security'
+import { localApi } from '../api/local'
 import { toast } from '../lib/toast'
 
 // ─── TOTP types + hook ───────────────────────────────────────────────────────
@@ -736,6 +737,142 @@ function Fail2banConfigSection() {
   )
 }
 
+// ─── External API key section ─────────────────────────────────────────────────
+
+function ExternalAPISection() {
+  const qc = useQueryClient()
+  const [revealed, setRevealed] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['external-api-config'],
+    queryFn: localApi.getExternalAPIConfig,
+  })
+
+  const rotate = useMutation({
+    mutationFn: localApi.rotateExternalAPIKey,
+    onSuccess: () => {
+      toast.success('API key rotated')
+      qc.invalidateQueries({ queryKey: ['external-api-config'] })
+    },
+    onError: () => toast.error('Failed to rotate key'),
+  })
+
+  const revoke = useMutation({
+    mutationFn: localApi.revokeExternalAPIKey,
+    onSuccess: () => {
+      toast.success('API key revoked')
+      setRevealed(false)
+      qc.invalidateQueries({ queryKey: ['external-api-config'] })
+    },
+    onError: () => toast.error('Failed to revoke key'),
+  })
+
+  const copyKey = () => {
+    if (!data?.key) return
+    navigator.clipboard.writeText(data.key).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  const maskedKey = data?.key
+    ? data.key.slice(0, 8) + '•'.repeat(data.key.length - 8)
+    : ''
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 space-y-5">
+      <div className="flex items-center gap-2">
+        <KeyRound size={18} className="text-gray-400" />
+        <h2 className="font-semibold text-gray-900">External API</h2>
+        <a href="/docs" className="ml-auto flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-xs font-medium hover:bg-blue-100 transition-colors">View API docs →</a>
+      </div>
+
+      <p className="text-sm text-gray-500">
+        The external API lets automation tools provision tunnels programmatically.
+        Requests must include <code className="font-mono bg-gray-100 px-1 rounded text-xs">Authorization: Bearer &lt;key&gt;</code>.
+      </p>
+
+      {isLoading && <p className="text-sm text-gray-400">Loading…</p>}
+
+      {data && (
+        <div className="space-y-4">
+          {data.via_env && (
+            <div className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
+              <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+              <span>Key is set via the <code className="font-mono text-xs">GOPHER_API_KEY</code> environment variable. Rotate and revoke are disabled.</span>
+            </div>
+          )}
+
+          {!data.configured ? (
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-gray-500">No API key configured.</span>
+              {!data.via_env && (
+                <button
+                  onClick={() => rotate.mutate()}
+                  disabled={rotate.isPending}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-semibold hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                >
+                  <Plus size={13} /> Generate key
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <code className="flex-1 font-mono text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 break-all select-all">
+                  {revealed ? data.key : maskedKey}
+                </code>
+                <button
+                  onClick={() => setRevealed(r => !r)}
+                  className="p-2 text-gray-400 hover:text-gray-700 transition-colors"
+                  title={revealed ? 'Hide key' : 'Reveal key'}
+                >
+                  {revealed ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+                <button
+                  onClick={copyKey}
+                  className="p-2 text-gray-400 hover:text-gray-700 transition-colors"
+                  title="Copy key"
+                >
+                  {copied ? <Check size={16} className="text-green-600" /> : <Copy size={16} />}
+                </button>
+              </div>
+
+              {!data.via_env && (
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      if (confirm('Rotate the API key? The old key will stop working immediately.')) {
+                        rotate.mutate()
+                      }
+                    }}
+                    disabled={rotate.isPending}
+                    className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg text-xs font-medium hover:bg-gray-50 disabled:opacity-50 transition-colors"
+                  >
+                    <RefreshCw size={13} /> Rotate
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (confirm('Revoke the API key? The external API will be disabled until a new key is generated.')) {
+                        revoke.mutate()
+                      }
+                    }}
+                    disabled={revoke.isPending}
+                    className="flex items-center gap-1.5 px-3 py-1.5 border border-red-200 text-red-600 rounded-lg text-xs font-medium hover:bg-red-50 disabled:opacity-50 transition-colors"
+                  >
+                    <Trash2 size={13} /> Revoke
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 type Panel = 'none' | 'enroll' | 'disable' | 'regenerate'
@@ -807,6 +944,9 @@ export default function SecurityPage() {
         {panel === 'disable' && <DisablePanel onDone={invalidate} />}
         {panel === 'regenerate' && <RegeneratePanel onDone={invalidate} />}
       </div>
+
+      {/* External API key */}
+      <ExternalAPISection />
 
       {/* Rate limiting info */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">

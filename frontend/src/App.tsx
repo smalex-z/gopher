@@ -11,6 +11,7 @@ import NetworkMapPage from './pages/NetworkMapPage'
 import SSHKeysPage from './pages/SSHKeysPage'
 import FirewallPage from './pages/FirewallPage'
 import SecurityPage from './pages/SecurityPage'
+import DocsPage from './pages/DocsPage'
 import SetupPage from './pages/SetupPage'
 import LoginPage from './pages/LoginPage'
 import { AuthProvider, useAuth } from './lib/auth'
@@ -181,6 +182,7 @@ function AppShell() {
           <Route path="/keys" element={<SSHKeysPage />} />
           <Route path="/firewall" element={<FirewallPage />} />
           <Route path="/security" element={<SecurityPage />} />
+          <Route path="/docs" element={<DocsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

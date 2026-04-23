@@ -269,6 +269,17 @@ func GetBootstrapToken(token string) (*BootstrapToken, error) {
 	return &bt, nil
 }
 
+func GetBootstrapTokenByID(id string) (*BootstrapToken, error) {
+	var bt BootstrapToken
+	if err := DB.First(&bt, "id = ?", id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "bootstrap_token", ID: id}
+		}
+		return nil, err
+	}
+	return &bt, nil
+}
+
 func MarkTokenUsed(tokenID, machineID string) error {
 	return DB.Model(&BootstrapToken{}).Where("id = ?", tokenID).Updates(map[string]interface{}{
 		"used_at":    DB.NowFunc(),
@@ -336,6 +347,71 @@ func CreateFirewallRule(rule *FirewallRule) error {
 
 func DeleteFirewallRule(id string) error {
 	return DB.Delete(&FirewallRule{}, "id = ?", id).Error
+}
+
+// External Tunnel Repository
+
+func GetExternalTunnels(limit, offset int) ([]ExternalTunnel, int64, error) {
+	var total int64
+	if err := DB.Model(&ExternalTunnel{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var tunnels []ExternalTunnel
+	q := DB.Order("created_at DESC").Offset(offset)
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&tunnels).Error; err != nil {
+		return nil, 0, err
+	}
+	return tunnels, total, nil
+}
+
+func GetExternalTunnel(id string) (*ExternalTunnel, error) {
+	var t ExternalTunnel
+	if err := DB.First(&t, "id = ?", id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "external_tunnel", ID: id}
+		}
+		return nil, err
+	}
+	return &t, nil
+}
+
+func GetExternalTunnelByTokenID(tokenID string) (*ExternalTunnel, error) {
+	var t ExternalTunnel
+	if err := DB.Where("token_id = ?", tokenID).First(&t).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "external_tunnel", ID: tokenID}
+		}
+		return nil, err
+	}
+	return &t, nil
+}
+
+// CheckExternalTunnelSubdomainExists returns true if an ExternalTunnel with this
+// subdomain exists and is not in a terminal failed state. Used to prevent duplicate
+// subdomain reservations before the async Tunnel record is created.
+func CheckExternalTunnelSubdomainExists(subdomain string) (bool, error) {
+	var count int64
+	if err := DB.Model(&ExternalTunnel{}).
+		Where("subdomain = ? AND status != 'failed'", subdomain).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func CreateExternalTunnel(t *ExternalTunnel) error {
+	return DB.Create(t).Error
+}
+
+func UpdateExternalTunnel(t *ExternalTunnel) error {
+	return DB.Save(t).Error
+}
+
+func DeleteExternalTunnel(id string) error {
+	return DB.Delete(&ExternalTunnel{}, "id = ?", id).Error
 }
 
 // Bot Session Repository

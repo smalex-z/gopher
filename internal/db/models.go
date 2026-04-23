@@ -116,6 +116,9 @@ type AppSettings struct {
 	Fail2banIgnoreIPs string `json:"fail2ban_ignore_ips"` // JSON array of whitelisted CIDRs/IPs
 	// UpdateChannel controls which release stream to track: "stable" (default), "beta", or "alpha".
 	UpdateChannel string `json:"update_channel"`
+	// ExternalAPIKey is the bearer token for the /api/v1/* external REST API.
+	// If the GOPHER_API_KEY environment variable is set it takes precedence over this field.
+	ExternalAPIKey string `json:"-"` // never serialised — returned only via dedicated endpoints
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
@@ -142,4 +145,22 @@ type SSHKey struct {
 	IsDefault  bool      `json:"is_default"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// ExternalTunnel tracks tunnel requests made via the external REST API (e.g. from Nimbus).
+// A record is created when POST /api/v1/tunnels is called and transitions from
+// pending → active once the bootstrap completes and the service tunnel is live.
+type ExternalTunnel struct {
+	ID         string     `json:"id" gorm:"primaryKey"`
+	Subdomain  string     `json:"subdomain"`
+	TargetIP   string     `json:"target_ip"`
+	TargetPort int        `json:"target_port"`
+	TokenID    string     `json:"token_id"`  // BootstrapToken.ID used to bootstrap the machine
+	MachineID  *string    `json:"machine_id"` // set once the machine registers
+	TunnelID   *string    `json:"tunnel_id"`  // set once the service tunnel is created
+	Status     string     `json:"status"`     // pending | active | failed
+	TunnelURL  string     `json:"tunnel_url"` // only populated when active
+	ErrorMsg   string     `json:"error,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
