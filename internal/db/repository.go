@@ -349,6 +349,58 @@ func DeleteFirewallRule(id string) error {
 	return DB.Delete(&FirewallRule{}, "id = ?", id).Error
 }
 
+// External Machine Repository
+
+func GetExternalMachines(limit, offset int) ([]ExternalMachine, int64, error) {
+	var total int64
+	if err := DB.Model(&ExternalMachine{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var machines []ExternalMachine
+	q := DB.Order("created_at DESC").Offset(offset)
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&machines).Error; err != nil {
+		return nil, 0, err
+	}
+	return machines, total, nil
+}
+
+func GetExternalMachine(id string) (*ExternalMachine, error) {
+	var m ExternalMachine
+	if err := DB.First(&m, "id = ?", id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "external_machine", ID: id}
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
+func GetExternalMachineByTokenID(tokenID string) (*ExternalMachine, error) {
+	var m ExternalMachine
+	if err := DB.Where("token_id = ?", tokenID).First(&m).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "external_machine", ID: tokenID}
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
+func CreateExternalMachine(m *ExternalMachine) error {
+	return DB.Create(m).Error
+}
+
+func UpdateExternalMachine(m *ExternalMachine) error {
+	return DB.Save(m).Error
+}
+
+func DeleteExternalMachine(id string) error {
+	return DB.Delete(&ExternalMachine{}, "id = ?", id).Error
+}
+
 // External Tunnel Repository
 
 func GetExternalTunnels(limit, offset int) ([]ExternalTunnel, int64, error) {
@@ -367,6 +419,14 @@ func GetExternalTunnels(limit, offset int) ([]ExternalTunnel, int64, error) {
 	return tunnels, total, nil
 }
 
+func GetExternalTunnelsByMachineID(machineID string) ([]ExternalTunnel, error) {
+	var tunnels []ExternalTunnel
+	if err := DB.Where("machine_id = ?", machineID).Find(&tunnels).Error; err != nil {
+		return nil, err
+	}
+	return tunnels, nil
+}
+
 func GetExternalTunnel(id string) (*ExternalTunnel, error) {
 	var t ExternalTunnel
 	if err := DB.First(&t, "id = ?", id).Error; err != nil {
@@ -378,40 +438,16 @@ func GetExternalTunnel(id string) (*ExternalTunnel, error) {
 	return &t, nil
 }
 
-func GetExternalTunnelByTokenID(tokenID string) (*ExternalTunnel, error) {
-	var t ExternalTunnel
-	if err := DB.Where("token_id = ?", tokenID).First(&t).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, &apperrors.NotFoundError{Resource: "external_tunnel", ID: tokenID}
-		}
-		return nil, err
-	}
-	return &t, nil
-}
-
-// CheckExternalTunnelSubdomainExists returns true if an ExternalTunnel with this
-// subdomain exists and is not in a terminal failed state. Used to prevent duplicate
-// subdomain reservations before the async Tunnel record is created.
-func CheckExternalTunnelSubdomainExists(subdomain string) (bool, error) {
-	var count int64
-	if err := DB.Model(&ExternalTunnel{}).
-		Where("subdomain = ? AND status != 'failed'", subdomain).
-		Count(&count).Error; err != nil {
-		return false, err
-	}
-	return count > 0, nil
-}
-
 func CreateExternalTunnel(t *ExternalTunnel) error {
 	return DB.Create(t).Error
 }
 
-func UpdateExternalTunnel(t *ExternalTunnel) error {
-	return DB.Save(t).Error
-}
-
 func DeleteExternalTunnel(id string) error {
 	return DB.Delete(&ExternalTunnel{}, "id = ?", id).Error
+}
+
+func DeleteExternalTunnelsByMachineID(machineID string) error {
+	return DB.Where("machine_id = ?", machineID).Delete(&ExternalTunnel{}).Error
 }
 
 // Bot Session Repository

@@ -151,13 +151,12 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 	// Async: wait for tunnel then verify SSH connectivity.
 	go s.awaitSSHHealth(machine, sshKey.PrivateKey)
 
-	// If this bootstrap was triggered by the external API, activate the associated tunnel.
-	if ext, err := db.GetExternalTunnelByTokenID(bt.ID); err == nil {
+	// If this bootstrap was triggered by the external API, record the machine ID.
+	if em, err := db.GetExternalMachineByTokenID(bt.ID); err == nil {
 		machineID := machine.ID
-		ext.MachineID = &machineID
-		ext.UpdatedAt = time.Now()
-		_ = db.UpdateExternalTunnel(ext)
-		go s.activateExternalTunnel(ext.ID, machine.ID)
+		em.MachineID = &machineID
+		em.UpdatedAt = time.Now()
+		_ = db.UpdateExternalMachine(em)
 	}
 
 	return &BootstrapResponse{
@@ -195,106 +194,6 @@ func (s *BootstrapService) awaitSSHHealth(machine *db.Machine, privateKey string
 	_ = db.UpdateMachine(machine)
 }
 
-// activateExternalTunnel waits for the bootstrapped machine to become reachable,
-// then creates and pushes the service tunnel config on behalf of an external API request.
-func (s *BootstrapService) activateExternalTunnel(extTunnelID, machineID string) {
-	failExt := func(msg string) {
-		if ext, err := db.GetExternalTunnel(extTunnelID); err == nil {
-			ext.Status = "failed"
-			ext.ErrorMsg = msg
-			ext.UpdatedAt = time.Now()
-			_ = db.UpdateExternalTunnel(ext)
-		}
-	}
-
-	// Poll DB until awaitSSHHealth marks the machine connected, or we time out.
-	deadline := time.Now().Add(bootstrapSSHHealthTimeout)
-	var machine *db.Machine
-	machineReady := false
-	for time.Now().Before(deadline) {
-		time.Sleep(5 * time.Second)
-		m, err := db.GetMachine(machineID)
-		if err != nil {
-			continue
-		}
-		machine = m
-		if m.Status == "connected" || m.Status == "active" {
-			machineReady = true
-			break
-		}
-	}
-
-	if !machineReady {
-		failExt("machine SSH tunnel did not become reachable within timeout")
-		return
-	}
-
-	ext, err := db.GetExternalTunnel(extTunnelID)
-	if err != nil {
-		return
-	}
-
-	// Re-check subdomain in case another request claimed it during the wait.
-	if taken, _ := db.CheckSubdomainExists(ext.Subdomain); taken {
-		failExt("subdomain was taken by another tunnel during activation")
-		return
-	}
-
-	ratholePort, err := db.NextRatholePort()
-	if err != nil {
-		failExt(fmt.Sprintf("failed to allocate rathole port: %v", err))
-		return
-	}
-
-	tunnel := &db.Tunnel{
-		ID:           shortToken(),
-		MachineID:    machine.ID,
-		Name:         ext.Subdomain,
-		Subdomain:    ext.Subdomain,
-		LocalPort:    ext.TargetPort,
-		RatholePort:  ratholePort,
-		RatholeToken: shortToken(),
-		Protocol:     "tcp",
-		Transport:    "tcp",
-		Status:       "inactive",
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
-	}
-
-	if err := db.CreateTunnel(tunnel); err != nil {
-		failExt(fmt.Sprintf("failed to create tunnel record: %v", err))
-		return
-	}
-
-	ApplyTunnelPort(tunnel.RatholePort, tunnel.Transport, tunnel.Private)
-
-	if err := s.local.AddServiceTunnel(tunnel, machine); err != nil {
-		fmt.Printf("external tunnel activation: config push failed for tunnel %s: %v\n", tunnel.ID, err)
-		tunnel.Status = fmt.Sprintf("config-error: %v", err)
-		_ = db.UpdateTunnel(tunnel)
-		// Re-fetch ext in case it changed while we waited.
-		if ext2, ferr := db.GetExternalTunnel(extTunnelID); ferr == nil {
-			ext2.Status = "failed"
-			ext2.ErrorMsg = fmt.Sprintf("config push failed: %v", err)
-			ext2.UpdatedAt = time.Now()
-			_ = db.UpdateExternalTunnel(ext2)
-		}
-		return
-	}
-
-	settings, _ := db.GetSettings()
-	tunnelURL := ""
-	if settings != nil && settings.Domain != "" {
-		tunnelURL = fmt.Sprintf("https://%s.%s", ext.Subdomain, settings.Domain)
-	}
-
-	tunnelID := tunnel.ID
-	ext.TunnelID = &tunnelID
-	ext.Status = "active"
-	ext.TunnelURL = tunnelURL
-	ext.UpdatedAt = time.Now()
-	_ = db.UpdateExternalTunnel(ext)
-}
 
 // shortToken returns 16 random hex characters (8 bytes of entropy).
 // Shorter and easier to read/copy than a UUID while still being unguessable.

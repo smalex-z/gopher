@@ -38,7 +38,7 @@ func NewRouter(
 	securityH := handlers.NewSecurityHandler(authSvc, secSvc)
 	debugH := handlers.NewDebugHandler()
 	updateH := handlers.NewUpdateHandler(updateSvc)
-	externalH := handlers.NewExternalAPIHandler(bootstrapSvc, tunnelSvc, machineSvc)
+	externalH := handlers.NewExternalAPIHandler(bootstrapSvc, tunnelSvc, machineSvc, localSvc)
 
 	// Public: bootstrap script download and machine self-registration
 	r.Get("/static/bootstrap.sh", bootstrapH.ServeScript)
@@ -56,6 +56,12 @@ func NewRouter(
 		// All other /api/v1 routes require a valid API key.
 		r.Group(func(r chi.Router) {
 			r.Use(APIKeyMiddleware())
+			r.Route("/machines", func(r chi.Router) {
+				r.Get("/", externalH.ListMachines)
+				r.Post("/", externalH.CreateMachine)
+				r.Get("/{id}", externalH.GetMachine)
+				r.Delete("/{id}", externalH.DeleteMachine)
+			})
 			r.Route("/tunnels", func(r chi.Router) {
 				r.Get("/", externalH.ListTunnels)
 				r.Post("/", externalH.CreateTunnel)
