@@ -175,6 +175,7 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 		BotProtectionEnabled: botProtection,
 		BotProtectionTTL:     req.BotProtectionTTL,
 		BotProtectionAllowIP: req.BotProtectionAllowIP,
+		TLSSkipVerify:        req.TLSSkipVerify && req.Subdomain != "" && !req.NoTLS && transport != "udp",
 		Status:               "inactive",
 		CreatedAt:            time.Now(),
 		UpdatedAt:            time.Now(),
@@ -244,6 +245,7 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 
 	oldPrivate := tunnel.Private
 	oldBotProtection := tunnel.BotProtectionEnabled
+	oldTLSSkipVerify := tunnel.TLSSkipVerify
 	tunnel.Name = req.Name
 	tunnel.LocalPort = req.LocalPort
 	tunnel.Private = req.Private
@@ -255,6 +257,7 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 	tunnel.BotProtectionEnabled = req.BotProtectionEnabled && tunnel.Subdomain != "" && tunnel.Transport != "udp"
 	tunnel.BotProtectionTTL = req.BotProtectionTTL
 	tunnel.BotProtectionAllowIP = req.BotProtectionAllowIP
+	tunnel.TLSSkipVerify = req.TLSSkipVerify && tunnel.Subdomain != "" && !tunnel.NoTLS && tunnel.Transport != "udp"
 	tunnel.UpdatedAt = time.Now()
 
 	if err := db.UpdateTunnel(tunnel); err != nil {
@@ -270,12 +273,11 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 		ApplyTunnelPort(tunnel.RatholePort, tunnel.Transport, tunnel.Private)
 	}
 
-	// If bot protection toggled, rewrite the Caddy block so the upstream
-	// switches between rathole port (unprotected) and proxy port (protected).
-	if oldBotProtection != tunnel.BotProtectionEnabled && tunnel.Subdomain != "" && s.local != nil {
+	// If bot protection or TLS skip verify toggled, rewrite the Caddy block.
+	if (oldBotProtection != tunnel.BotProtectionEnabled || oldTLSSkipVerify != tunnel.TLSSkipVerify) && tunnel.Subdomain != "" && s.local != nil {
 		if svcSettings, svcErr := db.GetSettings(); svcErr == nil && svcSettings.Domain != "" {
 			managedPath := managedTunnelCaddyPath(tunnel.ID)
-			block := buildTunnelCaddyBlock(tunnel.Subdomain, svcSettings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, svcSettings.BindIP)
+			block := buildTunnelCaddyBlock(tunnel.Subdomain, svcSettings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, svcSettings.BindIP, tunnel.TLSSkipVerify)
 			if writeErr := writeLocalFile(managedPath, block); writeErr != nil {
 				log.Printf("tunnel update: failed to rewrite Caddy block for %s: %v", tunnel.ID, writeErr)
 			} else {
