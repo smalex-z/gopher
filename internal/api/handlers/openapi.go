@@ -26,6 +26,13 @@ const openAPISpec = `{
       }
     },
     "schemas": {
+      "SSHKey": {
+        "type": "object",
+        "properties": {
+          "id":   { "type": "string", "example": "a1b2c3d4e5f6a7b8" },
+          "name": { "type": "string", "example": "vm-keypair-01" }
+        }
+      },
       "Machine": {
         "type": "object",
         "properties": {
@@ -92,6 +99,37 @@ const openAPISpec = `{
     }
   },
   "paths": {
+    "/ssh-keys": {
+      "post": {
+        "summary": "Upload an SSH keypair",
+        "operationId": "uploadSSHKey",
+        "description": "Registers an Ed25519 (or RSA) keypair so it can be referenced by ssh_key_id in POST /machines. Both private_key and public_key are required — Gopher uses the private key to SSH back into the VM through the rathole tunnel.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["private_key", "public_key"],
+                "properties": {
+                  "name":        { "type": "string",  "description": "Human-readable label", "example": "vm-keypair-01" },
+                  "private_key": { "type": "string",  "description": "PEM-encoded private key" },
+                  "public_key":  { "type": "string",  "description": "OpenSSH public key (ssh-ed25519 ...)" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Key registered; use the returned id as ssh_key_id when creating machines",
+            "content": { "application/json": { "schema": { "properties": { "success": { "type": "boolean" }, "data": { "$ref": "#/components/schemas/SSHKey" } } } } }
+          },
+          "400": { "description": "Missing or invalid key material" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
     "/machines": {
       "get": {
         "summary": "List machines",
@@ -120,7 +158,7 @@ const openAPISpec = `{
                 "type": "object",
                 "properties": {
                   "public_ssh": { "type": "boolean", "default": false, "description": "Expose SSH back-tunnel publicly" },
-                  "ssh_key_id": { "type": "string", "description": "SSH key ID to install (defaults to server default)" }
+                  "ssh_key_id": { "type": "string", "description": "SSH key ID to use (defaults to server default). Upload a keypair first via POST /ssh-keys if the VM has its own key." }
                 }
               }
             }
@@ -213,6 +251,24 @@ const openAPISpec = `{
           "404": { "$ref": "#/components/responses/NotFound" },
           "409": { "$ref": "#/components/responses/Conflict" },
           "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/tunnels/check": {
+      "get": {
+        "summary": "Check subdomain availability",
+        "operationId": "checkSubdomain",
+        "description": "Returns whether a subdomain is free before committing to a bootstrap. Use this before POST /machines to avoid a wasted bootstrap cycle.",
+        "parameters": [
+          { "name": "subdomain", "in": "query", "required": true, "schema": { "type": "string" }, "example": "my-vm-01" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Availability result",
+            "content": { "application/json": { "schema": { "properties": { "success": { "type": "boolean" }, "data": { "type": "object", "properties": { "available": { "type": "boolean" } } } } } } }
+          },
+          "400": { "description": "subdomain query parameter missing" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
         }
       }
     },

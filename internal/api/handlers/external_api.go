@@ -468,6 +468,53 @@ func (h *ExternalAPIHandler) DeleteTunnel(w http.ResponseWriter, r *http.Request
 	response.NoContent(w)
 }
 
+// POST /api/v1/ssh-keys
+// Uploads an Ed25519 (or RSA) keypair so the caller can reference it by ID in
+// POST /api/v1/machines. Both private_key and public_key are required — Gopher
+// uses the private key to SSH back into the VM through the rathole tunnel.
+// Body: { "name": "...", "private_key": "...", "public_key": "..." }
+func (h *ExternalAPIHandler) UploadSSHKey(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name       string `json:"name"`
+		PrivateKey string `json:"private_key"`
+		PublicKey  string `json:"public_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid request body")
+		return
+	}
+	if req.PrivateKey == "" || req.PublicKey == "" {
+		response.BadRequest(w, "private_key and public_key are required")
+		return
+	}
+	if req.Name == "" {
+		req.Name = "Uploaded key"
+	}
+	key, err := h.localSvc.AddSSHKey(req.Name, req.PrivateKey, req.PublicKey, false)
+	if err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	response.Created(w, map[string]string{"id": key.ID, "name": key.Name})
+}
+
+// GET /api/v1/tunnels/check?subdomain=foo
+// Returns {"available": true} if the subdomain is free, false if taken.
+// Use this before POST /api/v1/machines to avoid a wasted bootstrap.
+func (h *ExternalAPIHandler) CheckSubdomain(w http.ResponseWriter, r *http.Request) {
+	subdomain := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("subdomain")))
+	if subdomain == "" {
+		response.BadRequest(w, "subdomain query parameter is required")
+		return
+	}
+	taken, err := db.CheckSubdomainExists(subdomain)
+	if err != nil {
+		response.InternalError(w, "failed to check subdomain")
+		return
+	}
+	response.Success(w, map[string]bool{"available": !taken})
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 func randHex() string {

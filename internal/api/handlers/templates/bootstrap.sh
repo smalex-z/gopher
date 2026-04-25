@@ -11,21 +11,23 @@ if [ -z "$TOKEN" ]; then
   exit 1
 fi
 
-# ── Interactive prompts via /dev/tty (safe when piped via curl | bash) ────────
-if [ ! -c /dev/tty ]; then
-  echo "ERROR: No terminal available. Run the script directly."
-  exit 1
-fi
-
 echo "=== Gopher Machine Bootstrap ==="
 echo ""
-printf "Machine name (e.g. 'web-server'): " >/dev/tty
-read -r MACHINE_NAME </dev/tty
-while [ -z "$MACHINE_NAME" ]; do
-  printf "Machine name cannot be empty. Try again: " >/dev/tty
+if [ -n "$GOPHER_MACHINE_NAME" ]; then
+  MACHINE_NAME="$GOPHER_MACHINE_NAME"
+  echo "Machine name: $MACHINE_NAME"
+elif [ -c /dev/tty ]; then
+  printf "Machine name (e.g. 'web-server'): " >/dev/tty
   read -r MACHINE_NAME </dev/tty
-done
-SSH_USER="$USER"
+  while [ -z "$MACHINE_NAME" ]; do
+    printf "Machine name cannot be empty. Try again: " >/dev/tty
+    read -r MACHINE_NAME </dev/tty
+  done
+else
+  echo "ERROR: GOPHER_MACHINE_NAME env var is required for non-interactive use."
+  exit 1
+fi
+SSH_USER="${GOPHER_SSH_USER:-$USER}"
 echo "SSH user: $SSH_USER"
 
 handle_sudo_failure() {
@@ -143,18 +145,6 @@ echo "  rathole binary: $RATHOLE_BIN"
 # ── Write rathole client config ───────────────────────────────────────────────
 echo "Writing rathole client config..."
 
-if [ -f "/etc/rathole/client.toml" ]; then
-  echo "WARNING: existing rathole config detected at /etc/rathole/client.toml"
-  printf "Continue and overwrite? [y/N]: " >/dev/tty
-  read -r OVERWRITE_CONFIRM </dev/tty
-  case "$OVERWRITE_CONFIRM" in
-    [yY]|[yY][eE][sS]) ;;
-    *)
-      echo "Aborted by user"
-      exit 1
-      ;;
-  esac
-fi
 
 $SUDO mkdir -p /etc/rathole || handle_sudo_failure
 echo "$RATHOLE_CONFIG" | $SUDO tee /etc/rathole/client.toml >/dev/null || handle_sudo_failure

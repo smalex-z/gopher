@@ -101,6 +101,11 @@ func (s *MachineService) Delete(id string) error {
 		}
 	}
 
+	// Remove the iptables rule for the machine's SSH back-tunnel port.
+	if machine.TunnelPort > 0 {
+		RevokeTunnelPort(machine.TunnelPort, "tcp")
+	}
+
 	if err := db.DeleteMachine(id); err != nil {
 		return err
 	}

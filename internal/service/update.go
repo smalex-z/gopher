@@ -180,10 +180,16 @@ func (s *UpdateService) Apply() error {
 		}
 	}
 
-	// Restart the service after a short delay so this HTTP response can be delivered
+	// Reload systemd unit definitions before restarting so any changes to the
+	// service file in the new release are picked up (mirrors reinstall.sh).
 	go func() {
 		time.Sleep(time.Second)
-		restartArgs := append(append([]string{}, privilegedCmdPrefix()...), "systemctl", "restart", "gopher")
+		sudo := privilegedCmdPrefix()
+		reloadArgs := append(append([]string{}, sudo...), "systemctl", "daemon-reload")
+		if out, err := exec.Command(reloadArgs[0], reloadArgs[1:]...).CombinedOutput(); err != nil {
+			log.Printf("WARN: systemctl daemon-reload failed: %v — %s", err, strings.TrimSpace(string(out)))
+		}
+		restartArgs := append(append([]string{}, sudo...), "systemctl", "restart", "gopher")
 		_ = exec.Command(restartArgs[0], restartArgs[1:]...).Run()
 	}()
 

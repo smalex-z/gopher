@@ -63,10 +63,14 @@ func NewRouter(
 				r.Delete("/{id}", externalH.DeleteMachine)
 			})
 			r.Route("/tunnels", func(r chi.Router) {
+				r.Get("/check", externalH.CheckSubdomain)
 				r.Get("/", externalH.ListTunnels)
 				r.Post("/", externalH.CreateTunnel)
 				r.Get("/{id}", externalH.GetTunnel)
 				r.Delete("/{id}", externalH.DeleteTunnel)
+			})
+			r.Route("/ssh-keys", func(r chi.Router) {
+				r.Post("/", externalH.UploadSSHKey)
 			})
 		})
 	})
