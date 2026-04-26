@@ -49,15 +49,23 @@ const openAPISpec = `{
       "Tunnel": {
         "type": "object",
         "properties": {
-          "id":          { "type": "string",  "example": "f8e7d6c5b4a39281" },
-          "machine_id":  { "type": "string",  "example": "a1b2c3d4e5f6a7b8" },
-          "status":      { "type": "string",  "enum": ["active", "failed"] },
-          "subdomain":   { "type": "string",  "example": "my-server-a1b2c3" },
-          "target_ip":   { "type": "string",  "example": "127.0.0.1" },
-          "target_port": { "type": "integer", "example": 3000 },
-          "tunnel_url":  { "type": "string",  "example": "https://my-server-a1b2c3.example.com", "description": "Public URL (present when active)" },
-          "error":       { "type": "string",  "description": "Failure reason (present when failed)" },
-          "created_at":  { "type": "string",  "format": "date-time" }
+          "id":             { "type": "string",  "example": "f8e7d6c5b4a39281" },
+          "machine_id":     { "type": "string",  "example": "a1b2c3d4e5f6a7b8" },
+          "status":         { "type": "string",  "enum": ["active", "failed"] },
+          "subdomain":      { "type": "string",  "example": "my-server-a1b2c3", "description": "Public hostname prefix. Empty for UDP and port-only tunnels." },
+          "target_ip":      { "type": "string",  "example": "127.0.0.1" },
+          "target_port":    { "type": "integer", "example": 3000 },
+          "transport":      { "type": "string",  "enum": ["tcp", "udp"], "description": "L4 protocol. UDP tunnels skip Caddy + subdomain routing." },
+          "private":        { "type": "boolean", "description": "Bind 127.0.0.1 on the gateway (VPS-local) instead of 0.0.0.0." },
+          "no_tls":         { "type": "boolean", "description": "Caddy serves http:// instead of https://. Ignored for UDP and port-only." },
+          "server_port":    { "type": "integer", "description": "Gateway port assigned by Gopher. Use <gateway>:<server_port> for port-only and UDP tunnels." },
+          "bot_protection_enabled":  { "type": "boolean", "description": "PoW JS-challenge gating HTTP traffic. Requires subdomain + TCP." },
+          "bot_protection_ttl":      { "type": "integer", "description": "Challenge-cookie TTL in seconds (0 = default 86400)." },
+          "bot_protection_allow_ip": { "type": "string",  "description": "JSON array of CIDR/IP strings whitelisted from the challenge." },
+          "tls_skip_verify":         { "type": "boolean", "description": "Caddy ignores upstream TLS errors (for self-signed backends)." },
+          "tunnel_url":     { "type": "string",  "example": "https://my-server-a1b2c3.example.com", "description": "Public URL. For port-only and UDP tunnels: <gateway>:<server_port>." },
+          "error":          { "type": "string",  "description": "Failure reason (present when failed)." },
+          "created_at":     { "type": "string",  "format": "date-time" }
         }
       },
       "PaginatedMachines": {
@@ -234,10 +242,15 @@ const openAPISpec = `{
                 "properties": {
                   "machine_id":  { "type": "string",  "description": "ID of a connected machine" },
                   "target_port": { "type": "integer", "example": 3000 },
-                  "subdomain":   { "type": "string",  "description": "Auto-generated from machine name if omitted" },
+                  "transport":   { "type": "string",  "enum": ["tcp", "udp"], "default": "tcp", "description": "L4 protocol. UDP tunnels skip Caddy + subdomain routing — they're surfaced at <gateway>:<server_port>." },
+                  "subdomain":   { "type": "string",  "description": "Auto-generated from machine name when transport=tcp and omitted. Pass \"\" to expose by port only. Ignored for UDP." },
                   "target_ip":   { "type": "string",  "default": "127.0.0.1" },
                   "private":     { "type": "boolean", "default": false, "description": "Bind to 127.0.0.1 on the VPS (not publicly reachable)" },
-                  "no_tls":      { "type": "boolean", "default": false, "description": "Skip Caddy TLS; serve plain http://" }
+                  "no_tls":      { "type": "boolean", "default": false, "description": "Skip Caddy TLS; serve plain http://. Ignored for UDP / port-only." },
+                  "bot_protection_enabled":  { "type": "boolean", "default": false, "description": "Alpha: PoW JS-challenge gating HTTP traffic. Server silently disables this when subdomain is empty or transport=udp." },
+                  "bot_protection_ttl":      { "type": "integer", "default": 0, "description": "Alpha: challenge cookie TTL in seconds. 0 = default (86400 / 24h)." },
+                  "bot_protection_allow_ip": { "type": "string",  "description": "Alpha: JSON array of CIDR/IP strings whitelisted from the challenge." },
+                  "tls_skip_verify":         { "type": "boolean", "default": false, "description": "Alpha: Caddy ignores upstream TLS errors. Required for backends with self-signed certs (Proxmox, some NAS devices)." }
                 }
               }
             }

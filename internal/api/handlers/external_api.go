@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/smalex-z/gopher/internal/api/dto"
 	"github.com/smalex-z/gopher/internal/api/response"
-	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
 	apperrors "github.com/smalex-z/gopher/internal/errors"
 	"github.com/smalex-z/gopher/internal/service"
@@ -245,16 +245,42 @@ type externalTunnelResponse struct {
 	ID         string    `json:"id"`
 	MachineID  string    `json:"machine_id"`
 	Status     string    `json:"status"`
-	Subdomain  string    `json:"subdomain"`
+	Subdomain  string    `json:"subdomain,omitempty"`
 	TargetIP   string    `json:"target_ip"`
 	TargetPort int       `json:"target_port"`
-	TunnelURL  string    `json:"tunnel_url,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	// Transport is the L4 protocol the tunnel forwards. "tcp" (default) for
+	// HTTP/SSH/etc., "udp" for raw datagram services. UDP tunnels skip
+	// Caddy + subdomain routing — they're surfaced on a fixed gateway port.
+	Transport string `json:"transport"`
+	// Private flips the gateway-side bind to 127.0.0.1 (VPS-local only).
+	Private bool `json:"private"`
+	// NoTLS asks Caddy to serve plain http:// rather than https://. Ignored
+	// for UDP and port-only tunnels.
+	NoTLS bool `json:"no_tls"`
+	// ServerPort is the port Gopher allocated on the gateway. For subdomain
+	// tunnels the user reaches the service via tunnel_url; for port-only
+	// (no subdomain) and UDP tunnels they need <gateway>:<server_port>.
+	ServerPort int `json:"server_port,omitempty"`
+	// Alpha features — bot protection (PoW JS challenge gating HTTP traffic)
+	// requires a subdomain and TCP. Acknowledged-and-coerced server-side, so
+	// these reflect the actual stored state, not just what the caller asked.
+	BotProtectionEnabled bool   `json:"bot_protection_enabled,omitempty"`
+	BotProtectionTTL     int    `json:"bot_protection_ttl,omitempty"`
+	BotProtectionAllowIP string `json:"bot_protection_allow_ip,omitempty"`
+	TLSSkipVerify        bool   `json:"tls_skip_verify,omitempty"`
+	TunnelURL            string `json:"tunnel_url,omitempty"`
+	Error                string `json:"error,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
+// externalTunnelToResponse derives the wire-shape from the canonical
+// db.Tunnel (looked up via the ExternalTunnel pointer) so callers always see
+// the actual stored state — including the server-side coercions tunnelSvc
+// applies (e.g., bot protection silently disabled when no subdomain). When
+// the underlying Tunnel is missing (race during deletion or a pre-refactor
+// row), falls back to whatever the ExternalTunnel record carries.
 func externalTunnelToResponse(et *db.ExternalTunnel) externalTunnelResponse {
-	return externalTunnelResponse{
+	resp := externalTunnelResponse{
 		ID:         et.ID,
 		MachineID:  et.MachineID,
 		Status:     et.Status,
@@ -265,20 +291,63 @@ func externalTunnelToResponse(et *db.ExternalTunnel) externalTunnelResponse {
 		Error:      et.ErrorMsg,
 		CreatedAt:  et.CreatedAt,
 	}
+	if et.TunnelID != "" {
+		if t, err := db.GetTunnel(et.TunnelID); err == nil {
+			resp.Transport = t.Transport
+			resp.Private = t.Private
+			resp.NoTLS = t.NoTLS
+			resp.ServerPort = t.RatholePort
+			resp.BotProtectionEnabled = t.BotProtectionEnabled
+			resp.BotProtectionTTL = t.BotProtectionTTL
+			resp.BotProtectionAllowIP = t.BotProtectionAllowIP
+			resp.TLSSkipVerify = t.TLSSkipVerify
+		}
+	}
+	if resp.Transport == "" {
+		resp.Transport = "tcp"
+	}
+	return resp
 }
 
 // POST /api/v1/tunnels
 // Creates a service tunnel on an already-connected machine. Synchronous.
-// Body: { "machine_id": "...", "target_port": 3000, "subdomain": "optional", "target_ip": "127.0.0.1",
-//         "private": false, "no_tls": false }
+//
+// Body fields:
+//
+//	machine_id   (required) — connected machine to attach the tunnel to
+//	target_port  (required) — port the service listens on inside the VM
+//	target_ip    (optional, default "127.0.0.1") — local IP on the VM
+//	subdomain    (optional, default = auto from machine name) — public hostname
+//	             prefix. Ignored for UDP tunnels (HTTP-only routing). Pass
+//	             "" with transport=tcp to expose by port-only.
+//	transport    (optional, "tcp"|"udp", default "tcp") — L4 protocol
+//	private      (optional) — bind 127.0.0.1 on the VPS instead of 0.0.0.0
+//	no_tls       (optional) — Caddy serves http:// instead of https://
+//
+// Alpha:
+//
+//	bot_protection_enabled (optional) — PoW JS-challenge page gating HTTP.
+//	  Requires a subdomain + TCP. Server silently disables the flag if those
+//	  conditions aren't met; the response reflects the stored value.
+//	bot_protection_ttl     (optional) — challenge cookie TTL in seconds
+//	  (0 = default 86400 / 24h).
+//	bot_protection_allow_ip (optional) — JSON array of CIDR/IP strings
+//	  whitelisted from the challenge.
+//	tls_skip_verify        (optional) — Caddy ignores upstream TLS errors;
+//	  required for backends with self-signed certs (e.g. Proxmox itself).
 func (h *ExternalAPIHandler) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		MachineID  string `json:"machine_id"`
-		Subdomain  string `json:"subdomain"`
-		TargetIP   string `json:"target_ip"`
-		TargetPort int    `json:"target_port"`
-		Private    bool   `json:"private"`
-		NoTLS      bool   `json:"no_tls"`
+		MachineID            string `json:"machine_id"`
+		Subdomain            string `json:"subdomain"`
+		TargetIP             string `json:"target_ip"`
+		TargetPort           int    `json:"target_port"`
+		Transport            string `json:"transport"`
+		Private              bool   `json:"private"`
+		NoTLS                bool   `json:"no_tls"`
+		BotProtectionEnabled bool   `json:"bot_protection_enabled"`
+		BotProtectionTTL     int    `json:"bot_protection_ttl"`
+		BotProtectionAllowIP string `json:"bot_protection_allow_ip"`
+		TLSSkipVerify        bool   `json:"tls_skip_verify"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.BadRequest(w, "invalid request body")
@@ -289,7 +358,9 @@ func (h *ExternalAPIHandler) CreateTunnel(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Verify the machine exists and is connected.
+	// Verify the machine exists and is connected. tunnelSvc.Create wouldn't
+	// catch the wrong-machine case (it doesn't gate on machine status), so
+	// we surface the right error here before delegating.
 	machine, err := db.GetMachine(req.MachineID)
 	if err != nil {
 		if _, ok := err.(*apperrors.NotFoundError); ok {
@@ -304,99 +375,80 @@ func (h *ExternalAPIHandler) CreateTunnel(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Resolve target IP.
-	targetIP := req.TargetIP
+	// Default + normalize. Subdomain auto-derives from the machine name when
+	// blank and transport is TCP — the internal service won't auto-generate,
+	// so we do it here to preserve the prior external-API behavior.
+	transport := strings.ToLower(strings.TrimSpace(req.Transport))
+	if transport == "" {
+		transport = "tcp"
+	}
+	if transport != "tcp" && transport != "udp" {
+		response.BadRequest(w, fmt.Sprintf("transport must be \"tcp\" or \"udp\" (got %q)", req.Transport))
+		return
+	}
+	subdomain := strings.ToLower(strings.TrimSpace(req.Subdomain))
+	if subdomain == "" && transport == "tcp" {
+		subdomain = autoSubdomain(machine.Name)
+	}
+	targetIP := strings.TrimSpace(req.TargetIP)
 	if targetIP == "" {
 		targetIP = "127.0.0.1"
 	}
 
-	// Resolve or auto-generate subdomain.
-	subdomain := strings.ToLower(strings.TrimSpace(req.Subdomain))
-	if subdomain == "" {
-		subdomain = autoSubdomain(machine.Name)
-	}
-	if err := config.ValidateSubdomain(subdomain); err != nil {
-		response.BadRequest(w, fmt.Sprintf("invalid subdomain: %v", err))
-		return
-	}
-
-	settings, err := db.GetSettings()
+	// Delegate to the canonical service: handles UDP-incompatibility rules
+	// (clears subdomain + no_tls), bot-protection coercion (requires
+	// subdomain + TCP), port validation, rathole assignment, Caddy/firewall
+	// push, etc. We rebuild the response from the resulting db.Tunnel below.
+	created, err := h.tunnelSvc.Create(dto.CreateTunnelRequest{
+		MachineID:            machine.ID,
+		Name:                 subdomain, // dashboard uses Name as the display label
+		Subdomain:            subdomain,
+		LocalPort:            req.TargetPort,
+		Transport:            transport,
+		NoTLS:                req.NoTLS,
+		Private:              req.Private,
+		BotProtectionEnabled: req.BotProtectionEnabled,
+		BotProtectionTTL:     req.BotProtectionTTL,
+		BotProtectionAllowIP: req.BotProtectionAllowIP,
+		TLSSkipVerify:        req.TLSSkipVerify,
+	})
 	if err != nil {
-		response.InternalError(w, "failed to load settings")
-		return
-	}
-	if settings.Domain == "" {
-		response.BadRequest(w, "Gopher domain is not configured; cannot create subdomain tunnels")
-		return
-	}
-
-	if taken, err := db.CheckSubdomainExists(subdomain); err != nil {
-		response.InternalError(w, "failed to check subdomain")
-		return
-	} else if taken {
-		response.Conflict(w, fmt.Sprintf("subdomain %q is already in use", subdomain))
-		return
-	}
-
-	ratholePort, err := db.NextRatholePort()
-	if err != nil {
-		response.InternalError(w, fmt.Sprintf("failed to allocate rathole port: %v", err))
-		return
-	}
-
-	tunnel := &db.Tunnel{
-		ID:           randHex(),
-		MachineID:    machine.ID,
-		Name:         subdomain,
-		Subdomain:    subdomain,
-		LocalPort:    req.TargetPort,
-		RatholePort:  ratholePort,
-		RatholeToken: randHex(),
-		Protocol:     "tcp",
-		Transport:    "tcp",
-		Private:      req.Private,
-		NoTLS:        req.NoTLS,
-		Status:       "inactive",
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
-	}
-	if err := db.CreateTunnel(tunnel); err != nil {
-		response.InternalError(w, fmt.Sprintf("failed to create tunnel record: %v", err))
-		return
-	}
-
-	service.ApplyTunnelPort(tunnel.RatholePort, tunnel.Transport, tunnel.Private)
-
-	if err := h.localSvc.AddServiceTunnel(tunnel, machine); err != nil {
-		tunnel.Status = fmt.Sprintf("config-error: %v", err)
-		_ = db.UpdateTunnel(tunnel)
-		et := &db.ExternalTunnel{
-			ID:         randHex(),
-			MachineID:  machine.ID,
-			TunnelID:   tunnel.ID,
-			Subdomain:  subdomain,
-			TargetIP:   targetIP,
-			TargetPort: req.TargetPort,
-			Status:     "failed",
-			ErrorMsg:   fmt.Sprintf("config push failed: %v", err),
-			CreatedAt:  time.Now(),
-			UpdatedAt:  time.Now(),
+		switch err.(type) {
+		case *apperrors.ValidationError:
+			response.BadRequest(w, err.Error())
+		case *apperrors.ConflictError:
+			response.Conflict(w, err.Error())
+		default:
+			response.InternalError(w, err.Error())
 		}
-		_ = db.CreateExternalTunnel(et)
-		response.InternalError(w, fmt.Sprintf("tunnel config push failed: %v", err))
 		return
 	}
 
-	tunnelURL := fmt.Sprintf("https://%s.%s", subdomain, settings.Domain)
-	if req.NoTLS {
-		tunnelURL = fmt.Sprintf("http://%s.%s", subdomain, settings.Domain)
+	// Build the public URL. Subdomain tunnels get the friendly hostname;
+	// port-only and UDP tunnels surface as <gateway>:<server_port> so the
+	// caller can reach the service without DNS magic.
+	settings, _ := db.GetSettings()
+	tunnelURL := ""
+	switch {
+	case created.Subdomain != "" && settings != nil && settings.Domain != "":
+		scheme := "https"
+		if created.NoTLS {
+			scheme = "http"
+		}
+		tunnelURL = fmt.Sprintf("%s://%s.%s", scheme, created.Subdomain, settings.Domain)
+	case settings != nil && (settings.ServerHost != "" || settings.Domain != ""):
+		host := settings.ServerHost
+		if host == "" {
+			host = settings.Domain
+		}
+		tunnelURL = fmt.Sprintf("%s:%d", host, created.RatholePort)
 	}
 
 	et := &db.ExternalTunnel{
 		ID:         randHex(),
 		MachineID:  machine.ID,
-		TunnelID:   tunnel.ID,
-		Subdomain:  subdomain,
+		TunnelID:   created.ID,
+		Subdomain:  created.Subdomain,
 		TargetIP:   targetIP,
 		TargetPort: req.TargetPort,
 		Status:     "active",
