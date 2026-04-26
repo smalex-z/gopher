@@ -127,6 +127,22 @@ if ! command -v rathole &>/dev/null && [ ! -f "$HOME/.local/bin/rathole" ]; then
     curl -fsSL "$RATHOLE_URL" -o /tmp/rathole-dl/rathole.zip || { echo "ERROR: Download failed"; exit 1; }
   fi
   if ! command -v unzip &>/dev/null; then
+    # cloud-init / unattended-upgrades commonly hold dpkg during early boot.
+    # Wait up to 2 min for the lock to free before giving up. apt's own
+    # DPkg::Lock::Timeout makes apt itself wait; the outer loop also retries
+    # the install in case of transient errors.
+    apt_install_with_retry() {
+      local pkg="$1"
+      local attempt
+      for attempt in 1 2 3 4 5; do
+        if $SUDO apt-get install -y -qq -o DPkg::Lock::Timeout=120 "$pkg"; then
+          return 0
+        fi
+        echo "  apt-get install $pkg failed (attempt $attempt/5); retrying in 10s..."
+        sleep 10
+      done
+      return 1
+    }
     if command -v dnf &>/dev/null; then
       echo "  unzip not found, installing via dnf..."
       $SUDO dnf install -y -q unzip || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
@@ -134,8 +150,8 @@ if ! command -v rathole &>/dev/null && [ ! -f "$HOME/.local/bin/rathole" ]; then
       echo "  unzip not found, installing via yum..."
       $SUDO yum install -y -q unzip || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
     else
-      echo "  unzip not found, installing via apt..."
-      $SUDO apt-get install -y unzip -qq || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
+      echo "  unzip not found, installing via apt (with lock-wait + retry)..."
+      apt_install_with_retry unzip || { echo "ERROR: unzip not available and could not be installed. Install it manually and re-run."; exit 1; }
     fi
   fi
   unzip -q /tmp/rathole-dl/rathole.zip -d /tmp/rathole-dl/ || { echo "ERROR: unzip failed"; exit 1; }
