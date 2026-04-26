@@ -229,7 +229,9 @@ func (h *ExternalAPIHandler) DeleteMachine(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		// Also clean up any ExternalTunnel records for this machine.
-		_ = db.DeleteExternalTunnelsByMachineID(*em.MachineID)
+		// MachineID on ExternalTunnel rows holds the external (em.ID) value
+		// — that's what callers see and filter by.
+		_ = db.DeleteExternalTunnelsByMachineID(em.ID)
 	}
 
 	if err := db.DeleteExternalMachine(id); err != nil {
@@ -358,10 +360,26 @@ func (h *ExternalAPIHandler) CreateTunnel(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Verify the machine exists and is connected. tunnelSvc.Create wouldn't
-	// catch the wrong-machine case (it doesn't gate on machine status), so
-	// we surface the right error here before delegating.
-	machine, err := db.GetMachine(req.MachineID)
+	// External callers know machines by their ExternalMachine.ID (the value
+	// returned by POST /api/v1/machines). Resolve that to the underlying
+	// Machine record — the dashboard's Tunnel rows reference the inner
+	// Machine.ID, not the external one. Falling through to db.GetMachine
+	// directly was the old behavior and only happened to work when callers
+	// happened to pass the inner ID; on a real ExternalMachine.ID it 404'd.
+	em, err := db.GetExternalMachine(req.MachineID)
+	if err != nil {
+		if _, ok := err.(*apperrors.NotFoundError); ok {
+			response.NotFound(w, "machine not found")
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
+	if em.MachineID == nil {
+		response.BadRequest(w, "machine has not yet bootstrapped — wait for status to flip to 'connected' before creating tunnels")
+		return
+	}
+	machine, err := db.GetMachine(*em.MachineID)
 	if err != nil {
 		if _, ok := err.(*apperrors.NotFoundError); ok {
 			response.NotFound(w, "machine not found")
@@ -445,8 +463,12 @@ func (h *ExternalAPIHandler) CreateTunnel(w http.ResponseWriter, r *http.Request
 	}
 
 	et := &db.ExternalTunnel{
-		ID:         randHex(),
-		MachineID:  machine.ID,
+		ID: randHex(),
+		// Store the external machine ID (what callers passed and what they
+		// see in subsequent list/get responses). The link to the inner
+		// db.Tunnel record goes through TunnelID, so we don't lose anything
+		// by not storing the inner Machine.ID here.
+		MachineID:  em.ID,
 		TunnelID:   created.ID,
 		Subdomain:  created.Subdomain,
 		TargetIP:   targetIP,
