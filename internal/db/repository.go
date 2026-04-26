@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"time"
 
 	apperrors "github.com/smalex-z/gopher/internal/errors"
 	"gorm.io/gorm"
@@ -470,6 +471,11 @@ func CreateBotSession(s *BotSession) error {
 }
 
 // PurgeBotSessions deletes all expired bot sessions.
+//
+// We bind a Go time.Time as the comparison anchor instead of SQLite's
+// datetime('now'), because GORM writes time.Time stamps in local time but
+// datetime('now') returns UTC — on any non-UTC host the comparison was
+// off by the local offset and quietly purged active sessions.
 func PurgeBotSessions() error {
-	return DB.Where("expires_at < ?", gorm.Expr("datetime('now')")).Delete(&BotSession{}).Error
+	return DB.Where("expires_at < ?", time.Now()).Delete(&BotSession{}).Error
 }

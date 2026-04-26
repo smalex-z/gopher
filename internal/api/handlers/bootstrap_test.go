@@ -8,10 +8,16 @@ import (
 func TestGenerateBootstrapScript_HeadlessSupport(t *testing.T) {
 	script := generateBootstrapScript("https://router.example.com")
 
+	// The script must work non-interactively in two ways:
+	//   1. Honor GOPHER_MACHINE_NAME / GOPHER_SSH_USER env vars when set.
+	//   2. Fall back to the box's own hostname when neither env var nor
+	//      a usable /dev/tty is present (instead of exiting). The
+	//      "auto-derived" hint is what callers see in the SSH output and
+	//      tells us the headless fallback path is in place.
 	checks := []string{
 		"GOPHER_MACHINE_NAME",
 		"GOPHER_SSH_USER",
-		"non-interactive use",
+		"auto-derived",
 	}
 	for _, needle := range checks {
 		if !strings.Contains(script, needle) {
