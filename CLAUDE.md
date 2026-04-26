@@ -104,7 +104,7 @@ The `localOps` interface (`local_ops.go`) is what `TunnelService` and `MachineSe
 
 ### Key design patterns
 
-**Rathole config is always fully regenerated** — `ReconcileServerConfig()` never diffs or patches; it rebuilds `/etc/rathole/server.toml` entirely from DB, validates it, then sends `SIGHUP` (falls back to `systemctl restart`). User's custom services are preserved in a `BEGIN/END CUSTOM CONFIGURATION` marker block at the bottom.
+**Rathole config is always fully regenerated** — `ReconcileServerConfig()` never diffs or patches; it rebuilds `/etc/rathole/server.toml` entirely from DB, validates it, then writes the file. rathole's `notify` watcher (compiled into the 0.5.0 build deployed) picks up the change via inotify and reloads in-place; we don't send `SIGHUP` because that races with the notify reload and causes a second listener flap ~1s later. The reconcile only kicks `systemctl start` (idempotent) so a stopped service comes back; healthy services are never restarted. User's custom services are preserved in a `BEGIN/END CUSTOM CONFIGURATION` marker block at the bottom.
 
 **Machine SSH tunnels are virtual** — they don't exist in the `tunnels` table. `TunnelService.List()` synthesizes them from `Machine` records (`TunnelPort > 0`). Their IDs are `machine-{id}-ssh`. `TunnelService.Update()` detects this ID pattern and routes to `updateMachineSSHPrivacy()` instead of the normal update path.
 
