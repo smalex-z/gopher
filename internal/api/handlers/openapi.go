@@ -36,12 +36,14 @@ const openAPISpec = `{
       "Machine": {
         "type": "object",
         "properties": {
-          "id":            { "type": "string",  "example": "a1b2c3d4e5f6a7b8" },
-          "status":        { "type": "string",  "enum": ["pending", "connected", "failed"] },
-          "public_ssh":    { "type": "boolean", "description": "Whether the SSH back-tunnel is publicly reachable" },
-          "bootstrap_url": { "type": "string",  "description": "One-time bootstrap URL (present on creation response only)" },
-          "error":         { "type": "string",  "description": "Failure reason (present when failed)" },
-          "created_at":    { "type": "string",  "format": "date-time" }
+          "id":               { "type": "string",  "example": "a1b2c3d4e5f6a7b8" },
+          "status":           { "type": "string",  "enum": ["pending", "connected", "failed"] },
+          "public_ssh":       { "type": "boolean", "description": "Whether the SSH back-tunnel is publicly reachable" },
+          "public_ssh_host":  { "type": "string",  "description": "Gateway hostname for SSH (present when status=connected and public_ssh=true)" },
+          "public_ssh_port":  { "type": "integer", "description": "Gateway port for SSH (present when status=connected and public_ssh=true)" },
+          "bootstrap_url":    { "type": "string",  "description": "One-time bootstrap URL (present on creation response only)" },
+          "error":            { "type": "string",  "description": "Failure reason (present when failed)" },
+          "created_at":       { "type": "string",  "format": "date-time" }
         }
       },
       "Tunnel": {

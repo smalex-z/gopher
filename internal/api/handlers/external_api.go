@@ -42,25 +42,43 @@ func NewExternalAPIHandler(
 // ─── Machine responses ────────────────────────────────────────────────────────
 
 type externalMachineResponse struct {
-	ID           string    `json:"id"`
-	Status       string    `json:"status"` // pending | connected | failed
-	BootstrapURL string    `json:"bootstrap_url,omitempty"`
-	PublicSSH    bool      `json:"public_ssh"`
-	Error        string    `json:"error,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID            string    `json:"id"`
+	Status        string    `json:"status"` // pending | connected | failed
+	BootstrapURL  string    `json:"bootstrap_url,omitempty"`
+	PublicSSH     bool      `json:"public_ssh"`
+	PublicSSHHost string    `json:"public_ssh_host,omitempty"` // populated once connected + PublicSSH=true
+	PublicSSHPort int       `json:"public_ssh_port,omitempty"` // ditto
+	Error         string    `json:"error,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // externalMachineToResponse derives live connectivity status from the underlying
 // Machine record so the caller doesn't need to know about two separate tables.
+// When the machine is connected with PublicSSH=true, the gateway-side
+// SSH host:port is included so external callers can build a usable
+// connection string without scraping settings.
 func externalMachineToResponse(em *db.ExternalMachine) externalMachineResponse {
 	status := "pending"
 	errMsg := em.ErrorMsg
+	var sshHost string
+	var sshPort int
 
 	if em.MachineID != nil {
 		if m, err := db.GetMachine(*em.MachineID); err == nil {
 			switch m.Status {
 			case "connected", "active":
 				status = "connected"
+				if em.PublicSSH && m.TunnelPort > 0 {
+					sshPort = m.TunnelPort
+					if settings, sErr := db.GetSettings(); sErr == nil {
+						switch {
+						case settings.ServerHost != "":
+							sshHost = settings.ServerHost
+						case settings.Domain != "":
+							sshHost = settings.Domain
+						}
+					}
+				}
 			case "failed":
 				status = "failed"
 				if errMsg == "" {
@@ -81,11 +99,13 @@ func externalMachineToResponse(em *db.ExternalMachine) externalMachineResponse {
 	}
 
 	return externalMachineResponse{
-		ID:        em.ID,
-		Status:    status,
-		PublicSSH: em.PublicSSH,
-		Error:     errMsg,
-		CreatedAt: em.CreatedAt,
+		ID:            em.ID,
+		Status:        status,
+		PublicSSH:     em.PublicSSH,
+		PublicSSHHost: sshHost,
+		PublicSSHPort: sshPort,
+		Error:         errMsg,
+		CreatedAt:     em.CreatedAt,
 	}
 }
 

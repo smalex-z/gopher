@@ -94,6 +94,7 @@ func runServer(args []string) {
 	mux := http.NewServeMux()
 	mux.Handle("/api/", router)
 	mux.Handle("/static/", router)
+	mux.Handle("/bootstrap/", router)
 
 	distFS, err := fs.Sub(frontendDist, "frontend/dist")
 	if err != nil {
