@@ -13,10 +13,14 @@ fi
 
 echo "=== Gopher Machine Bootstrap ==="
 echo ""
+# Prefer the explicit env var. Otherwise prompt only when /dev/tty is actually
+# usable — the device file exists in many non-interactive contexts (piped SSH,
+# containers) but reads/writes fail with "no such device or address". Probe
+# with a real open before relying on it.
 if [ -n "$GOPHER_MACHINE_NAME" ]; then
   MACHINE_NAME="$GOPHER_MACHINE_NAME"
   echo "Machine name: $MACHINE_NAME"
-elif [ -c /dev/tty ]; then
+elif (exec </dev/tty) 2>/dev/null; then
   printf "Machine name (e.g. 'web-server'): " >/dev/tty
   read -r MACHINE_NAME </dev/tty
   while [ -z "$MACHINE_NAME" ]; do
@@ -24,8 +28,11 @@ elif [ -c /dev/tty ]; then
     read -r MACHINE_NAME </dev/tty
   done
 else
-  echo "ERROR: GOPHER_MACHINE_NAME env var is required for non-interactive use."
-  exit 1
+  # Non-interactive caller didn't pass GOPHER_MACHINE_NAME — fall back to
+  # the box's own hostname so the bootstrap still completes. Better than
+  # exiting; the operator can rename it from the dashboard later.
+  MACHINE_NAME=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "unnamed-machine")
+  echo "Machine name: $MACHINE_NAME (auto-derived; pass GOPHER_MACHINE_NAME to override)"
 fi
 SSH_USER="${GOPHER_SSH_USER:-$USER}"
 echo "SSH user: $SSH_USER"
