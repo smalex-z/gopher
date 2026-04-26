@@ -89,11 +89,13 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 		return fmt.Errorf("failed to write %s: %w", configPath, err)
 	}
 
-	// Send SIGHUP to reload config in-place — avoids dropping existing tunnel connections.
-	// Falls back to restart only if rathole is not running.
-	if exec.Command("sudo", "pkill", "-HUP", "-x", "rathole").Run() != nil { // #nosec G204
-		_ = exec.Command("sudo", "systemctl", "restart", "rathole-server").Run() // #nosec G204
-	}
+	// rathole's notify watcher picks up the config change via inotify — no
+	// signal or restart needed when it's already running. Sending an extra
+	// SIGHUP causes a second reload ~1s after notify's, which churns every
+	// listener (including the dashboard's own tunnel) twice per machine-add.
+	// systemctl start is a no-op on an active unit; covers the "not running"
+	// case without forcing a restart on healthy ones.
+	_ = exec.Command("sudo", "systemctl", "start", "rathole-server").Run() // #nosec G204
 	return nil
 }
 
