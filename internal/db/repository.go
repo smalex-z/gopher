@@ -465,6 +465,26 @@ func CreateBotSession(s *BotSession) error {
 	return DB.Create(s).Error
 }
 
+// Activity Event Repository
+
+func LogEvent(kind, resourceID, name string) {
+	_ = DB.Create(&ActivityEvent{
+		ID:         randomID(),
+		Kind:       kind,
+		ResourceID: resourceID,
+		Name:       name,
+		CreatedAt:  time.Now(),
+	}).Error
+}
+
+func GetRecentEvents(limit int) ([]ActivityEvent, error) {
+	var events []ActivityEvent
+	if err := DB.Order("created_at DESC").Limit(limit).Find(&events).Error; err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
 // PurgeBotSessions deletes all expired bot sessions.
 func PurgeBotSessions() error {
 	return DB.Where("expires_at < ?", gorm.Expr("datetime('now')")).Delete(&BotSession{}).Error

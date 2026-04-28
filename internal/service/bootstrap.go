@@ -159,6 +159,7 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 	if err := db.CreateMachine(machine); err != nil {
 		return nil, fmt.Errorf("failed to create machine: %w", err)
 	}
+	db.LogEvent("machine_registered", machine.ID, machine.Name)
 	if err := db.MarkTokenUsed(bt.ID, machine.ID); err != nil {
 		return nil, fmt.Errorf("failed to mark token used: %w", err)
 	}

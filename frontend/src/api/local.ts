@@ -92,4 +92,14 @@ export const localApi = {
     client.put('/local/bind-ip', { bind_ip: bindIP }).then(r => r.data),
   setupFail2ban: () =>
     client.post('/local/setup-fail2ban').then(r => r.data),
+  activity: () =>
+    client.get<{ data: ActivityEvent[] }>('/local/activity').then(r => r.data.data),
+}
+
+export interface ActivityEvent {
+  id: string
+  kind: 'machine_registered' | 'machine_deleted' | 'tunnel_created' | 'tunnel_deleted'
+  resource_id: string
+  name: string
+  created_at: string
 }

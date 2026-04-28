@@ -103,6 +103,7 @@ func NewRouter(
 			r.Post("/bootstrap/token", bootstrapH.GenerateToken)
 
 			r.Route("/local", func(r chi.Router) {
+				r.Get("/activity", localH.Activity)
 				r.Post("/reconcile", localH.Reconcile)
 				r.Post("/setup-fail2ban", localH.SetupFail2ban)
 				r.Put("/server-ports", localH.SetServerPorts)

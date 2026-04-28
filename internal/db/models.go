@@ -208,3 +208,12 @@ type SSHKey struct {
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
+
+// ActivityEvent records create/delete actions on machines and tunnels.
+type ActivityEvent struct {
+	ID         string    `json:"id" gorm:"primaryKey"`
+	Kind       string    `json:"kind"`        // machine_registered | machine_deleted | tunnel_created | tunnel_deleted
+	ResourceID string    `json:"resource_id"`
+	Name       string    `json:"name"`
+	CreatedAt  time.Time `json:"created_at"`
+}
