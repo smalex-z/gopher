@@ -106,6 +106,7 @@ func (s *MachineService) Delete(id string) error {
 		RevokeTunnelPort(machine.TunnelPort, "tcp")
 	}
 
+	db.LogEvent("machine_deleted", id, machine.Name)
 	if err := db.DeleteMachine(id); err != nil {
 		return err
 	}

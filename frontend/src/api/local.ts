@@ -93,4 +93,14 @@ export const localApi = {
     client.post<{ data: { key: string } }>('/local/external-api/rotate').then(r => r.data.data),
   revokeExternalAPIKey: () =>
     client.delete('/local/external-api').then(r => r.data),
+  activity: () =>
+    client.get<{ data: ActivityEvent[] }>('/local/activity').then(r => r.data.data),
+}
+
+export interface ActivityEvent {
+  id: string
+  kind: 'machine_registered' | 'machine_deleted' | 'tunnel_created' | 'tunnel_deleted'
+  resource_id: string
+  name: string
+  created_at: string
 }

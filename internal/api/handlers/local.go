@@ -428,5 +428,14 @@ func (h *LocalHandler) RevokeExternalAPIKey(w http.ResponseWriter, r *http.Reque
 	response.NoContent(w)
 }
 
+func (h *LocalHandler) Activity(w http.ResponseWriter, r *http.Request) {
+	events, err := db.GetRecentEvents(50)
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, events)
+}
+
 // validDomain matches a reasonable FQDN: labels of alphanumeric + hyphens separated by dots.
 var validDomain = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)

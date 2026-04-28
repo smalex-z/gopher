@@ -1,6 +1,16 @@
 package db
 
-import "time"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"time"
+)
+
+func randomID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 // BotSession records a browser that has passed the PoW challenge for a tunnel.
 type BotSession struct {
@@ -163,6 +173,15 @@ type ExternalMachine struct {
 	ErrorMsg  string     `json:"error,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+// ActivityEvent records create/delete actions on machines and tunnels.
+type ActivityEvent struct {
+	ID         string    `json:"id" gorm:"primaryKey"`
+	Kind       string    `json:"kind"`        // machine_registered | machine_deleted | tunnel_created | tunnel_deleted
+	ResourceID string    `json:"resource_id"`
+	Name       string    `json:"name"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // ExternalTunnel tracks service tunnels created via the external REST API.
