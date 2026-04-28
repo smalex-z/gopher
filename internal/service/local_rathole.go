@@ -216,10 +216,14 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		return fmt.Errorf("failed to write client.toml on machine: %w", err)
 	}
 
-	// Restart rathole-client. Bootstrap now runs the service as the SSH user,
-	// so pkill is sufficient (systemd Restart=always brings it back).
-	// sudo -n is attempted as fallback for older installs with NOPASSWD configured.
-	_, _ = sshClient.Execute(`pkill -x rathole 2>/dev/null; { [ "$(id -u)" -eq 0 ] && systemctl restart rathole-client || sudo -n systemctl restart rathole-client; } 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true`)
+	// rathole's notify watcher picks up client.toml via inotify — adding or
+	// removing a [services.X] block reloads in-place without dropping the
+	// other tunnels on this machine. pkill / systemctl restart would flap
+	// every existing connection on every provision.
+	// systemctl start is a no-op on an active unit; covers the "not running"
+	// case for both system and user units without forcing a restart on
+	// healthy ones.
+	_, _ = sshClient.Execute(`{ [ "$(id -u)" -eq 0 ] && systemctl start rathole-client || sudo -n systemctl start rathole-client; } 2>/dev/null; systemctl --user start rathole-client 2>/dev/null; true`)
 
 	return nil
 }
@@ -260,7 +264,10 @@ func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine
 	if err := sshClient.UploadFileSudo([]byte(updated), confPath, machine.Username); err != nil {
 		return err
 	}
-	_, _ = sshClient.Execute(`pkill -x rathole 2>/dev/null; { [ "$(id -u)" -eq 0 ] && systemctl restart rathole-client || sudo -n systemctl restart rathole-client; } 2>/dev/null; systemctl --user restart rathole-client 2>/dev/null; true`)
+	// See AddServiceTunnel: rathole's notify watcher reloads on file
+	// change, so removing a [services.X] block does not require a kill or
+	// restart. systemctl start is a no-op on healthy units.
+	_, _ = sshClient.Execute(`{ [ "$(id -u)" -eq 0 ] && systemctl start rathole-client || sudo -n systemctl start rathole-client; } 2>/dev/null; systemctl --user start rathole-client 2>/dev/null; true`)
 	return nil
 }
 
