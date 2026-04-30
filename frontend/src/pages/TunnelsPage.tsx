@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { Network, ClipboardCopy, ArrowRight, Globe, Lock, Terminal, Info, AlertTriangle, Pencil, Trash2, Zap } from 'lucide-react'
+import { Network, ClipboardCopy, ArrowRight, Globe, Lock, Terminal, Info, AlertTriangle, Pencil, Plus, Search, Trash2, Zap } from 'lucide-react'
 import { tunnelsApi } from '../api/tunnels'
 import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
@@ -47,14 +47,15 @@ export default function TunnelsPage() {
   const [modal, setModal] = useState<ModalState>({ isOpen: false })
   const [form, setForm] = useState<FormState>(defaultForm)
   const [nextPortLoading, setNextPortLoading] = useState(false)
+  const [searchTerm, setSearchTerm] = useState('')
 
-  const openAddModal = async () => {
+  const openAddModal = async (machineId?: string) => {
     setNextPortLoading(true)
     try {
       const port = await tunnelsApi.nextPort()
-      setForm({ ...defaultForm, rathole_port: port })
+      setForm({ ...defaultForm, rathole_port: port, machine_id: machineId ?? '' })
     } catch {
-      setForm(defaultForm)
+      setForm({ ...defaultForm, machine_id: machineId ?? '' })
     } finally {
       setNextPortLoading(false)
     }
@@ -84,8 +85,11 @@ export default function TunnelsPage() {
   const { data: machinesData } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list() })
   const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
 
-  const tunnels: Tunnel[] = tunnelsData?.data ?? []
-  const machines = machinesData?.data ?? []
+  // Stable references so the grouping memo doesn't re-run on every render
+  // when react-query hands back the same payload (`?? []` would otherwise
+  // create a fresh empty array each call).
+  const tunnels: Tunnel[] = useMemo(() => tunnelsData?.data ?? [], [tunnelsData])
+  const machines = useMemo(() => machinesData?.data ?? [], [machinesData])
   const domain = localStatus?.domain
   const routingEnabled = Boolean(domain)
 
@@ -173,6 +177,55 @@ export default function TunnelsPage() {
 
   const getMachineName = (machineId: string) => machines.find(m => m.id === machineId)?.name ?? machineId
 
+  // Group tunnels by machine and apply the search filter. Within each group
+  // the synthetic SSH-base row pins to the top so it's always the anchor;
+  // remaining tunnels are alphabetical. Groups themselves are sorted by
+  // machine name. Search matches against tunnel name, subdomain, machine
+  // name, and either port — the things a user is most likely typing when
+  // they're hunting for a specific tunnel.
+  const groups = useMemo(() => {
+    const term = searchTerm.trim().toLowerCase()
+    const machineNameById = new Map(machines.map(m => [m.id, m.name]))
+    const machineStatusById = new Map(machines.map(m => [m.id, m.status]))
+
+    const matchesSearch = (t: Tunnel): boolean => {
+      if (!term) return true
+      const machineName = (machineNameById.get(t.machine_id) ?? t.machine_id).toLowerCase()
+      return (
+        t.name.toLowerCase().includes(term) ||
+        (t.subdomain ?? '').toLowerCase().includes(term) ||
+        machineName.includes(term) ||
+        String(t.local_port).includes(term) ||
+        String(t.rathole_port).includes(term)
+      )
+    }
+
+    const byMachine = new Map<string, Tunnel[]>()
+    for (const t of tunnels) {
+      if (!matchesSearch(t)) continue
+      const list = byMachine.get(t.machine_id) ?? []
+      list.push(t)
+      byMachine.set(t.machine_id, list)
+    }
+
+    const out = Array.from(byMachine.entries()).map(([machineId, items]) => {
+      items.sort((a, b) => {
+        const aSSH = a.kind === 'machine-ssh' ? 0 : 1
+        const bSSH = b.kind === 'machine-ssh' ? 0 : 1
+        if (aSSH !== bSSH) return aSSH - bSSH
+        return a.name.localeCompare(b.name)
+      })
+      return {
+        machineId,
+        machineName: machineNameById.get(machineId) ?? machineId,
+        machineStatus: machineStatusById.get(machineId) ?? '',
+        tunnels: items,
+      }
+    })
+    out.sort((a, b) => a.machineName.localeCompare(b.machineName))
+    return out
+  }, [tunnels, machines, searchTerm])
+
   const copyUrl = (t: Tunnel) => {
     const url = routingEnabled && t.subdomain ? `${t.subdomain}.${domain}` : `${displayHost ?? window.location.hostname}:${t.rathole_port}`
     navigator.clipboard.writeText(url)
@@ -188,7 +241,7 @@ export default function TunnelsPage() {
           <h1 className="text-2xl font-bold text-gray-900">Tunnels</h1>
           <p className="text-gray-500 mt-1">Expose local services through your VPS</p>
         </div>
-        <button onClick={openAddModal} disabled={nextPortLoading}
+        <button onClick={() => openAddModal()} disabled={nextPortLoading}
           className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50">
           {nextPortLoading ? 'Loading...' : '+ Add Tunnel'}
         </button>
@@ -199,121 +252,162 @@ export default function TunnelsPage() {
           <Network className="w-12 h-12 text-gray-300 mx-auto mb-4" />
           <h2 className="text-lg font-semibold text-gray-700 mb-2">No tunnels configured yet</h2>
           <p className="text-gray-400 text-sm mb-6 max-w-sm mx-auto">Tunnels route traffic from your VPS to services running on your machines</p>
-          <button onClick={openAddModal} disabled={nextPortLoading}
+          <button onClick={() => openAddModal()} disabled={nextPortLoading}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50">
             {nextPortLoading ? 'Loading...' : 'Add Your First Tunnel'}
           </button>
         </div>
       ) : (
-        <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 border-b">
-              <tr>
-                {['Name', 'Machine', 'Routing', 'Status', 'Actions'].map(h => (
-                  <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y">
-              {tunnels.map(t => (
-                <React.Fragment key={t.id}>
-                  {(() => {
-                    const isProtectedTunnel = Boolean(t.managed || t.kind === 'machine-ssh' || t.local_port === 22)
-                    const isPrivate = Boolean(t.private)
-                    return (
-                  <tr className="hover:bg-gray-50">
-                    <td className="px-4 py-3 font-medium text-gray-900">{t.name}</td>
-                    <td className="px-4 py-3 text-gray-600">{getMachineName(t.machine_id)}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2 font-mono text-xs text-gray-700">
-                        <div className="flex flex-col gap-0.5">
-                          {t.subdomain && domain && (
-                            <a href={`https://${t.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
-                              className="text-blue-600 hover:underline">{t.subdomain}.{domain}</a>
-                          )}
-                          {isPrivate ? (
-                            <span className="text-gray-400">VPS-local <span className="text-gray-500">:{t.rathole_port}</span></span>
-                          ) : (
-                            <span className="text-gray-500">
-                              {t.transport === 'udp' && <span className="text-purple-600 font-semibold mr-0.5">UDP</span>}
-                              {displayHost ?? 'server'}:{t.rathole_port}
-                            </span>
-                          )}
-                        </div>
-                        <ArrowRight size={12} className="text-gray-400 shrink-0" />
-                        <span>localhost:{t.local_port}</span>
-                        {(!isPrivate || (t.subdomain && domain)) && (
-                          <button onClick={() => copyUrl(t)} className="text-gray-300 hover:text-gray-600 ml-1">
-                            <ClipboardCopy size={12} />
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-1.5">
-                        <StatusBadge status={t.status} />
-                        {isPrivate && (
-                          <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200 flex items-center gap-0.5">
-                            <Lock size={10} /> Private
-                          </span>
-                        )}
-                        {t.transport === 'udp' && (
-                          <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200">UDP</span>
-                        )}
-                        {t.no_tls && t.subdomain && (
-                          <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">HTTP</span>
-                        )}
-                        {t.bot_protection_enabled && (
-                          <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-orange-50 text-orange-700 border border-orange-200">Bot Shield</span>
-                        )}
-                        {t.tls_skip_verify && (
-                          <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-50 text-yellow-700 border border-yellow-200">Self-signed</span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => togglePrivate(t)}
-                          disabled={updateMutation.isPending}
-                          title={isPrivate ? 'Make public' : 'Make private'}
-                          className={`p-1.5 rounded border ${isPrivate
-                            ? 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
-                            : 'bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-gray-600'}`}
-                        >
-                          {isPrivate ? <Globe size={13} /> : <Lock size={13} />}
-                        </button>
-                        {!isProtectedTunnel && (
-                          <>
-                            <button onClick={() => openEditModal(t)} title="Edit tunnel" className="p-1.5 rounded border bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-gray-600"><Pencil size={13} /></button>
-                            <button onClick={() => testTunnel(t.id)} title="Test connection" className="p-1.5 rounded border bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-blue-600"><Zap size={13} /></button>
-                            <button onClick={() => handleDelete(t.id)} title="Delete tunnel" className="p-1.5 rounded border bg-white text-red-400 border-red-100 hover:bg-red-50 hover:text-red-600"><Trash2 size={13} /></button>
-                          </>
-                        )}
-                      </div>
-                    </td>
+        <>
+          <div className="relative max-w-md">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              placeholder="Search by name, subdomain, machine, or port"
+              className="w-full pl-9 pr-3 py-2 text-sm border rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+          </div>
+
+          {groups.length === 0 ? (
+            <div className="bg-white rounded-xl shadow-sm border p-8 text-center text-sm text-gray-500">
+              No tunnels match <span className="font-mono text-gray-700">"{searchTerm}"</span>
+            </div>
+          ) : (
+            <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b">
+                  <tr>
+                    {['Name', 'Machine', 'Routing', 'Status', 'Actions'].map(h => (
+                      <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
+                    ))}
                   </tr>
-                    )
-                  })()}
-                  {t.private && jumpboxCmd(t) && (
-                    <tr className="bg-slate-50 border-t-0">
-                      <td colSpan={5} className="px-4 pb-2 pt-0">
-                        <div className="flex items-center gap-2 text-xs text-slate-600">
-                          <Terminal size={11} className="shrink-0" />
-                          <span className="font-medium">Jumpbox:</span>
-                          <code className="font-mono text-slate-700 bg-slate-100 px-2 py-0.5 rounded select-all">{jumpboxCmd(t)}</code>
-                          <button onClick={() => { navigator.clipboard.writeText(jumpboxCmd(t)); toast.success('Copied!') }} className="text-slate-400 hover:text-slate-600">
-                            <ClipboardCopy size={11} />
+                </thead>
+                {groups.map(g => (
+                  <tbody key={g.machineId} className="divide-y border-t first:border-t-0">
+                    <tr className="bg-gray-50/70">
+                      <td colSpan={5} className="px-4 py-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-semibold text-gray-700 truncate">{g.machineName}</span>
+                            {g.machineStatus && (
+                              <StatusBadge status={g.machineStatus} />
+                            )}
+                            <span className="text-xs text-gray-400">·</span>
+                            <span className="text-xs text-gray-500">{g.tunnels.length} tunnel{g.tunnels.length === 1 ? '' : 's'}</span>
+                          </div>
+                          <button
+                            onClick={() => openAddModal(g.machineId)}
+                            disabled={nextPortLoading}
+                            className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-700 disabled:opacity-50"
+                            title={`Add tunnel to ${g.machineName}`}
+                          >
+                            <Plus size={12} /> Add tunnel
                           </button>
                         </div>
                       </td>
                     </tr>
-                  )}
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                    {g.tunnels.map(t => {
+                      const isProtectedTunnel = Boolean(t.managed || t.kind === 'machine-ssh' || t.local_port === 22)
+                      const isPrivate = Boolean(t.private)
+                      return (
+                        <React.Fragment key={t.id}>
+                          <tr className="hover:bg-gray-50">
+                            <td className="px-4 py-3 font-medium text-gray-900">{t.name}</td>
+                            <td className="px-4 py-3 text-gray-600">{getMachineName(t.machine_id)}</td>
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-2 font-mono text-xs text-gray-700">
+                                <div className="flex flex-col gap-0.5">
+                                  {t.subdomain && domain && (
+                                    <a href={`https://${t.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
+                                      className="text-blue-600 hover:underline">{t.subdomain}.{domain}</a>
+                                  )}
+                                  {isPrivate ? (
+                                    <span className="text-gray-400">VPS-local <span className="text-gray-500">:{t.rathole_port}</span></span>
+                                  ) : (
+                                    <span className="text-gray-500">
+                                      {t.transport === 'udp' && <span className="text-purple-600 font-semibold mr-0.5">UDP</span>}
+                                      {displayHost ?? 'server'}:{t.rathole_port}
+                                    </span>
+                                  )}
+                                </div>
+                                <ArrowRight size={12} className="text-gray-400 shrink-0" />
+                                <span>localhost:{t.local_port}</span>
+                                {(!isPrivate || (t.subdomain && domain)) && (
+                                  <button onClick={() => copyUrl(t)} className="text-gray-300 hover:text-gray-600 ml-1">
+                                    <ClipboardCopy size={12} />
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-1.5">
+                                <StatusBadge status={t.status} />
+                                {isPrivate && (
+                                  <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200 flex items-center gap-0.5">
+                                    <Lock size={10} /> Private
+                                  </span>
+                                )}
+                                {t.transport === 'udp' && (
+                                  <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200">UDP</span>
+                                )}
+                                {t.no_tls && t.subdomain && (
+                                  <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">HTTP</span>
+                                )}
+                                {t.bot_protection_enabled && (
+                                  <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-orange-50 text-orange-700 border border-orange-200">Bot Shield</span>
+                                )}
+                                {t.tls_skip_verify && (
+                                  <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-50 text-yellow-700 border border-yellow-200">Self-signed</span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => togglePrivate(t)}
+                                  disabled={updateMutation.isPending}
+                                  title={isPrivate ? 'Make public' : 'Make private'}
+                                  className={`p-1.5 rounded border ${isPrivate
+                                    ? 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
+                                    : 'bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-gray-600'}`}
+                                >
+                                  {isPrivate ? <Globe size={13} /> : <Lock size={13} />}
+                                </button>
+                                {!isProtectedTunnel && (
+                                  <>
+                                    <button onClick={() => openEditModal(t)} title="Edit tunnel" className="p-1.5 rounded border bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-gray-600"><Pencil size={13} /></button>
+                                    <button onClick={() => testTunnel(t.id)} title="Test connection" className="p-1.5 rounded border bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-blue-600"><Zap size={13} /></button>
+                                    <button onClick={() => handleDelete(t.id)} title="Delete tunnel" className="p-1.5 rounded border bg-white text-red-400 border-red-100 hover:bg-red-50 hover:text-red-600"><Trash2 size={13} /></button>
+                                  </>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                          {t.private && jumpboxCmd(t) && (
+                            <tr className="bg-slate-50 border-t-0">
+                              <td colSpan={5} className="px-4 pb-2 pt-0">
+                                <div className="flex items-center gap-2 text-xs text-slate-600">
+                                  <Terminal size={11} className="shrink-0" />
+                                  <span className="font-medium">Jumpbox:</span>
+                                  <code className="font-mono text-slate-700 bg-slate-100 px-2 py-0.5 rounded select-all">{jumpboxCmd(t)}</code>
+                                  <button onClick={() => { navigator.clipboard.writeText(jumpboxCmd(t)); toast.success('Copied!') }} className="text-slate-400 hover:text-slate-600">
+                                    <ClipboardCopy size={11} />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      )
+                    })}
+                  </tbody>
+                ))}
+              </table>
+            </div>
+          )}
+        </>
       )}
 
       {modal.isOpen && (
