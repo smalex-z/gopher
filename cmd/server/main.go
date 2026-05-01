@@ -65,6 +65,7 @@ func runServer(args []string) {
 	bootstrapSvc := service.NewBootstrapService(localSvc)
 	updateSvc := service.NewUpdateService()
 	secSvc := service.NewSecurityService()
+	backupSvc := service.NewBackupService(*dbPath)
 	go secSvc.SyncFail2banConfig()
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
@@ -89,7 +90,7 @@ func runServer(args []string) {
 		}
 	}()
 
-	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc)
+	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc, backupSvc)
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", router)
