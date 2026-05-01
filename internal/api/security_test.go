@@ -33,8 +33,9 @@ func newTestRouter(t *testing.T) (http.Handler, *service.AuthService) {
 	bootstrapSvc := service.NewBootstrapService(localSvc)
 	updateSvc := service.NewUpdateService()
 	secSvc := service.NewSecurityService()
+	backupSvc := service.NewBackupService("")
 
-	router := NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc)
+	router := NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc, backupSvc)
 	return router, authSvc
 }
 
