@@ -285,14 +285,14 @@ function RemoveDevicePanel({ device, onDone, onCancel }: { device: TOTPDevice; o
   return (
     <form onSubmit={handleRemove} className="space-y-3">
       <p className="text-sm text-gray-600">
-        Removing <strong>{device.name}</strong>. Enter a code from a <em>different</em> device or a backup code to confirm.
+        Removing <strong>{device.name}</strong>. Enter a code from any enrolled device or a backup code to confirm.
       </p>
       <input
         type="text"
         inputMode="numeric"
         value={code}
         onChange={e => setCode(e.target.value)}
-        placeholder="Code from another device or backup"
+        placeholder="6-digit code or backup code"
         className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
         required
         autoFocus

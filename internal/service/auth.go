@@ -416,10 +416,10 @@ func (s *AuthService) TOTPDisable(code string) error {
 	return db.SaveSettings(settings)
 }
 
-// TOTPRemoveDevice removes a single device. Requires a valid code from a
-// *different* device or a backup code (so the user can't lock themselves out
-// by accidentally using a code from the device they're trying to remove).
-// If this leaves zero devices, 2FA is disabled and backup codes are cleared.
+// TOTPRemoveDevice removes a single device. Requires a valid code from any
+// enrolled device (including the one being removed — the code authenticates
+// the action, not the device) or a backup code. If this leaves zero devices,
+// 2FA is disabled and backup codes are cleared.
 func (s *AuthService) TOTPRemoveDevice(deviceID, code string) error {
 	settings, err := db.GetSettings()
 	if err != nil {
@@ -432,31 +432,11 @@ func (s *AuthService) TOTPRemoveDevice(deviceID, code string) error {
 		return err
 	}
 
-	// Match against any device EXCEPT the one being removed, then backup codes.
-	devices, err := db.GetTOTPDevices()
-	if err != nil {
-		return err
+	_, updatedBackup, ok := verifyTOTPOrBackup(code, settings.TOTPBackupCodes)
+	if !ok {
+		return fmt.Errorf("invalid code")
 	}
-	matched := false
-	for _, d := range devices {
-		if d.ID == deviceID {
-			continue
-		}
-		if verifyTOTP(d.Secret, code) {
-			matched = true
-			break
-		}
-	}
-	if !matched {
-		consumed, updated, err := verifyAndConsumeBackupCode(settings.TOTPBackupCodes, code)
-		if err != nil {
-			return err
-		}
-		if !consumed {
-			return fmt.Errorf("invalid code (must be from a different device or a backup code)")
-		}
-		settings.TOTPBackupCodes = updated
-	}
+	settings.TOTPBackupCodes = updatedBackup
 
 	if err := db.DeleteTOTPDevice(deviceID); err != nil {
 		return fmt.Errorf("failed to delete device: %w", err)
