@@ -499,3 +499,46 @@ func GetRecentEvents(limit int) ([]ActivityEvent, error) {
 func PurgeBotSessions() error {
 	return DB.Where("expires_at < ?", time.Now()).Delete(&BotSession{}).Error
 }
+
+// ── TOTP Devices ─────────────────────────────────────────────────────────────
+
+func GetTOTPDevices() ([]TOTPDevice, error) {
+	var devices []TOTPDevice
+	if err := DB.Order("created_at ASC").Find(&devices).Error; err != nil {
+		return nil, err
+	}
+	return devices, nil
+}
+
+func GetTOTPDevice(id string) (*TOTPDevice, error) {
+	var d TOTPDevice
+	if err := DB.First(&d, "id = ?", id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "totp_device", ID: id}
+		}
+		return nil, err
+	}
+	return &d, nil
+}
+
+func CreateTOTPDevice(d *TOTPDevice) error {
+	return DB.Create(d).Error
+}
+
+func DeleteTOTPDevice(id string) error {
+	return DB.Delete(&TOTPDevice{}, "id = ?", id).Error
+}
+
+func DeleteAllTOTPDevices() error {
+	return DB.Exec("DELETE FROM totp_devices").Error
+}
+
+func CountTOTPDevices() (int64, error) {
+	var count int64
+	return count, DB.Model(&TOTPDevice{}).Count(&count).Error
+}
+
+func TouchTOTPDevice(id string) error {
+	now := time.Now()
+	return DB.Model(&TOTPDevice{}).Where("id = ?", id).Update("last_used_at", &now).Error
+}
