@@ -14,6 +14,14 @@ import { toast } from '../lib/toast'
 interface TOTPStatus {
   enabled: boolean
   backup_codes_remaining: number
+  devices: TOTPDevice[]
+}
+
+interface TOTPDevice {
+  id: string
+  name: string
+  created_at: string
+  last_used_at: string | null
 }
 
 interface EnrollData {
@@ -30,10 +38,11 @@ function useTOTPStatus() {
 
 // ─── Enrollment flow ─────────────────────────────────────────────────────────
 
-function EnrollPanel({ onDone }: { onDone: () => void }) {
+function EnrollPanel({ onDone, isFirstDevice }: { onDone: () => void; isFirstDevice: boolean }) {
   const [step, setStep] = useState<'qr' | 'confirm' | 'codes'>('qr')
   const [enrollData, setEnrollData] = useState<EnrollData | null>(null)
   const [code, setCode] = useState('')
+  const [name, setName] = useState('')
   const [backupCodes, setBackupCodes] = useState<string[]>([])
   const [copied, setCopied] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -55,9 +64,15 @@ function EnrollPanel({ onDone }: { onDone: () => void }) {
     e.preventDefault()
     setLoading(true)
     try {
-      const res = await client.post<{ data: { backup_codes: string[] } }>('/auth/2fa/confirm', { code })
-      setBackupCodes(res.data.data.backup_codes)
-      setStep('codes')
+      const res = await client.post<{ data: { backup_codes?: string[] } }>('/auth/2fa/confirm', { code, name })
+      const codes = res.data.data.backup_codes ?? []
+      if (codes.length > 0) {
+        setBackupCodes(codes)
+        setStep('codes')
+      } else {
+        toast.success('Device added')
+        onDone()
+      }
     } catch {
       toast.error('Invalid code — check your authenticator app and try again')
       setCode('')
@@ -77,15 +92,16 @@ function EnrollPanel({ onDone }: { onDone: () => void }) {
     return (
       <div className="space-y-4">
         <p className="text-sm text-gray-600">
-          Two-factor authentication adds a second layer of security. You'll need an authenticator app
-          like <strong>Google Authenticator</strong>, <strong>1Password</strong>, or <strong>Authy</strong>.
+          {isFirstDevice
+            ? <>Two-factor authentication adds a second layer of security. You'll need an authenticator app like <strong>Google Authenticator</strong>, <strong>1Password</strong>, or <strong>Authy</strong>.</>
+            : <>Add another authenticator device. Any enrolled device can be used to sign in. Backup codes are unchanged.</>}
         </p>
         <button
           onClick={startEnroll}
           disabled={loading}
           className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition-colors"
         >
-          {loading ? 'Generating…' : 'Set up 2FA'}
+          {loading ? 'Generating…' : isFirstDevice ? 'Set up 2FA' : 'Generate QR code'}
         </button>
       </div>
     )
@@ -108,6 +124,20 @@ function EnrollPanel({ onDone }: { onDone: () => void }) {
         </details>
         <form onSubmit={confirmEnroll} className="space-y-3">
           <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Device name <span className="text-gray-400 font-normal">— so you can tell devices apart later</span>
+            </label>
+            <input
+              type="text"
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder={isFirstDevice ? 'e.g. iPhone' : 'e.g. Laptop, YubiKey'}
+              maxLength={64}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              autoFocus
+            />
+          </div>
+          <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Verification code</label>
             <input
               type="text"
@@ -118,7 +148,6 @@ function EnrollPanel({ onDone }: { onDone: () => void }) {
               maxLength={6}
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-center tracking-widest font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
               required
-              autoFocus
               autoComplete="one-time-code"
             />
           </div>
@@ -128,7 +157,7 @@ function EnrollPanel({ onDone }: { onDone: () => void }) {
               disabled={loading || code.length < 6}
               className="flex-1 bg-blue-600 text-white py-2 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition-colors"
             >
-              {loading ? 'Verifying…' : 'Enable 2FA'}
+              {loading ? 'Verifying…' : isFirstDevice ? 'Enable 2FA' : 'Add device'}
             </button>
             <button
               type="button"
@@ -223,6 +252,64 @@ function DisablePanel({ onDone }: { onDone: () => void }) {
           {loading ? 'Disabling…' : 'Disable 2FA'}
         </button>
         <button type="button" onClick={onDone} className="px-4 py-2 border border-gray-300 text-gray-600 rounded-lg text-sm hover:bg-gray-50 transition-colors">
+          Cancel
+        </button>
+      </div>
+    </form>
+  )
+}
+
+// ─── Remove single device panel ──────────────────────────────────────────────
+
+function RemoveDevicePanel({ device, onDone, onCancel }: { device: TOTPDevice; onDone: () => void; onCancel: () => void }) {
+  const [code, setCode] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const handleRemove = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    try {
+      await client.delete(`/auth/2fa/devices/${encodeURIComponent(device.id)}`, { data: { code } })
+      toast.success(`Removed "${device.name}"`)
+      onDone()
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
+        ?? 'Invalid code'
+      toast.error(msg)
+      setCode('')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <form onSubmit={handleRemove} className="space-y-3">
+      <p className="text-sm text-gray-600">
+        Removing <strong>{device.name}</strong>. Enter a code from a <em>different</em> device or a backup code to confirm.
+      </p>
+      <input
+        type="text"
+        inputMode="numeric"
+        value={code}
+        onChange={e => setCode(e.target.value)}
+        placeholder="Code from another device or backup"
+        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
+        required
+        autoFocus
+      />
+      <div className="flex gap-2">
+        <button
+          type="submit"
+          disabled={loading}
+          className="bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-red-700 disabled:opacity-50 transition-colors"
+        >
+          {loading ? 'Removing…' : 'Remove device'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="px-4 py-2 border border-gray-300 text-gray-600 rounded-lg text-sm hover:bg-gray-50 transition-colors"
+        >
           Cancel
         </button>
       </div>
@@ -866,16 +953,18 @@ function BackupSection() {
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
-type Panel = 'none' | 'enroll' | 'disable' | 'regenerate'
+type Panel = 'none' | 'enroll' | 'disable' | 'regenerate' | 'remove-device'
 
 export default function SecurityPage() {
   const qc = useQueryClient()
   const { data: status, isLoading } = useTOTPStatus()
   const [panel, setPanel] = useState<Panel>('none')
+  const [removeTarget, setRemoveTarget] = useState<TOTPDevice | null>(null)
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['totp-status'] })
     setPanel('none')
+    setRemoveTarget(null)
   }
 
   return (
@@ -907,6 +996,12 @@ export default function SecurityPage() {
               {status?.enabled ? (
                 <>
                   <button
+                    onClick={() => setPanel('enroll')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-semibold hover:bg-blue-700 transition-colors"
+                  >
+                    <Plus size={13} /> Add device
+                  </button>
+                  <button
                     onClick={() => setPanel('regenerate')}
                     className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg text-xs font-medium hover:bg-gray-50 transition-colors"
                   >
@@ -931,9 +1026,49 @@ export default function SecurityPage() {
           )}
         </div>
 
-        {panel === 'enroll' && <EnrollPanel onDone={invalidate} />}
+        {/* Device list — only shown when 2FA is enabled and no panel is open */}
+        {!isLoading && status?.enabled && panel === 'none' && status.devices && status.devices.length > 0 && (
+          <div className="border-t border-gray-100 pt-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
+              Enrolled devices
+            </h3>
+            <ul className="divide-y divide-gray-100">
+              {status.devices.map(d => (
+                <li key={d.id} className="flex items-center justify-between py-2.5 gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <ShieldCheck size={14} className="text-green-500 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-gray-800 truncate">{d.name}</div>
+                      <div className="text-xs text-gray-400 truncate">
+                        Added {new Date(d.created_at).toLocaleDateString()}
+                        {d.last_used_at
+                          ? ` · last used ${new Date(d.last_used_at).toLocaleString()}`
+                          : ' · never used'}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => { setRemoveTarget(d); setPanel('remove-device') }}
+                    className="text-xs font-medium text-red-600 hover:text-red-700 hover:bg-red-50 px-2 py-1 rounded transition-colors shrink-0"
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {panel === 'enroll' && <EnrollPanel onDone={invalidate} isFirstDevice={!status?.enabled} />}
         {panel === 'disable' && <DisablePanel onDone={invalidate} />}
         {panel === 'regenerate' && <RegeneratePanel onDone={invalidate} />}
+        {panel === 'remove-device' && removeTarget && (
+          <RemoveDevicePanel
+            device={removeTarget}
+            onDone={invalidate}
+            onCancel={() => { setRemoveTarget(null); setPanel('none') }}
+          />
+        )}
       </div>
 
       {/* Rate limiting info */}

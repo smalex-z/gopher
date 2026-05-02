@@ -32,7 +32,7 @@ func (h *AuthHandler) Status(w http.ResponseWriter, r *http.Request) {
 		isAuthenticated = h.authSvc.ValidateSession(cookie.Value)
 	}
 
-	totpEnabled, _, _ := h.authSvc.TOTPStatus()
+	totpEnabled, _, _, _ := h.authSvc.TOTPStatus()
 
 	response.Success(w, map[string]interface{}{
 		"setup":         isSetup,

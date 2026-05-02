@@ -137,6 +137,18 @@ type FirewallRule struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// TOTPDevice represents one confirmed authenticator app/device. The user can
+// enroll multiple; login accepts a code from any. AppSettings.TOTPSecret is
+// still used as the *pending* enrollment slot until a new device is confirmed,
+// at which point the secret is moved into a TOTPDevice row and TOTPSecret cleared.
+type TOTPDevice struct {
+	ID         string     `json:"id" gorm:"primaryKey"`
+	Name       string     `json:"name"`
+	Secret     string     `json:"-" gorm:"column:secret"` // base32-encoded TOTP secret
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+}
+
 type SSHKey struct {
 	ID         string    `json:"id" gorm:"primaryKey"`
 	Name       string    `json:"name"`

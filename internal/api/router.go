@@ -87,6 +87,7 @@ func NewRouter(
 				r.Post("/enroll", authH.TOTPEnroll)
 				r.Post("/confirm", authH.TOTPConfirm)
 				r.Post("/disable", authH.TOTPDisable)
+				r.Delete("/devices/{id}", authH.TOTPRemoveDevice)
 				r.Post("/backup-codes/regenerate", authH.TOTPRegenerateBackupCodes)
 			})
 

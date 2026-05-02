@@ -31,7 +31,7 @@ func Initialize(dsn string) error {
 		return fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
 
-	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &AppSettings{}, &SSHKey{}, &FirewallRule{}, &BotSession{}); err != nil {
+	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &AppSettings{}, &SSHKey{}, &FirewallRule{}, &BotSession{}, &TOTPDevice{}); err != nil {
 		return fmt.Errorf("failed to auto-migrate: %w", err)
 	}
 
@@ -43,6 +43,47 @@ func Initialize(dsn string) error {
 		log.Printf("WARN: SSH key migration: %v", err)
 	}
 
+	if err := migrateTOTPSecretToDevice(); err != nil {
+		log.Printf("WARN: TOTP device migration: %v", err)
+	}
+
+	return nil
+}
+
+// migrateTOTPSecretToDevice copies the legacy single-device TOTP secret stored
+// on AppSettings into a row in the new totp_devices table. Runs once: no-op
+// after the first successful migration (or if 2FA was never enabled).
+func migrateTOTPSecretToDevice() error {
+	// If the new table already has rows, migration already happened.
+	var existing int64
+	if err := DB.Model(&TOTPDevice{}).Count(&existing).Error; err != nil {
+		return err
+	}
+	if existing > 0 {
+		return nil
+	}
+
+	settings, err := GetSettings()
+	if err != nil || !settings.TOTPEnabled || settings.TOTPSecret == "" {
+		return nil // nothing to migrate
+	}
+
+	device := &TOTPDevice{
+		ID:        "migrated-default",
+		Name:      "Original device",
+		Secret:    settings.TOTPSecret,
+		CreatedAt: time.Now(),
+	}
+	if err := DB.Create(device).Error; err != nil {
+		return fmt.Errorf("create totp_device: %w", err)
+	}
+	// Clear the pending-enrollment slot on AppSettings so a fresh enrollment
+	// can use it without colliding with the migrated secret.
+	settings.TOTPSecret = ""
+	if err := DB.Save(settings).Error; err != nil {
+		return fmt.Errorf("clear migrated secret: %w", err)
+	}
+	log.Printf("Migrated TOTP secret from app_settings to totp_devices table")
 	return nil
 }
 
