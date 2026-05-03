@@ -76,6 +76,46 @@ func TestRatholeConfig_RejectsOtherMethods(t *testing.T) {
 	}
 }
 
+func TestUninstall_RequiresAuth(t *testing.T) {
+	srv := newTestServer()
+	req := httptest.NewRequest(http.MethodPost, "/uninstall", nil)
+	w := httptest.NewRecorder()
+	srv.requireToken(srv.uninstall)(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestUninstall_RejectsGet(t *testing.T) {
+	srv := newTestServer()
+	req := httptest.NewRequest(http.MethodGet, "/uninstall", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	srv.requireToken(srv.uninstall)(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestUninstall_MissingScriptReturns500(t *testing.T) {
+	// If /usr/local/bin/gopher-uninstall is present on the dev box (rare),
+	// the handler will spawn a real worker. Skip rather than risk that.
+	if _, err := os.Stat("/usr/local/bin/gopher-uninstall"); err == nil {
+		t.Skip("/usr/local/bin/gopher-uninstall present on dev box; skipping to avoid spawning a real uninstall")
+	}
+	srv := newTestServer()
+	req := httptest.NewRequest(http.MethodPost, "/uninstall", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	srv.requireToken(srv.uninstall)(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 when script absent, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "uninstall script missing") {
+		t.Errorf("expected error to mention missing script: %s", w.Body.String())
+	}
+}
+
 func TestRatholeConfig_GetMissingFileReturns404(t *testing.T) {
 	// If the dev box happens to have /etc/rathole/client.toml, the agent
 	// will return its real contents — skip rather than emit a misleading

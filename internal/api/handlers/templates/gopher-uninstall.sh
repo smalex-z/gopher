@@ -101,6 +101,11 @@ if [ -f "$VPS_KEY_FILE" ]; then
   fi
 fi
 
+echo "Stopping gopher-agent service..."
+$SUDO systemctl stop gopher-agent 2>/dev/null || true
+$SUDO systemctl disable gopher-agent 2>/dev/null || true
+$SUDO rm -f /etc/systemd/system/gopher-agent.service 2>/dev/null || true
+
 echo "Stopping rathole-client service..."
 $SUDO systemctl stop rathole-client 2>/dev/null || true
 $SUDO systemctl disable rathole-client 2>/dev/null || true
@@ -112,6 +117,13 @@ $SUDO rm -rf /etc/rathole 2>/dev/null || true
 
 echo "Removing rathole binary..."
 $SUDO rm -f /usr/local/bin/rathole 2>/dev/null || true
+
+echo "Removing gopher-agent binary and config..."
+$SUDO rm -rf /etc/gopher-agent 2>/dev/null || true
+$SUDO rm -f /usr/local/bin/gopher-agent 2>/dev/null || true
+
+# Drop sudoers entries last so the operations above could still use sudo -n.
+$SUDO rm -f /etc/sudoers.d/gopher 2>/dev/null || true
 
 # Self-destruct last so the script can finish cleanly.
 rm -f "$INSTALL_PATH" 2>/dev/null || true

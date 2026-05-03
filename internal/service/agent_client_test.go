@@ -182,6 +182,43 @@ func TestUpdateClientTomlViaAgent_NoOpSkipsWrite(t *testing.T) {
 	}
 }
 
+func TestAgentClient_Uninstall_Accepts202(t *testing.T) {
+	srv, machine := agentTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/uninstall" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("missing/wrong bearer header: %q", got)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, `{"queued":true}`)
+	}))
+	_ = srv
+
+	if err := NewAgentClient(machine).Uninstall(context.Background()); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+}
+
+func TestAgentClient_Uninstall_BubblesError(t *testing.T) {
+	srv, machine := agentTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"missing /usr/local/bin/gopher-uninstall"}`)
+	}))
+	_ = srv
+
+	err := NewAgentClient(machine).Uninstall(context.Background())
+	if err == nil {
+		t.Fatal("expected error on 500")
+	}
+	if !strings.Contains(err.Error(), "missing") {
+		t.Errorf("error should surface server detail: %v", err)
+	}
+}
+
 // Ensure context cancellation propagates so a stuck agent doesn't block forever.
 func TestAgentClient_GetRatholeConfig_RespectsContext(t *testing.T) {
 	srv, machine := agentTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

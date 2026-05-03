@@ -317,18 +317,50 @@ func (s *LocalSetupService) RemoveServiceTunnel(tunnel *db.Tunnel, machine *db.M
 	_ = s.RemoveServiceTunnelCaddy(tunnel)
 }
 
-// RemoveMachineClient SSHes into a client machine via its reverse tunnel and
-// removes all gopher-managed configuration: the rathole-client service,
-// client.toml, and the VPS public key from ~/.ssh/authorized_keys.
+// RemoveMachineClient triggers full cleanup on the client machine: stops
+// gopher-agent + rathole-client, removes their binaries, configs, sudoers
+// rule, and the VPS public key from authorized_keys.
 //
-// Errors are best-effort — callers should proceed with DB cleanup even on failure.
+// Two transports:
+//   - agent path: POST /uninstall to the agent over the rathole back-channel.
+//     The agent spawns a detached worker (own session via setsid) that
+//     outlives both the agent process and the rathole tunnel, then runs the
+//     canonical /usr/local/bin/gopher-uninstall script. No SSH involved.
+//   - SSH fallback: for legacy machines without the agent, exec the same
+//     /usr/local/bin/gopher-uninstall script over SSH using nohup + setsid
+//     so it survives the SSH session drop.
+//
+// Errors are best-effort — callers should proceed with DB cleanup even on
+// failure (the worst case is a stale client; the operator can re-run
+// gopher-uninstall manually on the box).
 func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
+	if machine.TunnelPort == 0 {
+		return fmt.Errorf("machine has no tunnel port")
+	}
+
+	if machine.AgentInstalled && machine.AgentRemotePort > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := NewAgentClient(machine).Uninstall(ctx); err == nil {
+			return nil
+		} else {
+			// Agent unreachable — likely already partially torn down. Fall
+			// through to SSH so we still try to leave the box clean.
+			log.Printf("agent uninstall for %s (%s) failed, falling back to SSH: %v", machine.ID, machine.Name, err)
+		}
+	}
+
+	return s.removeMachineClientViaSSH(machine)
+}
+
+// removeMachineClientViaSSH is the legacy delete path. Used for machines that
+// haven't been migrated to the agent yet. Identical end-state to the agent
+// path — invokes the same on-disk gopher-uninstall script in a detached
+// worker via setsid.
+func (s *LocalSetupService) removeMachineClientViaSSH(machine *db.Machine) error {
 	sshKey, err := db.GetSSHKeyForMachine(machine)
 	if err != nil {
 		return fmt.Errorf("no server SSH key available")
-	}
-	if machine.TunnelPort == 0 {
-		return fmt.Errorf("machine has no tunnel port")
 	}
 
 	sshClient, err := sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
@@ -337,62 +369,17 @@ func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
 	}
 	defer sshClient.Close()
 
-	// Resolve the home directory (SFTP can't expand $HOME).
-	homeDir, _ := sshClient.Execute("echo $HOME")
-	homeDir = strings.TrimSpace(homeDir)
-	// Sanitize: reject values that look like shell injection attempts.
-	if !strings.HasPrefix(homeDir, "/") || strings.ContainsAny(homeDir, ";|&$`\\\"'") {
-		homeDir = "/home/" + machine.Username
-	}
-
-	// Remove the VPS public key from authorized_keys.
-	if sshKey.PublicKey != "" {
-		akContent, readErr := sshClient.Execute("cat " + homeDir + "/.ssh/authorized_keys 2>/dev/null")
-		if readErr == nil {
-			filtered := removeSSHPublicKey(akContent, sshKey.PublicKey)
-			_ = sshClient.UploadFile([]byte(filtered), homeDir+"/.ssh/authorized_keys")
-		}
-	}
-
-	// Run uninstall asynchronously on the client so it can complete even after
-	// rathole is stopped and this SSH-over-tunnel session drops.
-	const remoteScriptPath = "/tmp/.gopher-remove-rathole.sh"
-	script := buildMachineClientCleanupScript(homeDir, remoteScriptPath)
-	if err := sshClient.UploadFile([]byte(script), remoteScriptPath); err != nil {
-		return fmt.Errorf("failed to upload remote cleanup script: %w", err)
-	}
-	_, _ = sshClient.Execute("chmod +x " + remoteScriptPath)
-	_, err = sshClient.Execute("nohup sh " + remoteScriptPath + " >/tmp/.gopher-remove-rathole.log 2>&1 < /dev/null &")
+	// gopher-uninstall reads /etc/rathole/vps_key.pub and strips the matching
+	// line from authorized_keys, so we don't need to do that step over SFTP
+	// like the old inline-script path did.
+	//
+	// setsid + nohup gives the script its own session, so the SSH disconnect
+	// + the eventual rathole tunnel collapse don't take it down with them.
+	_, err = sshClient.Execute(`setsid nohup sh -c 'sleep 3; sudo -n /usr/local/bin/gopher-uninstall' >/tmp/.gopher-uninstall.log 2>&1 </dev/null &`)
 	if err != nil {
-		return fmt.Errorf("failed to start remote cleanup script: %w", err)
+		return fmt.Errorf("failed to spawn remote uninstall worker: %w", err)
 	}
-
 	return nil
-}
-
-func buildMachineClientCleanupScript(homeDir, scriptPath string) string {
-	return fmt.Sprintf(`#!/bin/sh
-set -e
-HOME_DIR=%q
-
-sudo -n systemctl stop rathole-client 2>/dev/null || true
-sudo -n systemctl disable rathole-client 2>/dev/null || true
-systemctl --user stop rathole-client 2>/dev/null || true
-systemctl --user disable rathole-client 2>/dev/null || true
-
-sudo -n rm -f /etc/systemd/system/rathole-client.service 2>/dev/null || true
-rm -f "$HOME_DIR/.config/systemd/user/rathole-client.service" 2>/dev/null || true
-sudo -n systemctl daemon-reload 2>/dev/null || true
-systemctl --user daemon-reload 2>/dev/null || true
-
-sudo -n rm -f /etc/rathole/client.toml 2>/dev/null || true
-rm -f "$HOME_DIR/.config/rathole/client.toml" 2>/dev/null || true
-
-sudo -n rm -f /usr/local/bin/rathole 2>/dev/null || true
-rm -f "$HOME_DIR/.local/bin/rathole" 2>/dev/null || true
-
-rm -f %q 2>/dev/null || true
-`, homeDir, scriptPath)
 }
 
 // removeSSHPublicKey removes a public key line from an authorized_keys document.

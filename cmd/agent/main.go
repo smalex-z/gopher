@@ -104,6 +104,7 @@ func main() {
 	mux.HandleFunc("/diagnostics", srv.requireToken(srv.diagnostics))
 	mux.HandleFunc("/version", srv.requireToken(srv.version))
 	mux.HandleFunc("/rathole-config", srv.requireToken(srv.ratholeConfig))
+	mux.HandleFunc("/uninstall", srv.requireToken(srv.uninstall))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	httpSrv := &http.Server{
@@ -411,6 +412,57 @@ func (s *server) ratholeConfig(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET or POST required"})
 	}
+}
+
+// POST /uninstall — kicks off a detached worker that runs the on-disk
+// /usr/local/bin/gopher-uninstall script and returns 202 immediately.
+//
+// The worker is in its own session (setsid) so it survives:
+//   - the HTTP request finishing
+//   - the agent's own death when gopher-uninstall stops gopher-agent
+//   - the rathole tunnel collapsing when the VPS reconciles server.toml
+//
+// We sleep briefly before running the uninstall so the 202 response has time
+// to flush back through the tunnel before rathole-client gets stopped. Once
+// the uninstall script is running, the VPS doesn't need to be reachable —
+// every step is local.
+func (s *server) uninstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+
+	const uninstallScript = "/usr/local/bin/gopher-uninstall"
+	if _, err := os.Stat(uninstallScript); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "uninstall script missing at " + uninstallScript + " — machine may need manual cleanup",
+		})
+		return
+	}
+
+	// Spawn a detached child via setsid so it survives this process being
+	// killed by the uninstall script itself. The child sleeps a few seconds
+	// to let the 202 response flush, then runs the canonical on-disk
+	// uninstall flow with output captured for post-mortem.
+	cmd := exec.Command("setsid", "sh", "-c", // #nosec G204 — fixed argv
+		"sleep 3; sudo -n "+uninstallScript+" >/tmp/.gopher-uninstall.log 2>&1")
+	if err := cmd.Start(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to spawn detached uninstall worker: " + err.Error(),
+		})
+		return
+	}
+	// Don't Wait — the child outlives this process. Release the goroutine
+	// holding the OS handle so the kernel reaps the child when it eventually
+	// exits (after we're already dead, but that's fine: PID 1 inherits it).
+	go func() { _ = cmd.Process.Release() }()
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"queued":     true,
+		"script":     uninstallScript,
+		"log":        "/tmp/.gopher-uninstall.log",
+		"started_at": time.Now().UTC(),
+	})
 }
 
 // writeFilePreservingMode overwrites a file's contents while keeping its mode

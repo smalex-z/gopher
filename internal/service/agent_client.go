@@ -142,6 +142,27 @@ func (c *AgentClient) GetRatholeConfig(ctx context.Context) (string, error) {
 	return string(body), nil
 }
 
+// Uninstall asks the agent to run /usr/local/bin/gopher-uninstall in a
+// detached worker. The agent returns 202 Accepted as soon as the worker is
+// started — the actual cleanup runs after this call completes. Replaces the
+// SSH-detach-nohup-script flow that used to race with rathole tunnel teardown.
+func (c *AgentClient) Uninstall(ctx context.Context) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/uninstall", nil)
+	c.authHeader(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	// 202 is the success path; 200 would also be acceptable. Anything else
+	// is an error worth surfacing.
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("agent uninstall %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
 // PutRatholeConfig pushes a new client.toml to the machine. The agent writes
 // it in place; rathole's notify watcher reloads on inotify. Replaces an SSH
 // SFTP upload + start round-trip.
