@@ -124,3 +124,43 @@ func (c *AgentClient) Version(ctx context.Context) (string, error) {
 func (c *AgentClient) authHeader(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.machine.AgentToken)
 }
+
+// GetRatholeConfig fetches the current /etc/rathole/client.toml from the
+// machine via the agent's back-channel. Replaces an SSH `cat` round-trip.
+func (c *AgentClient) GetRatholeConfig(ctx context.Context) (string, error) {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL()+"/rathole-config", nil)
+	c.authHeader(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("agent get rathole-config %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return string(body), nil
+}
+
+// PutRatholeConfig pushes a new client.toml to the machine. The agent writes
+// it in place; rathole's notify watcher reloads on inotify. Replaces an SSH
+// SFTP upload + start round-trip.
+func (c *AgentClient) PutRatholeConfig(ctx context.Context, content string) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/rathole-config", strings.NewReader(content))
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	c.authHeader(req)
+	// Config writes can take a moment if the agent fsyncs; allow a longer
+	// timeout than the default 8s status probe.
+	httpClient := *c.http
+	httpClient.Timeout = 15 * time.Second
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("agent put rathole-config %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}

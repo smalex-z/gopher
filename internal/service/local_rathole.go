@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -127,9 +129,9 @@ func stripGopherServiceSections(content string) string {
 }
 
 // AddServiceTunnel adds a user-defined service tunnel to the server's
-// /etc/rathole/server.toml and SSHes into the machine to update its
-// /etc/rathole/client.toml. If subdomain is set it also writes a managed
-// Caddy site file under /etc/caddy/conf.d.
+// /etc/rathole/server.toml and pushes the regenerated client.toml to the
+// machine. The agent back-channel is preferred; SSH/SFTP is the fallback
+// for machines that don't yet have the agent installed.
 func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Machine) error {
 	settings, err := db.GetSettings()
 	if err != nil {
@@ -157,7 +159,86 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
 	}
 
-	// --- 3. SSH into client and update client.toml ---
+	// --- 3. Push the regenerated client.toml ---
+	machineTunnels, err := db.GetTunnelsByMachine(machine.ID)
+	if err != nil {
+		return fmt.Errorf("failed to load machine tunnels: %w", err)
+	}
+	ratholeHost := settings.ServerHost
+	if ratholeHost == "" {
+		ratholeHost = settings.Domain
+	}
+	transformer := func(existing string) (string, error) {
+		return mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost)
+	}
+	if err := s.updateClientToml(machine, transformer); err != nil {
+		return fmt.Errorf("failed to write client.toml on machine: %w", err)
+	}
+	return nil
+}
+
+// RemoveServiceTunnelClient removes only the tunnel's section from the
+// client machine's /etc/rathole/client.toml (or user-level fallback).
+func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine *db.Machine) error {
+	if tunnel == nil || machine == nil {
+		return nil
+	}
+	transformer := func(existing string) (string, error) {
+		return removeClientManagedSection(existing, "tunnel", tunnel.ID), nil
+	}
+	return s.updateClientToml(machine, transformer)
+}
+
+// updateClientToml is the read-transform-write loop for a machine's
+// /etc/rathole/client.toml. It prefers the gopher-agent back-channel and
+// falls back to SSH/SFTP for legacy machines that don't have the agent yet.
+//
+// The fallback is deliberate: until every machine is migrated, both transports
+// must work. Once the migration UI flips every machine, this fallback can be
+// dropped and the SSH path retired.
+func (s *LocalSetupService) updateClientToml(machine *db.Machine, transform func(existing string) (string, error)) error {
+	if machine == nil {
+		return fmt.Errorf("nil machine")
+	}
+
+	if machine.AgentInstalled && machine.AgentRemotePort > 0 {
+		if err := s.updateClientTomlViaAgent(machine, transform); err == nil {
+			return nil
+		} else {
+			// Agent failed (network, timeout, permission). Fall back to SSH so
+			// the operation still completes; log so we can spot persistent
+			// agent issues that should be debugged.
+			log.Printf("agent client.toml push failed for machine %s (%s): %v — falling back to SSH", machine.ID, machine.Name, err)
+		}
+	}
+
+	return s.updateClientTomlViaSSH(machine, transform)
+}
+
+func (s *LocalSetupService) updateClientTomlViaAgent(machine *db.Machine, transform func(existing string) (string, error)) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	client := NewAgentClient(machine)
+
+	existing, err := client.GetRatholeConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("agent get config: %w", err)
+	}
+	updated, err := transform(existing)
+	if err != nil {
+		return err
+	}
+	if updated == existing {
+		// No-op write would still bump mtime and cause notify reload churn.
+		return nil
+	}
+	if err := client.PutRatholeConfig(ctx, updated); err != nil {
+		return fmt.Errorf("agent put config: %w", err)
+	}
+	return nil
+}
+
+func (s *LocalSetupService) updateClientTomlViaSSH(machine *db.Machine, transform func(existing string) (string, error)) error {
 	sshKey, sshKeyErr := db.GetSSHKeyForMachine(machine)
 	if sshKeyErr != nil {
 		return fmt.Errorf("no server SSH key available; machine may need to be re-bootstrapped")
@@ -178,26 +259,16 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	}
 	defer sshClient.Close()
 
-	// Read existing client.toml
 	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
 	if err != nil {
 		existing = ""
 	}
-	machineTunnels, err := db.GetTunnelsByMachine(machine.ID)
-	if err != nil {
-		return fmt.Errorf("failed to load machine tunnels: %w", err)
-	}
-	ratholeHost := settings.ServerHost
-	if ratholeHost == "" {
-		ratholeHost = settings.Domain
-	}
-	updated, err := mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost)
+	updated, err := transform(existing)
 	if err != nil {
 		return err
 	}
 
-	// Determine the absolute config path on the remote machine.
-	// SFTP does not expand shell variables, so resolve the home dir explicitly.
+	// Resolve absolute config path (SFTP cannot expand $HOME).
 	configPath := "/etc/rathole/client.toml"
 	if _, err2 := sshClient.Execute("test -f /etc/rathole/client.toml"); err2 != nil {
 		homeDir, _ := sshClient.Execute("echo $HOME")
@@ -209,64 +280,13 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		_, _ = sshClient.Execute("mkdir -p " + homeDir + "/.config/rathole")
 	}
 
-	// Write config directly via SFTP — works when the SSH user owns /etc/rathole/
-	// (bootstrap runs chown for sudo-capable machines). UploadFileSudo handles legacy
-	// machines where the file ended up root-owned by falling back to a sudo mv.
 	if err := sshClient.UploadFileSudo([]byte(updated), configPath, machine.Username); err != nil {
 		return fmt.Errorf("failed to write client.toml on machine: %w", err)
 	}
 
-	// rathole's notify watcher picks up client.toml via inotify — adding or
-	// removing a [services.X] block reloads in-place without dropping the
-	// other tunnels on this machine. pkill / systemctl restart would flap
-	// every existing connection on every provision.
-	// systemctl start is a no-op on an active unit; covers the "not running"
-	// case for both system and user units without forcing a restart on
-	// healthy ones.
-	_, _ = sshClient.Execute(`{ [ "$(id -u)" -eq 0 ] && systemctl start rathole-client || sudo -n systemctl start rathole-client; } 2>/dev/null; systemctl --user start rathole-client 2>/dev/null; true`)
-
-	return nil
-}
-
-// RemoveServiceTunnelClient removes only the tunnel's section from the
-// client machine's /etc/rathole/client.toml (or user-level fallback).
-func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine *db.Machine) error {
-	if tunnel == nil || machine == nil {
-		return nil
-	}
-	sshKey, err := db.GetSSHKeyForMachine(machine)
-	if err != nil {
-		return nil
-	}
-	sshClient, err := sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
-	if err != nil {
-		return err
-	}
-	defer sshClient.Close()
-
-	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
-	if err != nil {
-		return nil
-	}
-	updated := removeClientManagedSection(existing, "tunnel", tunnel.ID)
-
-	// Resolve absolute config path (SFTP cannot expand $HOME).
-	confPath := "/etc/rathole/client.toml"
-	if _, err2 := sshClient.Execute("test -f /etc/rathole/client.toml"); err2 != nil {
-		homeDir, _ := sshClient.Execute("echo $HOME")
-		homeDir = strings.TrimSpace(homeDir)
-		if homeDir == "" {
-			homeDir = "/home/" + machine.Username
-		}
-		confPath = homeDir + "/.config/rathole/client.toml"
-	}
-
-	if err := sshClient.UploadFileSudo([]byte(updated), confPath, machine.Username); err != nil {
-		return err
-	}
-	// See AddServiceTunnel: rathole's notify watcher reloads on file
-	// change, so removing a [services.X] block does not require a kill or
-	// restart. systemctl start is a no-op on healthy units.
+	// rathole's notify watcher reloads on file change; systemctl start is a
+	// no-op on a healthy unit and covers the "stopped" case without flapping
+	// existing tunnels.
 	_, _ = sshClient.Execute(`{ [ "$(id -u)" -eq 0 ] && systemctl start rathole-client || sudo -n systemctl start rathole-client; } 2>/dev/null; systemctl --user start rathole-client 2>/dev/null; true`)
 	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -102,6 +103,7 @@ func main() {
 	mux.HandleFunc("/restart-rathole", srv.requireToken(srv.restartRathole))
 	mux.HandleFunc("/diagnostics", srv.requireToken(srv.diagnostics))
 	mux.HandleFunc("/version", srv.requireToken(srv.version))
+	mux.HandleFunc("/rathole-config", srv.requireToken(srv.ratholeConfig))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	httpSrv := &http.Server{
@@ -337,4 +339,81 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// ─── rathole-config push ─────────────────────────────────────────────────────
+//
+// GET returns the current /etc/rathole/client.toml so the VPS can read-merge-write
+// without an SSH session. POST writes a new config in place; rathole's notify
+// watcher picks up the change via inotify and reloads without restart.
+//
+// The agent runs as the SSH user (set in bootstrap), and bootstrap chowns
+// /etc/rathole/client.toml to that user, so direct file I/O works without sudo.
+// We deliberately do not support a $HOME/.config/rathole/client.toml fallback:
+// the bootstrap script always installs system-wide and aborts on sudo failure,
+// so a machine running the agent always has the system-wide path.
+
+const (
+	clientTomlPath        = "/etc/rathole/client.toml"
+	maxRatholeConfigBytes = 1 << 20 // 1 MiB — generous but bounded
+)
+
+func (s *server) ratholeConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		data, err := os.ReadFile(clientTomlPath) // #nosec G304 — fixed path
+		if err != nil {
+			if os.IsNotExist(err) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "client.toml not present at " + clientTomlPath})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(data)
+	case http.MethodPost:
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxRatholeConfigBytes+1))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body: " + err.Error()})
+			return
+		}
+		if len(body) > maxRatholeConfigBytes {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "config exceeds 1MiB"})
+			return
+		}
+		if len(body) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "empty body"})
+			return
+		}
+		if err := writeFilePreservingMode(clientTomlPath, body); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"written": true,
+			"bytes":   len(body),
+		})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET or POST required"})
+	}
+}
+
+// writeFilePreservingMode overwrites a file's contents while keeping its mode
+// and ownership. Uses truncate-write rather than rename-into-place because the
+// agent owns the file but not the parent directory (/etc/rathole is
+// root-owned), which would block atomic rename.
+func writeFilePreservingMode(path string, content []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o644) // #nosec G304 — caller resolved path
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	if _, err := f.Write(content); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync %s: %w", path, err)
+	}
+	return nil
 }
