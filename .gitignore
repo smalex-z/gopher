@@ -14,6 +14,10 @@ frontend/node_modules/
 cmd/server/frontend/dist/
 cmd/server/frontend
 
+# Cross-compiled agent binaries (embedded into Go binary via go:embed; produced by build.sh).
+# .gitkeep is kept so the directory survives for go:embed on fresh checkouts.
+cmd/server/agents/gopher-agent-*
+
 # IDE
 .vscode/
 .idea/
