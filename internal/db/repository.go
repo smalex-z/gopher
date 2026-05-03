@@ -62,6 +62,38 @@ func UpdateMachine(machine *Machine) error {
 	return DB.Save(machine).Error
 }
 
+// SetMachineStatus updates only Status / LastSeen / UpdatedAt — used by the
+// monitor and the TCP-fallback health probe so concurrent writes from the
+// agent path can't be clobbered by a stale full-record Save.
+func SetMachineStatus(id, status string, lastSeen *time.Time) error {
+	updates := map[string]any{
+		"status":     status,
+		"updated_at": time.Now(),
+	}
+	if lastSeen != nil {
+		updates["last_seen"] = *lastSeen
+	}
+	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
+}
+
+// SetMachineAgentSeen marks the machine as having a healthy, reachable agent.
+// Flips AgentInstalled true (so machines that bootstrapped with the agent
+// inline are detected without a separate callback) and records the version.
+// Status is also set to "connected" since reaching the agent proves end-to-end
+// connectivity through the rathole back-channel.
+func SetMachineAgentSeen(id, version string, when time.Time) error {
+	updates := map[string]any{
+		"agent_installed":     true,
+		"agent_version":       version,
+		"agent_last_seen":     when,
+		"agent_install_error": "",
+		"status":              "connected",
+		"last_seen":           when,
+		"updated_at":          when,
+	}
+	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
+}
+
 func DeleteMachine(id string) error {
 	return DB.Delete(&Machine{}, "id = ?", id).Error
 }
@@ -136,23 +168,12 @@ func allUsedPorts() (map[int]bool, error) {
 	return used, nil
 }
 
-// NextAgentPort returns the next available port for an agent rathole service,
-// guaranteed free across all existing port assignments.
-func NextAgentPort() (int, error) {
-	used, err := allUsedPorts()
-	if err != nil {
-		return 0, err
-	}
-	port := 1024
-	for used[port] {
-		port++
-	}
-	return port, nil
-}
-
-// NextRatholePort returns the next available port for a service tunnel,
-// guaranteed free across both service tunnels and machine SSH tunnels.
+// NextRatholePort returns the next available port across all existing port
+// assignments (service tunnels, machine SSH tunnels, agent back-channels).
 // Starts from 1024 (first non-privileged port) and finds the first gap.
+//
+// All callers — service tunnels, machine SSH tunnels, agent back-channels —
+// allocate from the same pool, so they can never collide.
 func NextRatholePort() (int, error) {
 	used, err := allUsedPorts()
 	if err != nil {

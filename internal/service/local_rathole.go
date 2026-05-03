@@ -453,6 +453,23 @@ local_addr = "0.0.0.0:22"
 `, machine.ID, machine.ID, machine.RatholeSSHToken, machine.ID)
 }
 
+// buildClientMachineAgentSection emits the rathole client entry that connects
+// the local gopher-agent (127.0.0.1:AgentLocalPort) to the VPS-side bind so
+// the control plane can reach the agent. Empty when the machine doesn't have
+// agent fields populated — legacy machines without the agent fall through.
+func buildClientMachineAgentSection(machine *db.Machine) string {
+	if machine == nil || machine.ID == "" || machine.AgentRatholeToken == "" || machine.AgentLocalPort == 0 {
+		return ""
+	}
+	return fmt.Sprintf(`# gopher-machine-agent-start: %s
+[client.services.machine-%s-agent]
+type = "tcp"
+token = "%s"
+local_addr = "127.0.0.1:%d"
+# gopher-machine-agent-end: %s
+`, machine.ID, machine.ID, machine.AgentRatholeToken, machine.AgentLocalPort, machine.ID)
+}
+
 func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db.Tunnel, ratholeHost string) (string, error) {
 	base := strings.TrimSpace(existing)
 	if base == "" {
@@ -472,6 +489,9 @@ func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db
 	updated := strings.TrimRight(cleaned, "\n")
 
 	sections := []string{machineSection}
+	if agentSection := strings.TrimSpace(buildClientMachineAgentSection(machine)); agentSection != "" {
+		sections = append(sections, agentSection)
+	}
 	for i := range tunnels {
 		if tunnels[i].MachineID != "" && machine != nil && tunnels[i].MachineID != machine.ID {
 			continue
@@ -511,6 +531,12 @@ func stripClientManagedMarkerBlocks(content string) string {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if skip == "" {
+			// Order matters: machine-agent must be checked before machine
+			// because both share the "# gopher-machine" prefix.
+			if strings.HasPrefix(trimmed, "# gopher-machine-agent-start:") {
+				skip = "machine-agent"
+				continue
+			}
 			if strings.HasPrefix(trimmed, "# gopher-machine-start:") {
 				skip = "machine"
 				continue
@@ -523,6 +549,10 @@ func stripClientManagedMarkerBlocks(content string) string {
 			continue
 		}
 
+		if skip == "machine-agent" && strings.HasPrefix(trimmed, "# gopher-machine-agent-end:") {
+			skip = ""
+			continue
+		}
 		if skip == "machine" && strings.HasPrefix(trimmed, "# gopher-machine-end:") {
 			skip = ""
 			continue
@@ -590,6 +620,9 @@ func removeClientManagedSection(content, entryType, id string) string {
 	}
 	if entryType == "machine" {
 		updated = removeTomlSection(updated, fmt.Sprintf("client.services.machine-%s-ssh", id))
+	}
+	if entryType == "machine-agent" {
+		updated = removeTomlSection(updated, fmt.Sprintf("client.services.machine-%s-agent", id))
 	}
 	return updated
 }

@@ -126,7 +126,7 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 	// Allocate the agent back-channel up front. Even if the bootstrap script
 	// fails to install the agent (older script, network glitch), we keep the
 	// fields populated so the existing-machine migration tool can complete it.
-	agentRemotePort, err := db.NextAgentPort()
+	agentRemotePort, err := db.NextRatholePort()
 	if err != nil {
 		return nil, fmt.Errorf("failed to allocate agent port: %w", err)
 	}

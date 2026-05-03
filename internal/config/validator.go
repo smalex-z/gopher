@@ -54,9 +54,13 @@ func ValidateRatholeConfig(configContent string, expectedMachines []db.Machine, 
 
 	// Build expected sets from DB
 	expectedMachineIDs := make(map[string]*db.Machine)
+	expectedAgentMachineIDs := make(map[string]*db.Machine)
 	for i := range expectedMachines {
 		if expectedMachines[i].RatholeSSHToken != "" && expectedMachines[i].TunnelPort != 0 {
 			expectedMachineIDs[expectedMachines[i].ID] = &expectedMachines[i]
+		}
+		if expectedMachines[i].AgentRatholeToken != "" && expectedMachines[i].AgentRemotePort != 0 {
+			expectedAgentMachineIDs[expectedMachines[i].ID] = &expectedMachines[i]
 		}
 	}
 
@@ -75,6 +79,13 @@ func ValidateRatholeConfig(configContent string, expectedMachines []db.Machine, 
 			result.Errors = append(result.Errors, fmt.Sprintf("Orphaned machine in config: %s", id))
 		}
 	}
+	for id := range parsed.MachineAgents {
+		if _, found := expectedAgentMachineIDs[id]; !found {
+			result.Valid = false
+			result.Orphans = append(result.Orphans, fmt.Sprintf("machine-agent-%s", id))
+			result.Errors = append(result.Errors, fmt.Sprintf("Orphaned machine-agent in config: %s", id))
+		}
+	}
 	for id := range parsed.Tunnels {
 		if _, found := expectedTunnelIDs[id]; !found {
 			result.Valid = false
@@ -91,6 +102,13 @@ func ValidateRatholeConfig(configContent string, expectedMachines []db.Machine, 
 			result.Errors = append(result.Errors, fmt.Sprintf("Missing machine in config: %s", id))
 		}
 	}
+	for id := range expectedAgentMachineIDs {
+		if _, found := parsed.MachineAgents[id]; !found {
+			result.Valid = false
+			result.Missing = append(result.Missing, fmt.Sprintf("machine-agent-%s", id))
+			result.Errors = append(result.Errors, fmt.Sprintf("Missing machine-agent in config: %s", id))
+		}
+	}
 	for id := range expectedTunnelIDs {
 		if _, found := parsed.Tunnels[id]; !found {
 			result.Valid = false
@@ -99,7 +117,7 @@ func ValidateRatholeConfig(configContent string, expectedMachines []db.Machine, 
 		}
 	}
 
-	// Check for token mismatches
+	// Check for token / port mismatches
 	for id, machine := range expectedMachineIDs {
 		if entry, found := parsed.Machines[id]; found {
 			if entry.Token != machine.RatholeSSHToken {
@@ -109,6 +127,18 @@ func ValidateRatholeConfig(configContent string, expectedMachines []db.Machine, 
 			if extractPortFromBindAddr(entry.BindAddr) != machine.TunnelPort {
 				result.Valid = false
 				result.Errors = append(result.Errors, fmt.Sprintf("Port mismatch for machine %s", id))
+			}
+		}
+	}
+	for id, machine := range expectedAgentMachineIDs {
+		if entry, found := parsed.MachineAgents[id]; found {
+			if entry.Token != machine.AgentRatholeToken {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("Token mismatch for machine-agent %s", id))
+			}
+			if extractPortFromBindAddr(entry.BindAddr) != machine.AgentRemotePort {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("Port mismatch for machine-agent %s", id))
 			}
 		}
 	}

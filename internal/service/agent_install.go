@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
@@ -66,7 +65,7 @@ func (i *AgentInstaller) installInner(machine *db.Machine) error {
 		dirty = true
 	}
 	if machine.AgentRemotePort == 0 {
-		port, err := db.NextAgentPort()
+		port, err := db.NextRatholePort()
 		if err != nil {
 			return fmt.Errorf("allocate agent remote port: %w", err)
 		}
@@ -151,10 +150,15 @@ func (i *AgentInstaller) installInner(machine *db.Machine) error {
 		return fmt.Errorf("install script failed: %w (%s)", err, truncate(stdout.String(), 400))
 	}
 
-	// Push an updated rathole client config that includes the agent service,
-	// then restart rathole on the client so the new tunnel comes up.
-	clientCfg := config.GenerateMachineSSHClientConfig(vpsHost, machine)
-	if err := i.pushRatholeConfig(client, clientCfg); err != nil {
+	// Push an updated rathole client config that includes the agent service.
+	// We must preserve any existing service tunnels: regenerating from scratch
+	// would wipe them. Read existing -> merge -> write, same path
+	// AddServiceTunnel uses, but over the SSH session we already have open.
+	machineTunnels, err := db.GetTunnelsByMachine(machine.ID)
+	if err != nil {
+		return fmt.Errorf("load machine tunnels: %w", err)
+	}
+	if err := i.pushRatholeConfig(client, machine, machineTunnels, vpsHost); err != nil {
 		return fmt.Errorf("update rathole client config: %w", err)
 	}
 
@@ -165,22 +169,37 @@ func (i *AgentInstaller) installInner(machine *db.Machine) error {
 		// Not fatal — the next reconcile loop will pick it up.
 	}
 
-	// Verify the agent is reachable through the new back-channel. Wait up to
-	// 30 seconds for rathole to re-establish the tunnel after the restart.
+	// Verify the agent is reachable through the new back-channel. rathole's
+	// notify watcher reloads on file change, so the new agent service comes
+	// up without restarting (which would drop every existing tunnel).
 	if err := i.verifyAgentReachable(machine); err != nil {
 		return fmt.Errorf("agent installed but not reachable yet: %w", err)
 	}
 	return nil
 }
 
-func (i *AgentInstaller) pushRatholeConfig(client *sshpkg.SSHClient, cfg string) error {
-	if err := client.UploadFileSudo([]byte(cfg), "/etc/rathole/client.toml", ""); err != nil {
+// pushRatholeConfig reads the machine's current client.toml, merges in the
+// updated managed sections (machine SSH + agent + tunnels), and writes back.
+// Never restarts rathole-client — its notify watcher picks up file changes
+// via inotify and reloads in-place, preserving every active tunnel.
+func (i *AgentInstaller) pushRatholeConfig(client *sshpkg.SSHClient, machine *db.Machine, tunnels []db.Tunnel, vpsHost string) error {
+	existing, err := client.Execute("cat /etc/rathole/client.toml 2>/dev/null")
+	if err != nil {
+		// Best-effort: an empty existing config means mergeClientManagedConfig
+		// will seed a [client] header from vpsHost.
+		existing = ""
+	}
+	merged, err := mergeClientManagedConfig(existing, machine, tunnels, vpsHost)
+	if err != nil {
 		return err
 	}
-	// Restart rathole-client to pick up the new service.
-	if _, err := client.Execute("sudo -n systemctl restart rathole-client"); err != nil {
-		return fmt.Errorf("restart rathole-client: %w", err)
+	if err := client.UploadFileSudo([]byte(merged), "/etc/rathole/client.toml", machine.Username); err != nil {
+		return err
 	}
+	// Cover the "rathole-client unit was stopped" case without flapping a
+	// healthy unit (start is a no-op on active units; restart would drop
+	// every existing tunnel on the machine).
+	_, _ = client.Execute(`sudo -n systemctl start rathole-client 2>/dev/null; true`)
 	return nil
 }
 
@@ -263,6 +282,22 @@ GOPHER_AGENT_UNIT_EOF
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable gopher-agent >/dev/null 2>&1 || true
 $SUDO systemctl restart gopher-agent
+
+# Ensure the agent's user has sudoers permission for the systemctl verbs the
+# agent's /restart-rathole endpoint actually invokes. Old bootstraps only
+# granted "restart rathole-client"; the agent now uses start (notify-friendly)
+# and reset-failed (clears the unit's failure burst counter).
+SUDOERS_FILE="/etc/sudoers.d/gopher"
+ensure_line() {
+  local line="$1"
+  $SUDO grep -qF "$line" "$SUDOERS_FILE" 2>/dev/null || \
+    echo "$line" | $SUDO tee -a "$SUDOERS_FILE" >/dev/null
+}
+$SUDO touch "$SUDOERS_FILE"
+ensure_line "%[5]s ALL=(ALL) NOPASSWD: /usr/bin/systemctl start rathole-client"
+ensure_line "%[5]s ALL=(ALL) NOPASSWD: /usr/bin/systemctl reset-failed rathole-client"
+$SUDO chmod 0440 "$SUDOERS_FILE"
+
 echo "gopher-agent installed and running"
 `,
 		p.BinaryURL, p.BinaryURL, p.Token, p.Port, p.Username, p.Username)

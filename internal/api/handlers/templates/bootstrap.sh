@@ -181,9 +181,15 @@ if [ -s /tmp/gopher-uninstall.sh ]; then
   # Grant the current user passwordless sudo for commands the gopher server
   # needs to trigger non-interactively over SSH.
   SUDOERS_FILE="/etc/sudoers.d/gopher"
+  # The agent uses `systemctl start` (not restart) for recovery so existing
+  # tunnels on the box don't flap; reset-failed clears systemd's failure
+  # counter when a unit has hit its restart-burst limit. Restart is kept for
+  # operator-triggered hard restarts.
   printf '%s\n' \
     "$SSH_USER ALL=(ALL) NOPASSWD: /usr/local/bin/gopher-uninstall" \
-    "$SSH_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart rathole-client" | $SUDO tee "$SUDOERS_FILE" >/dev/null
+    "$SSH_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start rathole-client" \
+    "$SSH_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart rathole-client" \
+    "$SSH_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl reset-failed rathole-client" | $SUDO tee "$SUDOERS_FILE" >/dev/null
   $SUDO chmod 0440 "$SUDOERS_FILE"
   echo "  Sudoers rule written to $SUDOERS_FILE"
 else

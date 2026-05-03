@@ -293,6 +293,46 @@ bind_addr = "127.0.0.1:2222"
 	}
 }
 
+// gopher-agent back-channel entries share the machine id but use a distinct
+// marker prefix. Parser must recognize them, store separately, and not flag
+// "machine" + "machine-agent" with the same id as duplicates.
+func TestParseRatholeConfig_MachineAgentEntry(t *testing.T) {
+	cfg := `
+# gopher-machine-start: m1
+[server.services.machine-m1-ssh]
+token = "ssh-tok"
+bind_addr = "127.0.0.1:2222"
+# gopher-machine-end: m1
+
+# gopher-machine-agent-start: m1
+[server.services.machine-m1-agent]
+token = "agent-tok"
+bind_addr = "127.0.0.1:9001"
+# gopher-machine-agent-end: m1
+`
+	result := parseRatholeConfig(cfg)
+	if len(result.Errors) > 0 {
+		t.Fatalf("unexpected errors: %v", result.Errors)
+	}
+
+	if _, ok := result.Machines["m1"]; !ok {
+		t.Fatal("expected machine m1 in Machines map")
+	}
+	agent, ok := result.MachineAgents["m1"]
+	if !ok {
+		t.Fatal("expected machine m1 in MachineAgents map")
+	}
+	if agent.Token != "agent-tok" {
+		t.Errorf("agent Token = %q, want %q", agent.Token, "agent-tok")
+	}
+	if agent.BindAddr != "127.0.0.1:9001" {
+		t.Errorf("agent BindAddr = %q, want %q", agent.BindAddr, "127.0.0.1:9001")
+	}
+	if len(result.DuplicateIDs) > 0 {
+		t.Errorf("machine + machine-agent with same id should not flag duplicates, got %v", result.DuplicateIDs)
+	}
+}
+
 func TestParseRatholeConfig_DuplicateID(t *testing.T) {
 	cfg := `
 # gopher-tunnel-start: t1

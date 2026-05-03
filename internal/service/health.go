@@ -107,65 +107,76 @@ func (s *HealthService) tick() {
 }
 
 // checkMachine runs the appropriate probe for a machine: agent /status when
-// the agent is installed, fallback TCP-to-tunnel-port otherwise.
+// the agent is reachable through the rathole back-channel, fallback
+// TCP-to-tunnel-port otherwise.
+//
+// We try the agent path even when AgentInstalled=false as long as
+// AgentRemotePort is allocated. That covers the inline-bootstrap case: the
+// bootstrap script installs the agent without a separate VPS-side callback,
+// so the first successful agent probe is what flips AgentInstalled true.
 func (s *HealthService) checkMachine(m *db.Machine) {
 	subject := "machine:" + m.ID
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	if m.AgentInstalled && m.AgentRemotePort > 0 {
-		s.checkViaAgent(ctx, m, subject, start)
-		return
+	if m.AgentRemotePort > 0 {
+		if ok := s.checkViaAgent(ctx, m, subject, start); ok {
+			return
+		}
+		// Agent unreachable — fall through to TCP probe so the dashboard
+		// still gets a connectivity signal. Don't flip AgentInstalled false:
+		// the agent might be transiently down and we know it's been
+		// installed previously.
 	}
 	s.checkViaTCP(ctx, m, subject, start)
 }
 
-func (s *HealthService) checkViaAgent(ctx context.Context, m *db.Machine, subject string, start time.Time) {
+// checkViaAgent returns true if the agent answered (regardless of rathole
+// health on the box). false means the agent is unreachable and the caller
+// should fall back to the TCP probe.
+func (s *HealthService) checkViaAgent(ctx context.Context, m *db.Machine, subject string, start time.Time) bool {
 	client := NewAgentClient(m)
 	status, err := client.Status(ctx)
 	latency := int(time.Since(start) / time.Millisecond)
 
 	if err != nil {
 		_ = db.RecordHealthCheck(&db.HealthCheck{
-			Subject:  subject,
-			OK:       false,
+			Subject:   subject,
+			OK:        false,
 			LatencyMS: latency,
-			ErrorMsg: "agent unreachable: " + err.Error(),
+			ErrorMsg:  "agent unreachable: " + err.Error(),
 		})
-		// Fall back to TCP so the operator still gets some signal.
-		s.checkViaTCP(ctx, m, subject, time.Now())
-		return
+		return false
 	}
 
 	// Agent reachable — but is rathole healthy on the box?
 	if !status.Rathole.Active {
 		errMsg := fmt.Sprintf("rathole-client not active (state=%s/%s)", status.Rathole.State, status.Rathole.Substate)
 		_ = db.RecordHealthCheck(&db.HealthCheck{
-			Subject:  subject,
-			OK:       false,
+			Subject:   subject,
+			OK:        false,
 			LatencyMS: latency,
-			ErrorMsg: errMsg,
+			ErrorMsg:  errMsg,
 		})
 		s.maybeRecover(m, "rathole inactive")
-		return
+		return true
 	}
 
-	// Healthy. Update agent_last_seen + agent_version for the dashboard.
+	// Healthy. Use a partial Updates call so this write doesn't clobber
+	// fields the monitor or another writer touched between our load and our
+	// save (full-record GORM Save was racing with monitor.go).
 	now := time.Now()
-	m.AgentLastSeen = &now
-	m.AgentVersion = status.AgentVersion
-	if m.Status != "connected" {
-		m.Status = "connected"
-		m.LastSeen = &now
+	if err := db.SetMachineAgentSeen(m.ID, status.AgentVersion, now); err != nil {
+		log.Printf("health: persist agent-seen for %s: %v", m.ID, err)
 	}
-	_ = db.UpdateMachine(m)
 
 	_ = db.RecordHealthCheck(&db.HealthCheck{
-		Subject:  subject,
-		OK:       true,
+		Subject:   subject,
+		OK:        true,
 		LatencyMS: latency,
 	})
+	return true
 }
 
 func (s *HealthService) checkViaTCP(ctx context.Context, m *db.Machine, subject string, start time.Time) {
@@ -178,19 +189,23 @@ func (s *HealthService) checkViaTCP(ctx context.Context, m *db.Machine, subject 
 	latency := int(time.Since(start) / time.Millisecond)
 	if err != nil {
 		_ = db.RecordHealthCheck(&db.HealthCheck{
-			Subject:  subject,
-			OK:       false,
+			Subject:   subject,
+			OK:        false,
 			LatencyMS: latency,
-			ErrorMsg: "tcp probe failed: " + err.Error(),
+			ErrorMsg:  "tcp probe failed: " + err.Error(),
 		})
 		// Without the agent we can't auto-restart. Just record the failure.
+		_ = db.SetMachineStatus(m.ID, "offline", nil)
 		return
 	}
 	_ = conn.Close()
 
+	now := time.Now()
+	_ = db.SetMachineStatus(m.ID, "connected", &now)
+
 	_ = db.RecordHealthCheck(&db.HealthCheck{
-		Subject:  subject,
-		OK:       true,
+		Subject:   subject,
+		OK:        true,
 		LatencyMS: latency,
 	})
 }

@@ -49,6 +49,13 @@ func (s *MonitorService) checkMachine(machine db.Machine) {
 	if machine.TunnelPort == 0 {
 		return
 	}
+	// Skip machines the HealthService is already polling via the agent —
+	// running both writers against the same row was clobbering agent fields
+	// every 30s. Health owns agent-installed machines; monitor stays the
+	// fallback for legacy / un-migrated ones.
+	if machine.AgentInstalled {
+		return
+	}
 	// Use an SSH banner grab rather than a full SSH handshake.
 	//
 	// golang.org/x/crypto/ssh's ClientConfig.Timeout only covers the TCP dial —
@@ -64,17 +71,14 @@ func (s *MonitorService) checkMachine(machine db.Machine) {
 	reachable := probeMachineSSH(TunnelDialHost(&machine), machine.TunnelPort)
 
 	if !reachable {
-		machine.Status = "offline"
-		if err := db.UpdateMachine(&machine); err != nil {
+		if err := db.SetMachineStatus(machine.ID, "offline", nil); err != nil {
 			log.Printf("monitor: failed to update machine %s: %v", machine.ID, err)
 		}
 		return
 	}
 
 	now := time.Now()
-	machine.LastSeen = &now
-	machine.Status = "connected"
-	if err := db.UpdateMachine(&machine); err != nil {
+	if err := db.SetMachineStatus(machine.ID, "connected", &now); err != nil {
 		log.Printf("monitor: failed to update machine %s: %v", machine.ID, err)
 	}
 }

@@ -171,7 +171,15 @@ func (s *server) status(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// POST /restart-rathole — runs `sudo systemctl restart <unit>`.
+// POST /restart-rathole — recovers a stopped/failed rathole-client unit.
+//
+// We deliberately use `systemctl start`, not `restart`. start is a no-op on a
+// healthy unit and will resurrect a stopped or failed one — `restart` would
+// drop every active tunnel on the machine, which is the exact behavior we're
+// avoiding everywhere else (see CLAUDE.md: rathole reloads via inotify).
+//
+// The endpoint name stays "restart-rathole" for API stability with already-
+// deployed VPS-side callers.
 func (s *server) restartRathole(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
@@ -179,7 +187,13 @@ func (s *server) restartRathole(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "sudo", "-n", "systemctl", "restart", s.cfg.UnitName).CombinedOutput() // #nosec G204
+
+	// reset-failed clears systemd's failure counter so start can succeed
+	// after the unit hit its restart-burst limit. Best-effort; we ignore
+	// errors here because the start below is the source of truth.
+	_, _ = exec.CommandContext(ctx, "sudo", "-n", "systemctl", "reset-failed", s.cfg.UnitName).CombinedOutput() // #nosec G204
+
+	out, err := exec.CommandContext(ctx, "sudo", "-n", "systemctl", "start", s.cfg.UnitName).CombinedOutput() // #nosec G204
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error":  err.Error(),
