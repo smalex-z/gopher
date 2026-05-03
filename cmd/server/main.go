@@ -66,6 +66,9 @@ func runServer(args []string) {
 	updateSvc := service.NewUpdateService()
 	secSvc := service.NewSecurityService()
 	backupSvc := service.NewBackupService(*dbPath)
+	agentInstaller := service.NewAgentInstaller(localSvc)
+	healthSvc := service.NewHealthService(true)
+	healthSvc.Start()
 	go secSvc.SyncFail2banConfig()
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
@@ -90,10 +93,14 @@ func runServer(args []string) {
 		}
 	}()
 
-	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc, backupSvc)
+	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc, backupSvc, agentInstaller, healthSvc)
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", router)
+	// /static/agents/* serves the gopher-agent binaries; everything else under
+	// /static/ goes through the chi router (bootstrap.sh, etc.). ServeMux uses
+	// longest-prefix match, so the agents handler wins for that subtree.
+	mux.Handle("/static/agents/", http.StripPrefix("/static/agents/", agentsHandler()))
 	mux.Handle("/static/", router)
 
 	distFS, err := fs.Sub(frontendDist, "frontend/dist")

@@ -50,17 +50,27 @@ func GenerateClientConfig(vpsHost string, tunnels []db.Tunnel) (string, error) {
 }
 
 // GenerateMachineSSHClientConfig generates a rathole client config for a single machine's SSH tunnel.
+// If the machine has agent fields set, an additional service entry is appended
+// so the VPS can reach the gopher-agent through the same rathole connection.
 func GenerateMachineSSHClientConfig(vpsHost string, machine *db.Machine) string {
-	return fmt.Sprintf(`[client]
-remote_addr = "%s:2333"
+	var b strings.Builder
+	fmt.Fprintf(&b, "[client]\nremote_addr = \"%s:2333\"\n\n", vpsHost)
+	fmt.Fprintf(&b, "# gopher-machine-start: %s\n", machine.ID)
+	fmt.Fprintf(&b, "[client.services.machine-%s-ssh]\n", machine.ID)
+	fmt.Fprintf(&b, "type = \"tcp\"\n")
+	fmt.Fprintf(&b, "token = \"%s\"\n", machine.RatholeSSHToken)
+	fmt.Fprintf(&b, "local_addr = \"0.0.0.0:22\"\n")
+	fmt.Fprintf(&b, "# gopher-machine-end: %s\n", machine.ID)
 
-# gopher-machine-start: %s
-[client.services.machine-%s-ssh]
-type = "tcp"
-token = "%s"
-local_addr = "0.0.0.0:22"
-# gopher-machine-end: %s
-`, vpsHost, machine.ID, machine.ID, machine.RatholeSSHToken, machine.ID)
+	if machine.AgentLocalPort > 0 && machine.AgentRatholeToken != "" {
+		fmt.Fprintf(&b, "\n# gopher-machine-agent-start: %s\n", machine.ID)
+		fmt.Fprintf(&b, "[client.services.machine-%s-agent]\n", machine.ID)
+		fmt.Fprintf(&b, "type = \"tcp\"\n")
+		fmt.Fprintf(&b, "token = \"%s\"\n", machine.AgentRatholeToken)
+		fmt.Fprintf(&b, "local_addr = \"127.0.0.1:%d\"\n", machine.AgentLocalPort)
+		fmt.Fprintf(&b, "# gopher-machine-agent-end: %s\n", machine.ID)
+	}
+	return b.String()
 }
 
 // GenerateRatholeServerConfig generates a complete rathole server config from scratch
@@ -94,6 +104,18 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel, bin
 		buf.WriteString(fmt.Sprintf("bind_addr = \"%s:%d\"\n", sshBindHost, m.TunnelPort))
 		buf.WriteString(fmt.Sprintf("# gopher-machine-end: %s\n", m.ID))
 		managedEntries++
+
+		// gopher-agent back-channel (only when the machine has been migrated).
+		// Always bound to 127.0.0.1 — the agent is for the VPS to reach the
+		// client, not for public consumption.
+		if m.AgentRemotePort > 0 && m.AgentRatholeToken != "" {
+			buf.WriteString(fmt.Sprintf("\n# gopher-machine-agent-start: %s\n", m.ID))
+			buf.WriteString(fmt.Sprintf("[server.services.machine-%s-agent]\n", m.ID))
+			buf.WriteString(fmt.Sprintf("token = \"%s\"\n", m.AgentRatholeToken))
+			buf.WriteString(fmt.Sprintf("bind_addr = \"127.0.0.1:%d\"\n", m.AgentRemotePort))
+			buf.WriteString(fmt.Sprintf("# gopher-machine-agent-end: %s\n", m.ID))
+			managedEntries++
+		}
 	}
 
 	// Write service tunnels with markers

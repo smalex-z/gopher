@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { LayoutDashboard, Server, Monitor, Network, LogOut, Map, RefreshCw, Key, Shield, ShieldCheck, ChevronDown } from 'lucide-react'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import ToastContainer from './components/ToastContainer'
+import AgentMigrationBanner from './components/AgentMigrationBanner'
 import DashboardPage from './pages/DashboardPage'
 import VPSPage from './pages/VPSPage' // repurposed as Server Info page
 import MachinesPage from './pages/MachinesPage'
@@ -172,6 +173,7 @@ function AppShell() {
         </div>
       </nav>
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <AgentMigrationBanner />
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/vps" element={<VPSPage />} />

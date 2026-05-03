@@ -79,6 +79,8 @@ _json() {
 TUNNEL_PORT=$(_json tunnel_port)
 VPS_PUBLIC_KEY=$(_json vps_ssh_public_key)
 RATHOLE_CONFIG=$(_json rathole_client_config)
+AGENT_TOKEN=$(_json agent_token 2>/dev/null || echo "")
+AGENT_PORT=$(_json agent_local_port 2>/dev/null || echo "")
 
 if [ -z "$TUNNEL_PORT" ] || [ "$TUNNEL_PORT" = "null" ]; then
   echo "ERROR: Unexpected response from server."
@@ -212,6 +214,71 @@ $SUDO systemctl daemon-reload || handle_sudo_failure
 $SUDO systemctl enable rathole-client || handle_sudo_failure
 $SUDO systemctl restart rathole-client || handle_sudo_failure
 echo "  Service installed (system). Check: systemctl status rathole-client"
+
+# ── Install gopher-agent ─────────────────────────────────────────────────────
+# Optional. If AGENT_TOKEN/AGENT_PORT are missing (older server) the install is
+# skipped and the migration UI on the dashboard will offer to add it later.
+if [ -n "$AGENT_TOKEN" ] && [ "$AGENT_TOKEN" != "null" ] && [ -n "$AGENT_PORT" ] && [ "$AGENT_PORT" != "null" ]; then
+  echo "Installing gopher-agent..."
+  AGENT_ARCH_TAG="linux-amd64"
+  case "$(uname -m)" in
+    x86_64)         AGENT_ARCH_TAG="linux-amd64" ;;
+    aarch64|arm64)  AGENT_ARCH_TAG="linux-arm64" ;;
+    *)
+      echo "  WARN: unsupported arch $(uname -m); skipping agent install"
+      AGENT_ARCH_TAG=""
+      ;;
+  esac
+  if [ -n "$AGENT_ARCH_TAG" ]; then
+    AGENT_URL="$HOST_URL/static/agents/gopher-agent-${AGENT_ARCH_TAG}"
+    rm -f /tmp/gopher-agent
+    if command -v wget &>/dev/null; then
+      wget -q "$AGENT_URL" -O /tmp/gopher-agent || { echo "  WARN: agent download failed"; rm -f /tmp/gopher-agent; }
+    else
+      curl -fsSL "$AGENT_URL" -o /tmp/gopher-agent || { echo "  WARN: agent download failed"; rm -f /tmp/gopher-agent; }
+    fi
+    if [ -s /tmp/gopher-agent ]; then
+      $SUDO mv /tmp/gopher-agent /usr/local/bin/gopher-agent
+      $SUDO chmod +x /usr/local/bin/gopher-agent
+      $SUDO mkdir -p /etc/gopher-agent
+      $SUDO tee /etc/gopher-agent/config.env >/dev/null <<EOF || true
+GOPHER_AGENT_TOKEN=$AGENT_TOKEN
+GOPHER_AGENT_PORT=$AGENT_PORT
+GOPHER_AGENT_UNIT=rathole-client.service
+EOF
+      $SUDO chmod 600 /etc/gopher-agent/config.env
+      $SUDO chown root:root /etc/gopher-agent/config.env
+
+      $SUDO tee /etc/systemd/system/gopher-agent.service >/dev/null <<EOF || true
+[Unit]
+Description=Gopher Agent (control-plane back-channel)
+After=network.target
+
+[Service]
+Type=simple
+User=$SSH_USER
+EnvironmentFile=/etc/gopher-agent/config.env
+ExecStart=/usr/local/bin/gopher-agent
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      # Allow the agent (running as $SSH_USER) to read its own config.
+      $SUDO chmod 640 /etc/gopher-agent/config.env
+      $SUDO chown root:"$SSH_USER" /etc/gopher-agent/config.env || true
+      $SUDO systemctl daemon-reload || true
+      $SUDO systemctl enable gopher-agent || true
+      $SUDO systemctl restart gopher-agent || true
+      echo "  gopher-agent installed and started on 127.0.0.1:$AGENT_PORT"
+    fi
+  fi
+else
+  echo "Skipping gopher-agent install (server didn't return agent fields)"
+fi
 
 echo ""
 echo "=== Bootstrap complete! ==="

@@ -20,6 +20,8 @@ func NewRouter(
 	updateSvc *service.UpdateService,
 	secSvc *service.SecurityService,
 	backupSvc *service.BackupService,
+	agentInstaller *service.AgentInstaller,
+	healthSvc *service.HealthService,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -40,6 +42,7 @@ func NewRouter(
 	debugH := handlers.NewDebugHandler()
 	updateH := handlers.NewUpdateHandler(updateSvc)
 	backupH := handlers.NewBackupHandler(backupSvc)
+	agentH := handlers.NewAgentHandler(agentInstaller, healthSvc)
 
 	// Public: bootstrap script download and machine self-registration
 	r.Get("/static/bootstrap.sh", bootstrapH.ServeScript)
@@ -135,6 +138,11 @@ func NewRouter(
 				r.Get("/{id}/status", machineH.Status)
 				r.Get("/{id}/network-info", machineH.NetworkInfo)
 				r.Put("/{id}/ssh-key", machineH.ReassignSSHKey)
+				// Agent migration / health
+				r.Get("/agent/pending", agentH.PendingMigrations)
+				r.Post("/{id}/install-agent", agentH.InstallAgent)
+				r.Get("/{id}/health", agentH.MachineHealth)
+				r.Post("/{id}/health/check", agentH.RunCheck)
 			})
 
 			r.Route("/tunnels", func(r chi.Router) {

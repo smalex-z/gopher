@@ -51,7 +51,17 @@ type BootstrapResponse struct {
 	VPSPublicKey  string `json:"vps_ssh_public_key"`
 	RatholeConfig string `json:"rathole_client_config"`
 	VPSHost       string `json:"vps_host"`
+	// gopher-agent install hints (the bootstrap script reads these to set up
+	// the agent alongside rathole-client). All-or-nothing: if any are zero/empty
+	// the script skips the agent install step.
+	AgentToken      string `json:"agent_token,omitempty"`
+	AgentLocalPort  int    `json:"agent_local_port,omitempty"`
+	AgentRemotePort int    `json:"agent_remote_port,omitempty"`
 }
+
+// agentLocalPortDefault is the port the agent binds on each client. Fixed for
+// simplicity — clients only ever run one agent.
+const agentLocalPortDefault = 4322
 
 // Register validates token, provisions a machine, adds the SSH back-tunnel
 // to /etc/rathole/server.toml, and returns the rathole client config.
@@ -113,17 +123,32 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 
 	ratholeToken := shortToken()
 
+	// Allocate the agent back-channel up front. Even if the bootstrap script
+	// fails to install the agent (older script, network glitch), we keep the
+	// fields populated so the existing-machine migration tool can complete it.
+	agentRemotePort, err := db.NextAgentPort()
+	if err != nil {
+		return nil, fmt.Errorf("failed to allocate agent port: %w", err)
+	}
+	agentToken := shortToken()         // bearer token for HTTP auth
+	agentRatholeToken := shortToken()  // rathole-tunnel auth (separate)
+
 	machine := &db.Machine{
-		ID:              shortToken(),
-		Name:            req.Name,
-		Username:        req.Username,
-		TunnelPort:      tunnelPort,
-		RatholeSSHToken: ratholeToken,
-		SSHKeyID:        sshKey.ID,
-		PublicSSH:       bt.PublicSSH,
-		Status:          "pending",
-		CreatedAt:       time.Now(),
-		UpdatedAt:       time.Now(),
+		ID:                shortToken(),
+		Name:              req.Name,
+		Username:          req.Username,
+		TunnelPort:        tunnelPort,
+		RatholeSSHToken:   ratholeToken,
+		SSHKeyID:          sshKey.ID,
+		PublicSSH:         bt.PublicSSH,
+		Status:            "pending",
+		AgentToken:        agentToken,
+		AgentLocalPort:    agentLocalPortDefault,
+		AgentRemotePort:   agentRemotePort,
+		AgentRatholeToken: agentRatholeToken,
+		AgentInstalled:    false,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
 	}
 	if err := db.CreateMachine(machine); err != nil {
 		return nil, fmt.Errorf("failed to create machine: %w", err)
@@ -152,11 +177,14 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 	go s.awaitSSHHealth(machine, sshKey.PrivateKey)
 
 	return &BootstrapResponse{
-		TunnelPort:    tunnelPort,
-		RatholeToken:  ratholeToken,
-		VPSPublicKey:  sshKey.PublicKey,
-		RatholeConfig: ratholeConfig,
-		VPSHost:       ratholeHost,
+		TunnelPort:      tunnelPort,
+		RatholeToken:    ratholeToken,
+		VPSPublicKey:    sshKey.PublicKey,
+		RatholeConfig:   ratholeConfig,
+		VPSHost:         ratholeHost,
+		AgentToken:      agentToken,
+		AgentLocalPort:  agentLocalPortDefault,
+		AgentRemotePort: agentRemotePort,
 	}, nil
 }
 

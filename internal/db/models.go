@@ -1,6 +1,18 @@
 package db
 
-import "time"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"time"
+)
+
+// randomID returns a 16-character hex string (8 bytes of entropy). Used as the
+// primary key for rows where we don't have a natural ID handy (e.g. HealthCheck).
+func randomID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 // BotSession records a browser that has passed the PoW challenge for a tunnel.
 type BotSession struct {
@@ -39,9 +51,33 @@ type Machine struct {
 	Status          string     `json:"status"`
 	PublicIP        string     `json:"public_ip"`
 	LastSeen        *time.Time `json:"last_seen"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	Tunnels         []Tunnel   `json:"tunnels,omitempty" gorm:"foreignKey:MachineID"`
+	// gopher-agent fields. AgentInstalled flips true once the machine has the
+	// agent binary running and reachable; AgentLastSeen tracks the last
+	// successful health poll; AgentInstallError stores the last failure reason
+	// for the migration retry UI.
+	AgentToken        string     `json:"-"`                             // bearer token shared with the agent
+	AgentLocalPort    int        `json:"agent_local_port"`              // port the agent listens on (client side, default 4322)
+	AgentRemotePort   int        `json:"agent_remote_port"`             // bind_addr port on the VPS for the agent rathole service
+	AgentRatholeToken string     `json:"-"`                             // rathole token for the agent service
+	AgentInstalled    bool       `json:"agent_installed"`               // true once install succeeded at least once
+	AgentVersion      string     `json:"agent_version,omitempty"`       // version string returned by the agent's /version endpoint
+	AgentLastSeen     *time.Time `json:"agent_last_seen,omitempty"`     // last successful agent poll
+	AgentInstallError string     `json:"agent_install_error,omitempty"` // last install failure (cleared on success)
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	Tunnels           []Tunnel   `json:"tunnels,omitempty" gorm:"foreignKey:MachineID"`
+}
+
+// HealthCheck records the result of a single agent or tunnel probe. Used by
+// the dashboard to surface recent failures and uptime.
+type HealthCheck struct {
+	ID        string    `json:"id" gorm:"primaryKey"`
+	Subject   string    `json:"subject" gorm:"index"` // "machine:<id>" or "tunnel:<id>"
+	CheckedAt time.Time `json:"checked_at" gorm:"index"`
+	OK        bool      `json:"ok"`
+	LatencyMS int       `json:"latency_ms"`
+	ErrorMsg  string    `json:"error_msg,omitempty"`
+	Recovered bool      `json:"recovered,omitempty"` // true when this check followed a successful auto-recovery
 }
 
 type Tunnel struct {

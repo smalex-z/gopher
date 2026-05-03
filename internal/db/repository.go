@@ -107,9 +107,9 @@ func DeleteTunnel(id string) error {
 	return DB.Delete(&Tunnel{}, "id = ?", id).Error
 }
 
-// allUsedPorts returns every port currently assigned across both service tunnels
-// and machine SSH tunnels. Used by port-assignment and conflict-check functions
-// so neither table is blind to the other.
+// allUsedPorts returns every port currently assigned across service tunnels,
+// machine SSH tunnels, and gopher-agent rathole back-channels. Used by
+// port-assignment and conflict-check functions so no table is blind to another.
 func allUsedPorts() (map[int]bool, error) {
 	used := make(map[int]bool)
 	var tunnels []Tunnel
@@ -122,15 +122,32 @@ func allUsedPorts() (map[int]bool, error) {
 		}
 	}
 	var machines []Machine
-	if err := DB.Select("tunnel_port").Find(&machines).Error; err != nil {
+	if err := DB.Select("tunnel_port", "agent_remote_port").Find(&machines).Error; err != nil {
 		return nil, err
 	}
 	for _, m := range machines {
 		if m.TunnelPort > 0 {
 			used[m.TunnelPort] = true
 		}
+		if m.AgentRemotePort > 0 {
+			used[m.AgentRemotePort] = true
+		}
 	}
 	return used, nil
+}
+
+// NextAgentPort returns the next available port for an agent rathole service,
+// guaranteed free across all existing port assignments.
+func NextAgentPort() (int, error) {
+	used, err := allUsedPorts()
+	if err != nil {
+		return 0, err
+	}
+	port := 1024
+	for used[port] {
+		port++
+	}
+	return port, nil
 }
 
 // NextRatholePort returns the next available port for a service tunnel,
@@ -404,4 +421,58 @@ func CountTOTPDevices() (int64, error) {
 func TouchTOTPDevice(id string) error {
 	now := time.Now()
 	return DB.Model(&TOTPDevice{}).Where("id = ?", id).Update("last_used_at", &now).Error
+}
+
+// ── Health checks ────────────────────────────────────────────────────────────
+
+func RecordHealthCheck(c *HealthCheck) error {
+	if c.ID == "" {
+		c.ID = randomID()
+	}
+	if c.CheckedAt.IsZero() {
+		c.CheckedAt = time.Now()
+	}
+	return DB.Create(c).Error
+}
+
+// GetRecentHealthChecks returns the newest N entries for the given subject.
+func GetRecentHealthChecks(subject string, limit int) ([]HealthCheck, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	var rows []HealthCheck
+	if err := DB.Where("subject = ?", subject).Order("checked_at DESC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// PurgeHealthChecksBefore deletes rows older than `before`. Called by a janitor
+// goroutine to keep the table from unbounded growth.
+func PurgeHealthChecksBefore(before time.Time) (int64, error) {
+	res := DB.Where("checked_at < ?", before).Delete(&HealthCheck{})
+	return res.RowsAffected, res.Error
+}
+
+// LatestHealthCheck returns the most recent check for a subject, or nil if none.
+func LatestHealthCheck(subject string) (*HealthCheck, error) {
+	var row HealthCheck
+	err := DB.Where("subject = ?", subject).Order("checked_at DESC").First(&row).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+// MachinesWithoutAgent returns machines that haven't completed the agent install.
+// Used by the dashboard banner to nudge users into the migration flow.
+func MachinesWithoutAgent() ([]Machine, error) {
+	var rows []Machine
+	if err := DB.Where("agent_installed = ? OR agent_installed IS NULL", false).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }

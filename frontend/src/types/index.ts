@@ -24,9 +24,26 @@ export interface Machine {
   status: string
   public_ip?: string
   last_seen: string | null
+  // gopher-agent fields
+  agent_local_port?: number
+  agent_remote_port?: number
+  agent_installed?: boolean
+  agent_version?: string
+  agent_last_seen?: string | null
+  agent_install_error?: string
   created_at: string
   updated_at: string
   tunnels?: Tunnel[]
+}
+
+export interface HealthCheck {
+  id: string
+  subject: string
+  checked_at: string
+  ok: boolean
+  latency_ms: number
+  error_msg?: string
+  recovered?: boolean
 }
 
 export interface Tunnel {
