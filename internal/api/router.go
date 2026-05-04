@@ -19,6 +19,7 @@ func NewRouter(
 	localSvc *service.LocalSetupService,
 	updateSvc *service.UpdateService,
 	secSvc *service.SecurityService,
+	backupSvc *service.BackupService,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -39,6 +40,7 @@ func NewRouter(
 	debugH := handlers.NewDebugHandler()
 	updateH := handlers.NewUpdateHandler(updateSvc)
 	externalH := handlers.NewExternalAPIHandler(bootstrapSvc, tunnelSvc, machineSvc, localSvc)
+	backupH := handlers.NewBackupHandler(backupSvc)
 
 	// Public: bootstrap script download and machine self-registration
 	r.Get("/static/bootstrap.sh", bootstrapH.ServeScript)
@@ -107,6 +109,8 @@ func NewRouter(
 				r.Put("/fail2ban/config", securityH.SaveFail2banConfig)
 				r.Post("/fail2ban/whitelist", securityH.AddWhitelistIP)
 				r.Delete("/fail2ban/whitelist/{ip}", securityH.RemoveWhitelistIP)
+				r.Get("/backup/download", backupH.Download)
+				r.Post("/backup/restore", backupH.Restore)
 			})
 
 			r.Route("/auth/2fa", func(r chi.Router) {

@@ -52,4 +52,28 @@ export const securityApi = {
     client.delete(`/security/fail2ban/whitelist/${encodeURIComponent(ip)}`).then(r => r.data),
   staleTokenAttempts: () =>
     client.get<{ data: StaleTokenAttempt[] }>('/security/stale-tokens').then(r => r.data.data),
+
+  // Triggers a browser file download of a fresh gopher.db snapshot.
+  downloadBackup: async () => {
+    const res = await client.get('/security/backup/download', { responseType: 'blob' })
+    const disp = String(res.headers['content-disposition'] ?? '')
+    const m = /filename="?([^";]+)"?/.exec(disp)
+    const filename = m?.[1] ?? 'gopher-backup.db'
+    const url = URL.createObjectURL(res.data as Blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  },
+
+  restoreBackup: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return client.post('/security/backup/restore', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }).then(r => r.data)
+  },
 }
