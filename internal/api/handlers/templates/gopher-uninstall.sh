@@ -1,10 +1,18 @@
 #!/bin/sh
-# gopher-uninstall - Gopher machine uninstall/cleanup script
+# gopher-uninstall - Gopher machine helper script (root-privileged via sudoers)
 #
 # Usage:
-#   gopher-uninstall                               Full uninstall (removes everything)
-#   gopher-uninstall --remove-tunnel <TUNNEL_ID>   Remove a specific tunnel from client.toml
-#   gopher-uninstall --remove-machine <MACHINE_ID> Remove machine SSH section from client.toml
+#   gopher-uninstall                                       Full uninstall (removes everything)
+#   gopher-uninstall --remove-tunnel  <TUNNEL_ID>          Remove a tunnel from client.toml
+#   gopher-uninstall --remove-machine <MACHINE_ID>         Remove machine SSH section from client.toml
+#   gopher-uninstall --install-agent  <URL> <TOKEN> <PORT> <USER>
+#                                                          Install gopher-agent on this machine
+#
+# Invoked via `sudo -n /usr/local/bin/gopher-uninstall ...` and runs as root.
+# The narrow sudoers rule the bootstrap installs lets the SSH user execute
+# this binary without a password, so the dashboard can drive privileged
+# operations through it without granting NOPASSWD on broader commands like
+# `install`, `tee`, `mkdir`, or `systemctl`.
 
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 
@@ -118,9 +126,22 @@ $SUDO rm -rf /etc/rathole 2>/dev/null || true
 echo "Removing rathole binary..."
 $SUDO rm -f /usr/local/bin/rathole 2>/dev/null || true
 
+echo "Stopping user-mode gopher-agent (if any)..."
+# User-mode installs live entirely in $REAL_HOME — kill the running process,
+# strip cron rules, remove files. Cron-strip runs as the user (we're root,
+# so we need sudo -u to drop down) since `crontab -` modifies the calling
+# user's crontab.
+pkill -f "$REAL_HOME/bin/gopher-agent" 2>/dev/null || true
+if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+  sudo -u "$SUDO_USER" sh -c '(crontab -l 2>/dev/null | grep -v "gopher-agent" || true) | crontab -' 2>/dev/null || true
+fi
+
 echo "Removing gopher-agent binary and config..."
 $SUDO rm -rf /etc/gopher-agent 2>/dev/null || true
 $SUDO rm -f /usr/local/bin/gopher-agent 2>/dev/null || true
+rm -f "$REAL_HOME/bin/gopher-agent" 2>/dev/null || true
+rm -rf "$REAL_HOME/.config/gopher-agent" 2>/dev/null || true
+rm -f "$REAL_HOME/.cache/gopher-agent.log" 2>/dev/null || true
 
 # Drop sudoers entries last so the operations above could still use sudo -n.
 $SUDO rm -f /etc/sudoers.d/gopher 2>/dev/null || true

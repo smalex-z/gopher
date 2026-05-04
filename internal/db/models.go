@@ -118,6 +118,20 @@ type BootstrapToken struct {
 	CreatedAt  time.Time  `json:"created_at"`
 }
 
+// MigrationToken is the short ephemeral token used by the agent-install
+// dashboard flow. The dashboard creates one when the operator clicks "Install
+// Agent", embeds it in the curl-bash one-liner, and the operator pastes that
+// command on the target machine. The /migrate/{token} endpoint resolves the
+// token to a machine and renders migrate.sh with the per-machine secrets
+// (agent token, port, rathole token) baked in — so secrets stay out of shell
+// history and access logs.
+type MigrationToken struct {
+	Token     string    `gorm:"primaryKey"`
+	MachineID string    `gorm:"index"`
+	ExpiresAt time.Time
+	CreatedAt time.Time
+}
+
 type AppSettings struct {
 	ID             string    `json:"id" gorm:"primaryKey"`
 	PasswordHash   string    `json:"-"`

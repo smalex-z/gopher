@@ -315,6 +315,47 @@ func MarkTokenUsed(tokenID, machineID string) error {
 	}).Error
 }
 
+// CreateMigrationToken stores a new ephemeral token for an agent-install
+// migration. Token is returned to the caller; caller embeds it in the
+// curl-bash one-liner shown in the dashboard.
+func CreateMigrationToken(token, machineID string, ttl time.Duration) error {
+	mt := &MigrationToken{
+		Token:     token,
+		MachineID: machineID,
+		ExpiresAt: time.Now().Add(ttl),
+		CreatedAt: time.Now(),
+	}
+	return DB.Create(mt).Error
+}
+
+// GetMigrationToken resolves a migration token to its target machine ID.
+// Returns an error if the token is unknown or expired.
+//
+// The token is NOT consumed on first read — migrate.sh is idempotent and the
+// operator may need to re-run it within the TTL window (rate-limited
+// connection, retry after fixing a one-off network issue, etc.). After the
+// TTL elapses the dashboard generates a new token.
+func GetMigrationToken(token string) (*MigrationToken, error) {
+	var mt MigrationToken
+	if err := DB.First(&mt, "token = ?", token).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "migration_token", ID: token}
+		}
+		return nil, err
+	}
+	if time.Now().After(mt.ExpiresAt) {
+		return nil, fmt.Errorf("migration token expired")
+	}
+	return &mt, nil
+}
+
+// PurgeExpiredMigrationTokens deletes rows whose ExpiresAt is in the past.
+// Called periodically so the table doesn't grow forever.
+func PurgeExpiredMigrationTokens() (int64, error) {
+	res := DB.Where("expires_at < ?", time.Now()).Delete(&MigrationToken{})
+	return res.RowsAffected, res.Error
+}
+
 // NextSSHTunnelPort returns the next available port for a machine SSH tunnel,
 // guaranteed free across both machine SSH tunnels and service tunnels.
 // Starts from 1024 (first non-privileged port) and finds the first gap.

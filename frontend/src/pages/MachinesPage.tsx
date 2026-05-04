@@ -149,12 +149,34 @@ export default function MachinesPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
+  // Agent install can't run remotely from the dashboard — installing the
+  // agent needs root on the target. So clicking "Install Agent" returns
+  // the curl-bash one-liner the operator pastes on the machine. Once the
+  // agent comes online, HealthService detects it and the badge flips green
+  // automatically (no second click required).
+  const [agentInstallModal, setAgentInstallModal] = useState<{
+    open: boolean
+    machineName: string
+    command: string
+    instruction: string
+  }>({ open: false, machineName: '', command: '', instruction: '' })
+  const [agentInstallCopied, setAgentInstallCopied] = useState(false)
+
   const installAgentMutation = useMutation({
     mutationFn: (id: string) => machinesApi.installAgent(id),
-    onSuccess: (_, id) => {
+    onSuccess: (resp, id) => {
+      const data = resp.data
+      if (data?.command) {
+        setAgentInstallModal({
+          open: true,
+          machineName: machines.find(m => m.id === id)?.name ?? 'machine',
+          command: data.command,
+          instruction: data.instruction ?? '',
+        })
+        setAgentInstallCopied(false)
+      }
       qc.invalidateQueries({ queryKey: ['machines'] })
       qc.invalidateQueries({ queryKey: ['agent-pending'] })
-      toast.success(`Agent installed on ${machines.find(m => m.id === id)?.name ?? 'machine'}`)
     },
     onError: (e: Error) => toast.error(`Agent install failed: ${e.message}`),
   })
@@ -639,6 +661,56 @@ export default function MachinesPage() {
                 className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm"
               >
                 {bootstrapModal.phase === 'success' ? 'Done' : 'Close'}
+              </button>
+            </div>
+          </div>
+        </div></div>
+      )}
+
+      {/* Agent Install Modal — operator pastes the curl-bash on the target.
+          Closes automatically once HealthService detects the agent is up
+          (Machine.agent_installed flips true via the health poll loop). */}
+      {agentInstallModal.open && (
+        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl">
+            <div className="flex items-center justify-between p-4 border-b">
+              <h2 className="text-lg font-semibold">Install agent on {agentInstallModal.machineName}</h2>
+              <button
+                onClick={() => setAgentInstallModal(m => ({ ...m, open: false }))}
+                className="text-gray-400 hover:text-gray-600 text-xl"
+              >
+                ×
+              </button>
+            </div>
+            <div className="p-4 space-y-4">
+              <p className="text-sm text-gray-600">{agentInstallModal.instruction}</p>
+              <div className="relative">
+                <pre className="bg-gray-900 text-green-400 text-xs rounded-lg p-4 pr-12 overflow-x-auto whitespace-pre-wrap break-all">
+                  {agentInstallModal.command}
+                </pre>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(agentInstallModal.command).then(() => {
+                      setAgentInstallCopied(true)
+                      setTimeout(() => setAgentInstallCopied(false), 2000)
+                    })
+                  }}
+                  className="absolute top-2 right-2 p-1.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
+                  title="Copy command"
+                >
+                  {agentInstallCopied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+                </button>
+              </div>
+              <div className="text-xs text-gray-500 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
+                One-time per machine. Once you paste, the agent registers itself via the existing rathole tunnel — no second click needed. The badge on this page flips green within ~60s.
+              </div>
+            </div>
+            <div className="flex justify-end p-4 border-t">
+              <button
+                onClick={() => setAgentInstallModal(m => ({ ...m, open: false }))}
+                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm"
+              >
+                Close
               </button>
             </div>
           </div>

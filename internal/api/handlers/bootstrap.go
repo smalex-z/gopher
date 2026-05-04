@@ -19,6 +19,9 @@ var bootstrapScriptTmpl string
 //go:embed templates/gopher-uninstall.sh
 var gopherUninstallScript string
 
+//go:embed templates/migrate.sh
+var migrateScriptTmpl string
+
 type BootstrapHandler struct {
 	svc *service.BootstrapService
 }
@@ -108,6 +111,63 @@ func (h *BootstrapHandler) ServeUninstallScript(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, gopherUninstallScript)
+}
+
+// GET /static/migrate.sh - serve the migrate script. The script takes a
+// migration token as $1 and calls back to POST /api/migrate to fetch the
+// per-machine secrets. Mirrors the bootstrap.sh pattern: a token-bearing
+// shell script + an API callback that resolves the token to config.
+func (h *BootstrapHandler) ServeMigrateScript(w http.ResponseWriter, r *http.Request) {
+	tmpl, err := template.New("migrate").Delims("{{", "}}").Parse(migrateScriptTmpl)
+	if err != nil {
+		http.Error(w, "migrate template error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, struct{ HostURL string }{HostURL: hostURL(r)}); err != nil {
+		http.Error(w, "migrate template error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/x-shellscript")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, buf.String())
+}
+
+// POST /api/migrate - called by migrate.sh during agent install. The script
+// passes the token it was invoked with; we resolve it to a machine and
+// return the per-machine secrets the script needs to lay down config files.
+//
+// Symmetric with POST /api/bootstrap, which is called by bootstrap.sh.
+func (h *BootstrapHandler) Migrate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid request body")
+		return
+	}
+	if req.Token == "" {
+		response.BadRequest(w, "token is required")
+		return
+	}
+
+	mt, err := db.GetMigrationToken(req.Token)
+	if err != nil {
+		response.BadRequest(w, "invalid or expired migration token")
+		return
+	}
+	machine, err := db.GetMachine(mt.MachineID)
+	if err != nil {
+		response.InternalError(w, "machine not found for token")
+		return
+	}
+
+	response.Success(w, map[string]any{
+		"machine_id":     machine.ID,
+		"agent_token":    machine.AgentToken,
+		"agent_port":     machine.AgentLocalPort,
+		"rathole_token":  machine.AgentRatholeToken,
+	})
 }
 
 func generateBootstrapScript(hostURL string) string {

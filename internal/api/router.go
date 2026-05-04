@@ -47,7 +47,9 @@ func NewRouter(
 	// Public: bootstrap script download and machine self-registration
 	r.Get("/static/bootstrap.sh", bootstrapH.ServeScript)
 	r.Get("/static/gopher-uninstall.sh", bootstrapH.ServeUninstallScript)
+	r.Get("/static/migrate.sh", bootstrapH.ServeMigrateScript)
 	r.Post("/api/bootstrap", bootstrapH.Register)
+	r.Post("/api/migrate", bootstrapH.Migrate)
 
 	r.Route("/api", func(r chi.Router) {
 		// Public auth + health routes

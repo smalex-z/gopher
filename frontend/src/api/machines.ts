@@ -16,7 +16,8 @@ export const machinesApi = {
   reassignSSHKey: (id: string, sshKeyID: string) => client.put(`/machines/${id}/ssh-key`, { ssh_key_id: sshKeyID }).then(r => r.data),
   // gopher-agent / health endpoints
   pendingAgents: () => client.get<ApiResponse<Machine[]>>('/machines/agent/pending').then(r => r.data),
-  installAgent: (id: string) => client.post<ApiResponse<Machine>>(`/machines/${id}/install-agent`).then(r => r.data),
+  installAgent: (id: string) =>
+    client.post<ApiResponse<{ command: string; instruction: string }>>(`/machines/${id}/install-agent`).then(r => r.data),
   health: (id: string) =>
     client.get<{ data: { latest: HealthCheck | null; recent: HealthCheck[] } }>(`/machines/${id}/health`).then(r => r.data.data),
   runCheck: (id: string) =>

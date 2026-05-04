@@ -18,6 +18,15 @@ client.interceptors.response.use(
         window.location.href = '/login'
       }
     }
+    // Surface the server's structured error in err.message so every caller
+    // that does `toast.error(e.message)` gets the real reason instead of
+    // axios's generic "Request failed with status code 400". The original
+    // axios message stays available on err.config / err.code for callers
+    // that want it.
+    const apiMessage = err.response?.data?.error
+    if (typeof apiMessage === 'string' && apiMessage.length > 0) {
+      err.message = apiMessage
+    }
     return Promise.reject(err)
   }
 )

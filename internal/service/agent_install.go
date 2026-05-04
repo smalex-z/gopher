@@ -1,21 +1,21 @@
 package service
 
 import (
-	"bytes"
-	"context"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/smalex-z/gopher/internal/db"
-	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
-// AgentInstaller pushes the gopher-agent to an existing machine via the SSH
-// back-channel and brings the rathole config in sync so the VPS can reach it.
+// AgentInstaller produces the operator-paste command that installs the
+// gopher-agent on an existing (already-bootstrapped) machine. The actual
+// install runs as root on the target via the migrate.sh template.
 //
-// All steps are idempotent: a partial previous run is safe to retry.
+// It does not SSH into the machine: the install needs root, the SSH user
+// only has narrow NOPASSWD sudo, and there's no software path around that
+// without operator interaction. Surfacing the one-liner is the honest UX.
 type AgentInstaller struct {
 	local *LocalSetupService
 }
@@ -24,41 +24,78 @@ func NewAgentInstaller(local *LocalSetupService) *AgentInstaller {
 	return &AgentInstaller{local: local}
 }
 
-// Install runs the full installation flow against an existing machine. On
-// success the machine record is marked AgentInstalled=true and AgentInstallError
-// is cleared. On failure the error message is persisted so the migration UI
-// can surface it for manual retry.
-func (i *AgentInstaller) Install(machineID string) error {
-	machine, err := db.GetMachine(machineID)
-	if err != nil {
-		return err
-	}
-
-	if err := i.installInner(machine); err != nil {
-		machine.AgentInstallError = truncate(err.Error(), 500)
-		machine.UpdatedAt = time.Now()
-		_ = db.UpdateMachine(machine)
-		return err
-	}
-
-	now := time.Now()
-	machine.AgentInstalled = true
-	machine.AgentInstallError = ""
-	machine.AgentLastSeen = &now
-	machine.UpdatedAt = now
-	if err := db.UpdateMachine(machine); err != nil {
-		return fmt.Errorf("save machine: %w", err)
-	}
-	return nil
+// MigrateInstructions is what the dashboard's Install Agent button returns.
+// The operator pastes Command on the machine. The agent registers itself once
+// the migrate script finishes; HealthService detects it and flips
+// Machine.AgentInstalled=true on the next poll.
+type MigrateInstructions struct {
+	Command     string `json:"command"`
+	Instruction string `json:"instruction"`
 }
 
-func (i *AgentInstaller) installInner(machine *db.Machine) error {
-	if machine.TunnelPort == 0 {
-		return fmt.Errorf("machine has no tunnel port — cannot SSH for install")
+// Install allocates per-machine agent fields if missing, reconciles the
+// VPS-side rathole config so the back-channel bind exists, and returns the
+// operator-paste command that installs the agent on the target.
+//
+// Why operator-paste: agent install needs root on the target (creates a
+// system user, writes /etc/systemd/system/, drops a sudoers entry, installs
+// to /usr/local/bin). Existing machines bootstrapped before the agent
+// existed and have only narrow NOPASSWD sudo on a single helper script —
+// not enough for any of that. The dashboard cannot fabricate root on the
+// target. The operator's first paste creates the privileged actor (the
+// agent itself), and from then on every operation is dashboard-driven.
+func (i *AgentInstaller) Install(machineID string) (*MigrateInstructions, error) {
+	machine, err := db.GetMachine(machineID)
+	if err != nil {
+		return nil, err
 	}
 
-	// Allocate agent fields if missing (they're populated for newly-bootstrapped
-	// machines but old records pre-date the schema).
+	if err := i.allocateAgentFields(machine); err != nil {
+		return nil, err
+	}
+
+	settings, err := db.GetSettings()
+	if err != nil {
+		return nil, fmt.Errorf("settings lookup: %w", err)
+	}
+	vpsURL, err := buildAgentDownloadBaseURL(settings)
+	if err != nil {
+		return nil, err
+	}
+
+	// Reconcile so the new agent's server.services bind exists by the time
+	// the operator pastes the migrate command.
+	if err := i.local.ReconcileServerConfig(); err != nil {
+		log.Printf("agent install (machine %s): VPS rathole reconcile failed: %v", machine.ID, err)
+	}
+
+	// Mint a short-lived migration token. migrate.sh on the target machine
+	// will POST it to /api/migrate to retrieve the per-machine secrets it
+	// needs (agent token, port, rathole token) — mirrors the bootstrap.sh /
+	// /api/bootstrap callback pattern. The token is the only thing that
+	// touches shell history.
+	const migrationTokenTTL = 1 * time.Hour
+	token := shortToken()
+	if err := db.CreateMigrationToken(token, machine.ID, migrationTokenTTL); err != nil {
+		return nil, fmt.Errorf("create migration token: %w", err)
+	}
+
+	cmd := fmt.Sprintf("curl -fsSL %s/static/migrate.sh | sudo bash -s -- %s", vpsURL, token)
+	return &MigrateInstructions{
+		Command: cmd,
+		Instruction: "Run this on the machine (one-time per machine; requires sudo). " +
+			"The agent registers itself once installed — the dashboard badge flips " +
+			"green on the next health check (≤60s).",
+	}, nil
+}
+
+// allocateAgentFields generates per-machine agent secrets and ports if the
+// machine record is missing them. Pre-agent-era machines have these fields
+// at their zero value; new bootstraps populate them at registration time.
+func (i *AgentInstaller) allocateAgentFields(machine *db.Machine) error {
+	if machine.TunnelPort == 0 {
+		return fmt.Errorf("machine has no tunnel port; bootstrap may be incomplete")
+	}
 	dirty := false
 	if machine.AgentLocalPort == 0 {
 		machine.AgentLocalPort = agentLocalPortDefault
@@ -82,225 +119,47 @@ func (i *AgentInstaller) installInner(machine *db.Machine) error {
 	}
 	if dirty {
 		if err := db.UpdateMachine(machine); err != nil {
-			return fmt.Errorf("persist agent allocation: %w", err)
+			return fmt.Errorf("persist agent field allocation: %w", err)
 		}
-	}
-
-	// Connect to the machine through its existing SSH back-tunnel.
-	sshKey, err := db.GetSSHKeyForMachine(machine)
-	if err != nil {
-		return fmt.Errorf("ssh key lookup: %w", err)
-	}
-	client, err := sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
-	if err != nil {
-		return fmt.Errorf("ssh dial: %w", err)
-	}
-	defer client.Close()
-
-	// Detect arch — uname -m is reliable across the distros we already support.
-	archOut, err := client.Execute("uname -m")
-	if err != nil {
-		return fmt.Errorf("detect arch: %w", err)
-	}
-	arch := strings.TrimSpace(archOut)
-	var binaryName string
-	switch arch {
-	case "x86_64":
-		binaryName = "gopher-agent-linux-amd64"
-	case "aarch64", "arm64":
-		binaryName = "gopher-agent-linux-arm64"
-	default:
-		return fmt.Errorf("unsupported arch %q (only amd64/arm64 supported today)", arch)
-	}
-
-	// Reach back to the VPS for the binary. The client uses the same VPS
-	// address rathole already knows about — pulled out of the rathole config.
-	settings, err := db.GetSettings()
-	if err != nil {
-		return fmt.Errorf("settings lookup: %w", err)
-	}
-	vpsHost := settings.ServerHost
-	if vpsHost == "" {
-		vpsHost = settings.Domain
-	}
-	if vpsHost == "" {
-		return fmt.Errorf("no VPS host configured; set domain or server_host first")
-	}
-	vpsURL := vpsHost
-	if !strings.HasPrefix(vpsURL, "http://") && !strings.HasPrefix(vpsURL, "https://") {
-		vpsURL = "https://" + vpsURL
-		// Caddy may not be configured (LocalSetupDone=false). Fall back to
-		// HTTP-on-dashboard-port in that case.
-		if !settings.LocalSetupDone {
-			vpsURL = fmt.Sprintf("http://%s:%d", vpsHost, dashboardPort)
-		}
-	}
-
-	// Stage the install script. Single shell invocation = single SSH session,
-	// so we get atomic-ish behaviour even if the connection drops mid-run.
-	script := buildAgentInstallScript(agentInstallParams{
-		BinaryURL: vpsURL + "/static/agents/" + binaryName,
-		Token:     machine.AgentToken,
-		Port:      machine.AgentLocalPort,
-		Username:  machine.Username,
-	})
-
-	var stdout bytes.Buffer
-	if err := client.ExecuteWithOutput(script, &stdout); err != nil {
-		return fmt.Errorf("install script failed: %w (%s)", err, truncate(stdout.String(), 400))
-	}
-
-	// Push an updated rathole client config that includes the agent service.
-	// We must preserve any existing service tunnels: regenerating from scratch
-	// would wipe them. Read existing -> merge -> write, same path
-	// AddServiceTunnel uses, but over the SSH session we already have open.
-	machineTunnels, err := db.GetTunnelsByMachine(machine.ID)
-	if err != nil {
-		return fmt.Errorf("load machine tunnels: %w", err)
-	}
-	if err := i.pushRatholeConfig(client, machine, machineTunnels, vpsHost); err != nil {
-		return fmt.Errorf("update rathole client config: %w", err)
-	}
-
-	// Reconcile the VPS-side rathole config so the new server.services entry
-	// for this machine's agent is bound.
-	if err := i.local.ReconcileServerConfig(); err != nil {
-		log.Printf("agent install: VPS rathole reconcile failed: %v", err)
-		// Not fatal — the next reconcile loop will pick it up.
-	}
-
-	// Verify the agent is reachable through the new back-channel. rathole's
-	// notify watcher reloads on file change, so the new agent service comes
-	// up without restarting (which would drop every existing tunnel).
-	if err := i.verifyAgentReachable(machine); err != nil {
-		return fmt.Errorf("agent installed but not reachable yet: %w", err)
 	}
 	return nil
 }
 
-// pushRatholeConfig reads the machine's current client.toml, merges in the
-// updated managed sections (machine SSH + agent + tunnels), and writes back.
-// Never restarts rathole-client — its notify watcher picks up file changes
-// via inotify and reloads in-place, preserving every active tunnel.
-func (i *AgentInstaller) pushRatholeConfig(client *sshpkg.SSHClient, machine *db.Machine, tunnels []db.Tunnel, vpsHost string) error {
-	existing, err := client.Execute("cat /etc/rathole/client.toml 2>/dev/null")
-	if err != nil {
-		// Best-effort: an empty existing config means mergeClientManagedConfig
-		// will seed a [client] header from vpsHost.
-		existing = ""
+// buildAgentDownloadBaseURL returns the URL prefix the client machine should
+// curl to fetch the agent binary. Three cases:
+//
+//   - settings.ServerHost includes a scheme (http:// or https://) — treat as
+//     a full override and use as-is. Power-users overriding for split DNS,
+//     internal load balancers, etc.
+//   - LocalSetupDone (Caddy is the entry point) — the dashboard lives at
+//     router.<domain>; that's the only hostname Caddy has a TLS site for.
+//   - Pre-Caddy bootstrap — hit the dashboard directly on its non-TLS port.
+func buildAgentDownloadBaseURL(settings *db.AppSettings) (string, error) {
+	if settings == nil {
+		return "", fmt.Errorf("nil settings")
 	}
-	merged, err := mergeClientManagedConfig(existing, machine, tunnels, vpsHost)
-	if err != nil {
-		return err
-	}
-	if err := client.UploadFileSudo([]byte(merged), "/etc/rathole/client.toml", machine.Username); err != nil {
-		return err
-	}
-	// Cover the "rathole-client unit was stopped" case without flapping a
-	// healthy unit (start is a no-op on active units; restart would drop
-	// every existing tunnel on the machine).
-	_, _ = client.Execute(`sudo -n systemctl start rathole-client 2>/dev/null; true`)
-	return nil
-}
-
-func (i *AgentInstaller) verifyAgentReachable(machine *db.Machine) error {
-	deadline := time.Now().Add(30 * time.Second)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		client := NewAgentClient(machine)
-		v, err := client.Version(ctx)
-		cancel()
-		if err == nil {
-			machine.AgentVersion = v
-			return nil
+	if settings.ServerHost != "" {
+		if strings.HasPrefix(settings.ServerHost, "http://") || strings.HasPrefix(settings.ServerHost, "https://") {
+			return strings.TrimRight(settings.ServerHost, "/"), nil
 		}
-		lastErr = err
-		time.Sleep(2 * time.Second)
 	}
-	if lastErr != nil {
-		return lastErr
+	host := settings.ServerHost
+	if host == "" {
+		host = settings.Domain
 	}
-	return fmt.Errorf("timed out waiting for agent")
-}
-
-type agentInstallParams struct {
-	BinaryURL string
-	Token     string
-	Port      int
-	Username  string
-}
-
-// buildAgentInstallScript returns a single shell script that downloads the
-// agent, writes the systemd unit + config, and starts the service. Idempotent:
-// running it twice is fine (configs get overwritten, systemctl restart is
-// safe). Uses heredocs to keep the inputs hermetic — no quoting headaches.
-func buildAgentInstallScript(p agentInstallParams) string {
-	return fmt.Sprintf(`set -e
-SUDO=$(command -v sudo >/dev/null 2>&1 && echo "sudo -n" || echo "")
-TMP=/tmp/gopher-agent.$$
-trap 'rm -f "$TMP"' EXIT
-
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL --insecure %q -o "$TMP"
-elif command -v wget >/dev/null 2>&1; then
-  wget -q --no-check-certificate %q -O "$TMP"
-else
-  echo "no curl or wget available" >&2
-  exit 1
-fi
-
-$SUDO install -m 0755 "$TMP" /usr/local/bin/gopher-agent
-$SUDO mkdir -p /etc/gopher-agent
-$SUDO tee /etc/gopher-agent/config.env >/dev/null <<'GOPHER_AGENT_CONFIG_EOF'
-GOPHER_AGENT_TOKEN=%s
-GOPHER_AGENT_PORT=%d
-GOPHER_AGENT_UNIT=rathole-client.service
-GOPHER_AGENT_CONFIG_EOF
-$SUDO chmod 640 /etc/gopher-agent/config.env
-$SUDO chown root:%s /etc/gopher-agent/config.env || true
-
-$SUDO tee /etc/systemd/system/gopher-agent.service >/dev/null <<'GOPHER_AGENT_UNIT_EOF'
-[Unit]
-Description=Gopher Agent (control-plane back-channel)
-After=network.target
-
-[Service]
-Type=simple
-User=%s
-EnvironmentFile=/etc/gopher-agent/config.env
-ExecStart=/usr/local/bin/gopher-agent
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-GOPHER_AGENT_UNIT_EOF
-
-$SUDO systemctl daemon-reload
-$SUDO systemctl enable gopher-agent >/dev/null 2>&1 || true
-$SUDO systemctl restart gopher-agent
-
-# Ensure the agent's user has sudoers permission for the systemctl verbs the
-# agent's /restart-rathole endpoint actually invokes. Old bootstraps only
-# granted "restart rathole-client"; the agent now uses start (notify-friendly)
-# and reset-failed (clears the unit's failure burst counter).
-SUDOERS_FILE="/etc/sudoers.d/gopher"
-ensure_line() {
-  local line="$1"
-  $SUDO grep -qF "$line" "$SUDOERS_FILE" 2>/dev/null || \
-    echo "$line" | $SUDO tee -a "$SUDOERS_FILE" >/dev/null
-}
-$SUDO touch "$SUDOERS_FILE"
-ensure_line "%[5]s ALL=(ALL) NOPASSWD: /usr/bin/systemctl start rathole-client"
-ensure_line "%[5]s ALL=(ALL) NOPASSWD: /usr/bin/systemctl reset-failed rathole-client"
-$SUDO chmod 0440 "$SUDOERS_FILE"
-
-echo "gopher-agent installed and running"
-`,
-		p.BinaryURL, p.BinaryURL, p.Token, p.Port, p.Username, p.Username)
+	if host == "" {
+		return "", fmt.Errorf("no VPS host configured; set domain or server_host first")
+	}
+	if settings.LocalSetupDone {
+		// Caddy fronts the dashboard at router.<domain>. ServerHost-as-host
+		// is honoured if explicitly set (operator may already have given us
+		// the dashboard hostname directly).
+		if settings.ServerHost == "" {
+			host = "router." + host
+		}
+		return "https://" + host, nil
+	}
+	return fmt.Sprintf("http://%s:%d", host, dashboardPort), nil
 }
 
 func truncate(s string, n int) string {
