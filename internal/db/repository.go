@@ -58,6 +58,23 @@ func CreateMachine(machine *Machine) error {
 	return DB.Create(machine).Error
 }
 
+// GetMachineByAgentToken resolves a machine by its per-machine agent bearer
+// token. Used by the self-delete endpoint, where the dying client
+// authenticates with the same token its agent uses for the back-channel.
+func GetMachineByAgentToken(token string) (*Machine, error) {
+	if token == "" {
+		return nil, &apperrors.NotFoundError{Resource: "machine", ID: "(empty token)"}
+	}
+	var m Machine
+	if err := DB.Where("agent_token = ?", token).First(&m).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "machine", ID: "(by agent token)"}
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
 func UpdateMachine(machine *Machine) error {
 	return DB.Save(machine).Error
 }

@@ -2,23 +2,21 @@
 # gopher-uninstall - Gopher machine helper script (root-privileged via sudoers)
 #
 # Usage:
-#   gopher-uninstall                                       Full uninstall (removes everything)
-#   gopher-uninstall --remove-tunnel  <TUNNEL_ID>          Remove a tunnel from client.toml
-#   gopher-uninstall --remove-machine <MACHINE_ID>         Remove machine SSH section from client.toml
-#   gopher-uninstall --install-agent  <URL> <TOKEN> <PORT> <USER>
-#                                                          Install gopher-agent on this machine
+#   gopher-uninstall                              Full uninstall (removes everything)
+#   gopher-uninstall --remove-tunnel  <TUNNEL_ID> Remove a tunnel from client.toml
+#   gopher-uninstall --remove-machine <MACHINE_ID> Remove machine SSH section from client.toml
 #
-# Invoked via `sudo -n /usr/local/bin/gopher-uninstall ...` and runs as root.
-# The narrow sudoers rule the bootstrap installs lets the SSH user execute
-# this binary without a password, so the dashboard can drive privileged
-# operations through it without granting NOPASSWD on broader commands like
-# `install`, `tee`, `mkdir`, or `systemctl`.
+# Full-uninstall mode notifies the dashboard via POST /api/machines/self-delete
+# (best-effort) before tearing down local services, so the server's machine
+# list stays in sync when an operator runs this directly on the box.
 
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 
 CONFIG_FILE="/etc/rathole/client.toml"
 VPS_KEY_FILE="/etc/rathole/vps_key.pub"
 INSTALL_PATH="/usr/local/bin/gopher-uninstall"
+HOST_URL="{{.HostURL}}"
+AGENT_CONFIG="/etc/gopher-agent/config.env"
 
 # Remove a marker-delimited section from a file.
 # Usage: remove_section <file> <start_marker> <end_marker>
@@ -90,6 +88,37 @@ else
   REAL_HOME="$HOME"
 fi
 
+# ── Notify the server BEFORE tearing down local services ─────────────────────
+# Best-effort: pulls GOPHER_AGENT_TOKEN from the agent's env file, posts it to
+# /api/machines/self-delete on the dashboard. The dashboard resolves the
+# token to the machine record and deletes it, so the dashboard's machine
+# list doesn't show a stale entry after a local uninstall.
+#
+# Skipped silently when:
+#   - HOST_URL wasn't templated in (e.g. someone running an old script copy)
+#   - the agent isn't installed (machine pre-dates the agent)
+#   - curl/wget aren't available
+# All failure modes leave the local cleanup proceeding normally — the
+# operator can delete the machine from the dashboard manually if needed.
+if [ -n "$HOST_URL" ] && [ -f "$AGENT_CONFIG" ]; then
+  AGENT_TOKEN=$(grep -E '^GOPHER_AGENT_TOKEN=' "$AGENT_CONFIG" 2>/dev/null | head -1 | cut -d= -f2-)
+  if [ -n "$AGENT_TOKEN" ]; then
+    echo "Notifying $HOST_URL that this machine is being uninstalled..."
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL -X POST "$HOST_URL/api/machines/self-delete" \
+        -H "Authorization: Bearer $AGENT_TOKEN" \
+        --max-time 10 >/dev/null 2>&1 \
+        && echo "  Server notified" \
+        || echo "  Warning: server did not acknowledge (continuing anyway)"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q --method=POST --header="Authorization: Bearer $AGENT_TOKEN" \
+        --timeout=10 "$HOST_URL/api/machines/self-delete" -O /dev/null \
+        && echo "  Server notified" \
+        || echo "  Warning: server did not acknowledge (continuing anyway)"
+    fi
+  fi
+fi
+
 # Remove the VPS SSH public key from authorized_keys so the server can no
 # longer SSH back into this machine.
 if [ -f "$VPS_KEY_FILE" ]; then
@@ -126,22 +155,16 @@ $SUDO rm -rf /etc/rathole 2>/dev/null || true
 echo "Removing rathole binary..."
 $SUDO rm -f /usr/local/bin/rathole 2>/dev/null || true
 
-echo "Stopping user-mode gopher-agent (if any)..."
-# User-mode installs live entirely in $REAL_HOME — kill the running process,
-# strip cron rules, remove files. Cron-strip runs as the user (we're root,
-# so we need sudo -u to drop down) since `crontab -` modifies the calling
-# user's crontab.
-pkill -f "$REAL_HOME/bin/gopher-agent" 2>/dev/null || true
-if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
-  sudo -u "$SUDO_USER" sh -c '(crontab -l 2>/dev/null | grep -v "gopher-agent" || true) | crontab -' 2>/dev/null || true
-fi
-
 echo "Removing gopher-agent binary and config..."
-$SUDO rm -rf /etc/gopher-agent 2>/dev/null || true
 $SUDO rm -f /usr/local/bin/gopher-agent 2>/dev/null || true
-rm -f "$REAL_HOME/bin/gopher-agent" 2>/dev/null || true
-rm -rf "$REAL_HOME/.config/gopher-agent" 2>/dev/null || true
-rm -f "$REAL_HOME/.cache/gopher-agent.log" 2>/dev/null || true
+$SUDO rm -rf /etc/gopher-agent 2>/dev/null || true
+
+# Remove the dedicated gopher system user. `userdel` fails if processes are
+# still owned by the user, so it must run AFTER stopping the agent service.
+# Errors ignored — user may not exist on machines that pre-date the agent.
+if id -u gopher >/dev/null 2>&1; then
+  $SUDO userdel gopher 2>/dev/null || true
+fi
 
 # Drop sudoers entries last so the operations above could still use sudo -n.
 $SUDO rm -f /etc/sudoers.d/gopher 2>/dev/null || true

@@ -222,8 +222,12 @@ $SUDO systemctl restart rathole-client || handle_sudo_failure
 echo "  Service installed (system). Check: systemctl status rathole-client"
 
 # ── Install gopher-agent ─────────────────────────────────────────────────────
-# Optional. If AGENT_TOKEN/AGENT_PORT are missing (older server) the install is
-# skipped and the migration UI on the dashboard will offer to add it later.
+# Mirrors migrate.sh exactly so new bootstraps and migrated machines end up
+# in the same shape. Agent runs as a dedicated `gopher` system user with
+# NOPASSWD: ALL — same model as the server-side gopher user.
+#
+# Optional. If AGENT_TOKEN/AGENT_PORT are missing (older server) the install
+# is skipped and the migration UI on the dashboard will offer to add it later.
 if [ -n "$AGENT_TOKEN" ] && [ "$AGENT_TOKEN" != "null" ] && [ -n "$AGENT_PORT" ] && [ "$AGENT_PORT" != "null" ]; then
   echo "Installing gopher-agent..."
   AGENT_ARCH_TAG="linux-amd64"
@@ -236,25 +240,47 @@ if [ -n "$AGENT_TOKEN" ] && [ "$AGENT_TOKEN" != "null" ] && [ -n "$AGENT_PORT" ]
       ;;
   esac
   if [ -n "$AGENT_ARCH_TAG" ]; then
-    AGENT_URL="$HOST_URL/static/agents/gopher-agent-${AGENT_ARCH_TAG}"
-    rm -f /tmp/gopher-agent
-    if command -v wget &>/dev/null; then
-      wget -q "$AGENT_URL" -O /tmp/gopher-agent || { echo "  WARN: agent download failed"; rm -f /tmp/gopher-agent; }
-    else
-      curl -fsSL "$AGENT_URL" -o /tmp/gopher-agent || { echo "  WARN: agent download failed"; rm -f /tmp/gopher-agent; }
+    # 1. Create gopher system user (idempotent).
+    if ! id -u gopher >/dev/null 2>&1; then
+      $SUDO useradd --system --shell /usr/sbin/nologin --home-dir /nonexistent --no-create-home gopher
+      echo "  Created gopher system user"
     fi
-    if [ -s /tmp/gopher-agent ]; then
-      $SUDO mv /tmp/gopher-agent /usr/local/bin/gopher-agent
-      $SUDO chmod +x /usr/local/bin/gopher-agent
+
+    # 2. Sudoers: gopher gets NOPASSWD: ALL. Strip any prior gopher-* line
+    # (e.g. older bootstraps that scoped narrower) before re-adding.
+    SUDOERS_FILE="/etc/sudoers.d/gopher"
+    $SUDO touch "$SUDOERS_FILE"
+    $SUDO sh -c "grep -v '^gopher ' '$SUDOERS_FILE' 2>/dev/null > '$SUDOERS_FILE.tmp' || true; echo 'gopher ALL=(ALL) NOPASSWD: ALL' >> '$SUDOERS_FILE.tmp'; mv '$SUDOERS_FILE.tmp' '$SUDOERS_FILE'; chmod 0440 '$SUDOERS_FILE'"
+
+    # 3. Download agent binary.
+    AGENT_URL="$HOST_URL/static/agents/gopher-agent-${AGENT_ARCH_TAG}"
+    rm -f /tmp/gopher-agent.new
+    if command -v wget &>/dev/null; then
+      wget -q "$AGENT_URL" -O /tmp/gopher-agent.new || { echo "  WARN: agent download failed"; rm -f /tmp/gopher-agent.new; }
+    else
+      curl -fsSL "$AGENT_URL" -o /tmp/gopher-agent.new || { echo "  WARN: agent download failed"; rm -f /tmp/gopher-agent.new; }
+    fi
+    if [ -s /tmp/gopher-agent.new ]; then
+      $SUDO install -m 0755 -o root -g root /tmp/gopher-agent.new /usr/local/bin/gopher-agent
+      rm -f /tmp/gopher-agent.new
+
+      # 4. Agent config (env file consumed by EnvironmentFile=).
       $SUDO mkdir -p /etc/gopher-agent
       $SUDO tee /etc/gopher-agent/config.env >/dev/null <<EOF || true
 GOPHER_AGENT_TOKEN=$AGENT_TOKEN
 GOPHER_AGENT_PORT=$AGENT_PORT
 GOPHER_AGENT_UNIT=rathole-client.service
 EOF
-      $SUDO chmod 600 /etc/gopher-agent/config.env
-      $SUDO chown root:root /etc/gopher-agent/config.env
+      $SUDO chmod 640 /etc/gopher-agent/config.env
+      $SUDO chown root:gopher /etc/gopher-agent/config.env
 
+      # 5. Hand /etc/rathole/client.toml to gopher so the agent can write
+      # config-push directly without sudo. rathole-client (running as
+      # $SSH_USER) keeps reading via mode 0644.
+      $SUDO chown gopher:gopher /etc/rathole/client.toml
+      $SUDO chmod 0644 /etc/rathole/client.toml
+
+      # 6. systemd unit + service start. User=gopher, not $SSH_USER.
       $SUDO tee /etc/systemd/system/gopher-agent.service >/dev/null <<EOF || true
 [Unit]
 Description=Gopher Agent (control-plane back-channel)
@@ -262,7 +288,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=$SSH_USER
+User=gopher
 EnvironmentFile=/etc/gopher-agent/config.env
 ExecStart=/usr/local/bin/gopher-agent
 Restart=always
@@ -273,13 +299,10 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-      # Allow the agent (running as $SSH_USER) to read its own config.
-      $SUDO chmod 640 /etc/gopher-agent/config.env
-      $SUDO chown root:"$SSH_USER" /etc/gopher-agent/config.env || true
       $SUDO systemctl daemon-reload || true
       $SUDO systemctl enable gopher-agent || true
       $SUDO systemctl restart gopher-agent || true
-      echo "  gopher-agent installed and started on 127.0.0.1:$AGENT_PORT"
+      echo "  gopher-agent installed and started on 127.0.0.1:$AGENT_PORT (user: gopher)"
     fi
   fi
 else

@@ -106,11 +106,23 @@ func (h *BootstrapHandler) ServeScript(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, script)
 }
 
-// GET /static/gopher-uninstall.sh - serve the client uninstall script
+// GET /static/gopher-uninstall.sh - serve the client uninstall script with
+// HostURL templated in so the script can call back to the dashboard's
+// /api/machines/self-delete endpoint when an operator runs it locally.
 func (h *BootstrapHandler) ServeUninstallScript(w http.ResponseWriter, r *http.Request) {
+	tmpl, err := template.New("uninstall").Delims("{{", "}}").Parse(gopherUninstallScript)
+	if err != nil {
+		http.Error(w, "uninstall template error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, struct{ HostURL string }{HostURL: hostURL(r)}); err != nil {
+		http.Error(w, "uninstall template error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, gopherUninstallScript)
+	fmt.Fprint(w, buf.String())
 }
 
 // GET /static/migrate.sh - serve the migrate script. The script takes a
