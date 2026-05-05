@@ -93,6 +93,24 @@ func SetMachineStatus(id, status string, lastSeen *time.Time) error {
 	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
 }
 
+// SetMachineAgentDegraded records the "agent up, rathole down" state: the
+// agent answered but reports rathole-client is not active. We bump
+// AgentLastSeen so the dashboard's agent badge stays green (the
+// control-plane back-channel still works) and flip machine.Status to
+// "offline" so the tunnels list / network map don't keep claiming the
+// machine can serve traffic.
+func SetMachineAgentDegraded(id, version string, when time.Time) error {
+	updates := map[string]any{
+		"agent_installed":     true,
+		"agent_version":       version,
+		"agent_last_seen":     when,
+		"agent_install_error": "",
+		"status":              "offline",
+		"updated_at":          when,
+	}
+	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
+}
+
 // SetMachineAgentSeen marks the machine as having a healthy, reachable agent.
 // Flips AgentInstalled true (so machines that bootstrapped with the agent
 // inline are detected without a separate callback) and records the version.
