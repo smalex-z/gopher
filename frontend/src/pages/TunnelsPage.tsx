@@ -81,8 +81,11 @@ export default function TunnelsPage() {
     setModal({ isOpen: true, editTunnel: t })
   }
 
-  const { data: tunnelsData, isLoading } = useQuery({ queryKey: ['tunnels'], queryFn: () => tunnelsApi.list() })
-  const { data: machinesData } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list() })
+  // 30s refresh: tunnel.Status updates from monitor.go's TCP probes (30s
+  // cadence) and machine.Status from the health service (60s) propagate to
+  // the UI without manual refresh.
+  const { data: tunnelsData, isLoading } = useQuery({ queryKey: ['tunnels'], queryFn: () => tunnelsApi.list(), refetchInterval: 30000 })
+  const { data: machinesData } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list(), refetchInterval: 30000 })
   const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
 
   // Stable references so the grouping memo doesn't re-run on every render

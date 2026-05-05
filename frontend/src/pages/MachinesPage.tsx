@@ -58,10 +58,14 @@ export default function MachinesPage() {
   const [reassignKeyID, setReassignKeyID] = useState('')
   const [jumpboxOS, setJumpboxOS] = useState<JumpboxOS>('unix')
 
+  // Steady-state refresh every 30s so machine.Status changes (driven by the
+  // health service's 60s poll loop + monitor's 30s loop) become visible
+  // without manual refresh. Drop to 3s while waiting for a fresh bootstrap
+  // to land so the dashboard reacts within seconds of registration.
   const { data, isLoading } = useQuery({
     queryKey: ['machines'],
     queryFn: () => machinesApi.list(),
-    refetchInterval: bootstrapModal.isOpen && bootstrapModal.phase === 'waiting' ? 3000 : false,
+    refetchInterval: bootstrapModal.isOpen && bootstrapModal.phase === 'waiting' ? 3000 : 30000,
   })
   const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
   const { data: keysRes } = useQuery({ queryKey: ['ssh-keys'], queryFn: () => localApi.listSSHKeys() })
