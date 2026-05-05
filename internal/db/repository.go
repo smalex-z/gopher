@@ -566,9 +566,22 @@ func LatestHealthCheck(subject string) (*HealthCheck, error) {
 
 // MachinesWithoutAgent returns machines that haven't completed the agent install.
 // Used by the dashboard banner to nudge users into the migration flow.
+//
+// Excludes machines that are <10 minutes old: bootstrap.sh installs the agent
+// inline and the health service polls every 60s, so a brand-new machine
+// legitimately has agent_installed=false for ~1-2 minutes. Showing the
+// "needs migration" banner during that window misled operators into thinking
+// the agent had failed when it was just still starting up. After 10 minutes
+// without a successful agent poll, something's actually wrong and the
+// banner is correct to surface it.
 func MachinesWithoutAgent() ([]Machine, error) {
+	const installGrace = 10 * time.Minute
+	cutoff := time.Now().Add(-installGrace)
+
 	var rows []Machine
-	if err := DB.Where("agent_installed = ? OR agent_installed IS NULL", false).Find(&rows).Error; err != nil {
+	if err := DB.
+		Where("(agent_installed = ? OR agent_installed IS NULL) AND created_at < ?", false, cutoff).
+		Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil

@@ -293,6 +293,11 @@ EnvironmentFile=/etc/gopher-agent/config.env
 ExecStart=/usr/local/bin/gopher-agent
 Restart=always
 RestartSec=5
+# KillMode=process so the agent's children (the detached gopher-uninstall
+# worker spawned from POST /uninstall) survive when this unit is stopped.
+# With the default control-group, systemctl-stopping gopher-agent would
+# kill gopher-uninstall mid-cleanup — exactly what we don't want.
+KillMode=process
 StandardOutput=journal
 StandardError=journal
 

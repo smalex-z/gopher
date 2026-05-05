@@ -166,10 +166,12 @@ if id -u gopher >/dev/null 2>&1; then
   $SUDO userdel gopher 2>/dev/null || true
 fi
 
+# Self-destruct: remove via $SUDO so it works regardless of how the script
+# was invoked (must happen BEFORE we drop /etc/sudoers.d/gopher; after that
+# point the agent's gopher user can't sudo anymore).
+$SUDO rm -f "$INSTALL_PATH" 2>/dev/null || true
+
 # Drop sudoers entries last so the operations above could still use sudo -n.
 $SUDO rm -f /etc/sudoers.d/gopher 2>/dev/null || true
-
-# Self-destruct last so the script can finish cleanly.
-rm -f "$INSTALL_PATH" 2>/dev/null || true
 
 echo "=== Gopher uninstall complete ==="
