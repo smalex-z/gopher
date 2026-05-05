@@ -219,16 +219,35 @@ func TestNextRatholePort_FindsGap(t *testing.T) {
 	}
 }
 
-func TestNextSSHTunnelPort_SharesPortSpace(t *testing.T) {
+func TestNextRatholePort_SharesPortSpace(t *testing.T) {
 	initTestDB(t)
 	seedMachine(t, "m1")
 	seedTunnel(t, "t1", "m1", 1024)
-	port, err := NextSSHTunnelPort()
+	port, err := NextRatholePort()
 	if err != nil {
-		t.Fatalf("NextSSHTunnelPort: %v", err)
+		t.Fatalf("NextRatholePort: %v", err)
 	}
 	if port != 1025 {
 		t.Errorf("port = %d, want 1025", port)
+	}
+}
+
+// Allocating two ports back-to-back (e.g. SSH tunnel + agent back-channel
+// at bootstrap time) must yield distinct ports even though the first
+// allocation hasn't been written to the DB yet — that's the whole point
+// of the variadic excluding parameter.
+func TestNextRatholePort_ExcludesUncommittedPort(t *testing.T) {
+	initTestDB(t)
+	first, err := NextRatholePort()
+	if err != nil {
+		t.Fatalf("NextRatholePort first: %v", err)
+	}
+	second, err := NextRatholePort(first)
+	if err != nil {
+		t.Fatalf("NextRatholePort second: %v", err)
+	}
+	if first == second {
+		t.Fatalf("two consecutive allocations returned the same port (%d) — bootstrap would bind SSH and agent to the same address", first)
 	}
 }
 

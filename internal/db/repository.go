@@ -207,12 +207,20 @@ func allUsedPorts() (map[int]bool, error) {
 // assignments (service tunnels, machine SSH tunnels, agent back-channels).
 // Starts from 1024 (first non-privileged port) and finds the first gap.
 //
-// All callers — service tunnels, machine SSH tunnels, agent back-channels —
-// allocate from the same pool, so they can never collide.
-func NextRatholePort() (int, error) {
+// `excluding` lets the caller mark additional ports as in-use that aren't
+// in the DB yet — needed when allocating multiple ports in one transaction
+// (bootstrap allocates an SSH tunnel port and an agent port together; the
+// first allocation isn't persisted by the time the second one queries the
+// DB, so without this both calls would return the same port).
+func NextRatholePort(excluding ...int) (int, error) {
 	used, err := allUsedPorts()
 	if err != nil {
 		return 0, err
+	}
+	for _, p := range excluding {
+		if p > 0 {
+			used[p] = true
+		}
 	}
 	port := 1024
 	for used[port] {
@@ -389,21 +397,6 @@ func GetMigrationToken(token string) (*MigrationToken, error) {
 func PurgeExpiredMigrationTokens() (int64, error) {
 	res := DB.Where("expires_at < ?", time.Now()).Delete(&MigrationToken{})
 	return res.RowsAffected, res.Error
-}
-
-// NextSSHTunnelPort returns the next available port for a machine SSH tunnel,
-// guaranteed free across both machine SSH tunnels and service tunnels.
-// Starts from 1024 (first non-privileged port) and finds the first gap.
-func NextSSHTunnelPort() (int, error) {
-	used, err := allUsedPorts()
-	if err != nil {
-		return 0, err
-	}
-	port := 1024
-	for used[port] {
-		port++
-	}
-	return port, nil
 }
 
 // App Settings Repository
