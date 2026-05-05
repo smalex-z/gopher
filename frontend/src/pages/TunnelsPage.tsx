@@ -209,10 +209,18 @@ export default function TunnelsPage() {
     }
 
     const out = Array.from(byMachine.entries()).map(([machineId, items]) => {
+      // Management tunnels (SSH back-channel + agent control plane) pin to
+      // the top of each machine's group, with SSH before agent for stable
+      // ordering. User tunnels follow alphabetically by name.
+      const mgmtOrder = (kind?: string) => {
+        if (kind === 'machine-ssh') return 0
+        if (kind === 'machine-agent') return 1
+        return 2
+      }
       items.sort((a, b) => {
-        const aSSH = a.kind === 'machine-ssh' ? 0 : 1
-        const bSSH = b.kind === 'machine-ssh' ? 0 : 1
-        if (aSSH !== bSSH) return aSSH - bSSH
+        const aRank = mgmtOrder(a.kind)
+        const bRank = mgmtOrder(b.kind)
+        if (aRank !== bRank) return aRank - bRank
         return a.name.localeCompare(b.name)
       })
       return {
