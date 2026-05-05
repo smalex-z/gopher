@@ -218,6 +218,81 @@ func (s *AuthService) LoginTOTP(pendingToken, code, ip string) (string, error) {
 	return "", fmt.Errorf("invalid code")
 }
 
+// SensitiveOpChallenge carries the credential the operator submits to confirm
+// a sensitive action (e.g. private key download). Either a TOTP code (when
+// 2FA is enrolled) or the login password (when it isn't); the server picks
+// based on settings.TOTPEnabled.
+type SensitiveOpChallenge struct {
+	TOTPCode string `json:"totp_code,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
+// VerifySensitiveOp gates a privileged operation behind a fresh re-auth, so a
+// stolen session cookie alone isn't enough to exfiltrate, say, an SSH private
+// key. Reuses the login rate limiter (per-IP) so an attacker can't brute-force
+// either the password fallback or the TOTP code.
+//
+// 2FA enrolled → TOTP code (or backup code) required.
+// 2FA not enrolled → login password required.
+//
+// All attempts are written to the audit log so the operator can see if
+// something tried to grab their keys.
+func (s *AuthService) VerifySensitiveOp(req SensitiveOpChallenge, ip string) error {
+	if !s.rl.record(ip) {
+		s.logEvent("SENSITIVE_OP_RATE_LIMITED", ip)
+		return fmt.Errorf("too many attempts; try again later")
+	}
+
+	settings, err := db.GetSettings()
+	if err != nil {
+		return err
+	}
+
+	if settings.TOTPEnabled {
+		if req.TOTPCode == "" {
+			return fmt.Errorf("totp_code required")
+		}
+		// Try active TOTP devices first, then backup codes (consuming the
+		// matched backup code on success — same semantics as login).
+		_, updatedBackup, ok := verifyTOTPOrBackup(req.TOTPCode, settings.TOTPBackupCodes)
+		if !ok {
+			s.logEvent("SENSITIVE_OP_FAILED_2FA", ip)
+			return fmt.Errorf("invalid code")
+		}
+		if updatedBackup != settings.TOTPBackupCodes {
+			settings.TOTPBackupCodes = updatedBackup
+			if err := db.SaveSettings(settings); err != nil {
+				log.Printf("WARN: persist consumed backup code (sensitive op): %v", err)
+			}
+		}
+	} else {
+		if req.Password == "" {
+			return fmt.Errorf("password required")
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(settings.PasswordHash), []byte(req.Password)); err != nil {
+			s.logEvent("SENSITIVE_OP_FAILED_PASSWORD", ip)
+			return fmt.Errorf("invalid password")
+		}
+	}
+
+	s.rl.Reset(ip)
+	return nil
+}
+
+// SensitiveOpRequirement tells the dashboard which credential to prompt for.
+// "totp" when 2FA is on, "password" otherwise. Used by the modal that wraps
+// downloads / other sensitive ops so it can render the right input field.
+func (s *AuthService) SensitiveOpRequirement() (string, error) {
+	settings, err := db.GetSettings()
+	if err != nil {
+		return "", err
+	}
+	if settings.TOTPEnabled {
+		return "totp", nil
+	}
+	return "password", nil
+}
+
 func (s *AuthService) Logout(token string) {
 	s.mu.Lock()
 	delete(s.sessions, token)
@@ -501,6 +576,12 @@ func (s *AuthService) createSession() (string, error) {
 func (s *AuthService) logEvent(event, ip string) {
 	s.audit.add(event, ip)
 	log.Printf("gopher-auth: %s ip=%s", event, ip)
+}
+
+// LogAuditEvent records an audit-log entry from outside this package (e.g.
+// handlers tagging successful sensitive ops like SSH key downloads).
+func (s *AuthService) LogAuditEvent(event, ip string) {
+	s.logEvent(event, ip)
 }
 
 func generateToken() (string, error) {
