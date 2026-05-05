@@ -4,6 +4,7 @@ import { Key, Download, Trash2, Star, Upload, RefreshCw, Copy, Check, Plus } fro
 import { localApi } from '../api/local'
 import { toast } from '../lib/toast'
 import type { SSHKey } from '../types'
+import DownloadKeyButton from '../components/DownloadKeyButton'
 
 const toKeyFilename = (name: string) =>
   name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '')
@@ -47,18 +48,6 @@ function AddKeyModal({ onClose }: AddKeyModalProps) {
     onError: (err: Error) => toast.error(err.message || 'Invalid key pair'),
   })
 
-  const downloadKey = async (id: string, name: string) => {
-    try {
-      const blob = await localApi.downloadSSHKey(id)
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url; a.download = toKeyFilename(name) || 'id_rsa'; a.click()
-      URL.revokeObjectURL(url)
-    } catch {
-      toast.error('Download failed')
-    }
-  }
-
   const copyPublicKey = (key: string) => {
     navigator.clipboard.writeText(key)
     setCopied(true)
@@ -96,12 +85,13 @@ function AddKeyModal({ onClose }: AddKeyModalProps) {
               </button>
             </div>
           </div>
-          <button
-            onClick={() => downloadKey(generatedKey.id, generatedKey.name)}
+          <DownloadKeyButton
+            id={generatedKey.id}
+            name={generatedKey.name}
             className="w-full flex items-center justify-center gap-2 bg-gray-800 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-gray-900 transition-colors"
           >
             <Download size={15} /> Download private key ({toKeyFilename(generatedKey.name) || 'id_rsa'})
-          </button>
+          </DownloadKeyButton>
           <button
             onClick={onClose}
             className="w-full bg-green-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors"
@@ -265,18 +255,6 @@ export default function SSHKeysPage() {
     onError: (err: Error) => toast.error(err.message || 'Failed to update default'),
   })
 
-  const downloadKey = async (id: string, name: string) => {
-    try {
-      const blob = await localApi.downloadSSHKey(id)
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url; a.download = toKeyFilename(name) || 'id_rsa'; a.click()
-      URL.revokeObjectURL(url)
-    } catch {
-      toast.error('Download failed')
-    }
-  }
-
   const truncateKey = (key: string) => {
     const parts = key.trim().split(' ')
     if (parts.length >= 2) {
@@ -360,13 +338,12 @@ export default function SSHKeysPage() {
                   <td className="px-4 py-3 text-gray-500 hidden sm:table-cell">{formatDate(key.created_at)}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1">
-                      <button
-                        onClick={() => downloadKey(key.id, key.name)}
-                        title="Download private key"
+                      <DownloadKeyButton
+                        id={key.id}
+                        name={key.name}
                         className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
-                      >
-                        <Download size={14} />
-                      </button>
+                      />
+
                       <button
                         onClick={() => setDefaultMutation.mutate(key.id)}
                         disabled={key.is_default || setDefaultMutation.isPending}

@@ -65,8 +65,13 @@ export const localApi = {
     client.delete(`/local/ssh-keys/${id}`).then(r => r.data),
   setDefaultSSHKey: (id: string) =>
     client.put(`/local/ssh-keys/${id}/default`).then(r => r.data),
-  downloadSSHKey: (id: string) =>
-    client.get(`/local/ssh-keys/${id}/download`, { responseType: 'blob' }).then(r => r.data as Blob),
+  // Re-auth required: prompts for TOTP code (if 2FA enrolled) or login
+  // password (otherwise). Caller fetches challenge-info first to know which
+  // credential to ask the operator for, then submits it here.
+  sshKeyChallengeInfo: () =>
+    client.get<ApiResponse<{ requires: 'totp' | 'password' }>>('/local/ssh-keys/challenge-info').then(r => r.data.data),
+  downloadSSHKey: (id: string, challenge: { totp_code?: string; password?: string }) =>
+    client.post(`/local/ssh-keys/${id}/download`, challenge, { responseType: 'blob' }).then(r => r.data as Blob),
   detectFirewall: () =>
     client.get<{ data: FirewallStatus }>('/local/firewall/detect').then(r => r.data.data),
   configureFirewall: (mode: FirewallMode) =>

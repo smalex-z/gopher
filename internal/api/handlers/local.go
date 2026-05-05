@@ -18,11 +18,12 @@ import (
 )
 
 type LocalHandler struct {
-	svc *service.LocalSetupService
+	svc  *service.LocalSetupService
+	auth *service.AuthService // for re-auth on sensitive ops (key download)
 }
 
-func NewLocalHandler(svc *service.LocalSetupService) *LocalHandler {
-	return &LocalHandler{svc: svc}
+func NewLocalHandler(svc *service.LocalSetupService, auth *service.AuthService) *LocalHandler {
+	return &LocalHandler{svc: svc, auth: auth}
 }
 
 // GET /api/local/status
@@ -172,18 +173,53 @@ func (h *LocalHandler) SetDefaultSSHKey(w http.ResponseWriter, r *http.Request) 
 	response.Success(w, map[string]string{"message": "default key updated"})
 }
 
-// GET /api/local/ssh-keys/{id}/download — download private key
+// POST /api/local/ssh-keys/{id}/download — download private key.
+//
+// Gated behind a step-up challenge: the operator must re-prove identity with
+// either a TOTP code (if 2FA is enrolled) or the login password (fallback).
+// Stops a stolen session cookie alone from exfiltrating the per-machine keys
+// the VPS uses to SSH back into clients.
 func (h *LocalHandler) DownloadSSHKey(w http.ResponseWriter, r *http.Request) {
+	var req service.SensitiveOpChallenge
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid request body")
+		return
+	}
+
+	ip := service.ClientIP(r)
+	if err := h.auth.VerifySensitiveOp(req, ip); err != nil {
+		response.Error(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
 	id := chi.URLParam(r, "id")
 	key, err := h.svc.DownloadSSHKey(id)
 	if err != nil {
 		response.NotFound(w, "key not found")
 		return
 	}
+
+	// Audit-log the successful download so the operator can see exactly which
+	// key was pulled and from where, alongside the failed attempts (logged
+	// inside VerifySensitiveOp).
+	h.auth.LogAuditEvent("SSH_KEY_DOWNLOADED", fmt.Sprintf("%s key=%s", ip, id))
+
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="gopher_id_rsa"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(key))
+}
+
+// GET /api/local/ssh-keys/challenge-info — tells the dashboard which credential
+// to prompt for in the re-auth modal. "totp" when 2FA is enrolled, otherwise
+// "password". No secrets returned.
+func (h *LocalHandler) SSHKeyChallengeInfo(w http.ResponseWriter, r *http.Request) {
+	req, err := h.auth.SensitiveOpRequirement()
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"requires": req})
 }
 
 // GET /api/local/resolve-ip?host=X  — resolves a hostname to its first A record.

@@ -8,6 +8,7 @@ import { useAuth } from '../lib/auth'
 import { localApi, type LocalServiceStatus, type FirewallStatus, type FirewallMode } from '../api/local'
 import { toast } from '../lib/toast'
 import DeployLogModal from '../components/DeployLogModal'
+import DownloadKeyButton from '../components/DownloadKeyButton'
 import type { SSHKey } from '../types'
 
 // ─── Step 1: Password ────────────────────────────────────────────────────────
@@ -695,18 +696,6 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
     reader.readAsText(file)
   }
 
-  const downloadPrivateKey = async () => {
-    if (!generatedKey) return
-    try {
-      const blob = await localApi.downloadSSHKey(generatedKey.id)
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url; a.download = toKeyFilename(generatedKey.name) || 'id_rsa'; a.click()
-      URL.revokeObjectURL(url)
-    } catch {
-      toast.error('Download failed')
-    }
-  }
 
   // ── Choose ────────────────────────────────────────────────────────────────
   if (mode === 'choose') {
@@ -792,12 +781,15 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
             </button>
           </div>
         </div>
-        <button
-          onClick={downloadPrivateKey}
-          className="w-full flex items-center justify-center gap-2 bg-gray-800 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-gray-900 transition-colors"
-        >
-          <Download size={15} /> Download private key ({toKeyFilename(generatedKey?.name ?? '') || 'id_rsa'})
-        </button>
+        {generatedKey && (
+          <DownloadKeyButton
+            id={generatedKey.id}
+            name={generatedKey.name}
+            className="w-full flex items-center justify-center gap-2 bg-gray-800 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-gray-900 transition-colors"
+          >
+            <Download size={15} /> Download private key ({toKeyFilename(generatedKey.name) || 'id_rsa'})
+          </DownloadKeyButton>
+        )}
         <button
           onClick={onDone}
           className="w-full bg-green-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors"

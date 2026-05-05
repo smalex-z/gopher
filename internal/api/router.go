@@ -36,7 +36,7 @@ func NewRouter(
 	logsH := handlers.NewLogsHandler(deploySvc.Hub)
 	bootstrapH := handlers.NewBootstrapHandler(bootstrapSvc)
 	authH := handlers.NewAuthHandler(authSvc)
-	localH := handlers.NewLocalHandler(localSvc)
+	localH := handlers.NewLocalHandler(localSvc, authSvc)
 	firewallH := handlers.NewFirewallHandler(localSvc)
 	securityH := handlers.NewSecurityHandler(authSvc, secSvc)
 	debugH := handlers.NewDebugHandler()
@@ -116,7 +116,10 @@ func NewRouter(
 					r.Post("/upload", localH.UploadSSHKey)
 					r.Delete("/{id}", localH.DeleteSSHKey)
 					r.Put("/{id}/default", localH.SetDefaultSSHKey)
-					r.Get("/{id}/download", localH.DownloadSSHKey)
+					// Sensitive op: gated by re-auth challenge. POST instead
+					// of GET so the request body can carry the credential.
+					r.Get("/challenge-info", localH.SSHKeyChallengeInfo)
+					r.Post("/{id}/download", localH.DownloadSSHKey)
 				})
 			})
 
