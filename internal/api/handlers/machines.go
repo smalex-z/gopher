@@ -3,10 +3,12 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/smalex-z/gopher/internal/api/dto"
 	"github.com/smalex-z/gopher/internal/api/response"
+	"github.com/smalex-z/gopher/internal/db"
 	apperrors "github.com/smalex-z/gopher/internal/errors"
 	"github.com/smalex-z/gopher/internal/service"
 )
@@ -86,6 +88,43 @@ func (h *MachineHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.NoContent(w)
+}
+
+// SelfDelete is called by gopher-uninstall on the client when an operator
+// runs it locally (e.g. `sudo gopher-uninstall`). The client authenticates
+// with its per-machine agent bearer token — same token the agent uses for
+// its API back-channel, so anyone with sudo on the box already has it.
+//
+// The dashboard's normal delete path runs the SAME teardown via the agent
+// (POST /uninstall) and then deletes the DB record; this endpoint just
+// inverts the trigger direction so the server stays in sync when cleanup
+// starts on the client.
+//
+// Public route — no session cookie required, since the caller is the dying
+// machine, not a logged-in operator.
+func (h *MachineHandler) SelfDelete(w http.ResponseWriter, r *http.Request) {
+	auth := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(auth, prefix) {
+		response.BadRequest(w, "missing bearer token")
+		return
+	}
+	token := strings.TrimSpace(auth[len(prefix):])
+
+	machine, err := db.GetMachineByAgentToken(token)
+	if err != nil {
+		// Don't leak whether the token is wrong vs. unknown — both look
+		// the same to the caller. 404 keeps the response shape consistent
+		// with other "not found" cases on this handler.
+		response.NotFound(w, "machine not found")
+		return
+	}
+
+	if err := h.svc.DeleteFromClient(machine.ID); err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"deleted": machine.ID})
 }
 
 func (h *MachineHandler) Deploy(w http.ResponseWriter, r *http.Request) {

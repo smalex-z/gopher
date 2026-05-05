@@ -58,10 +58,34 @@ export default function MachinesPage() {
   const [reassignKeyID, setReassignKeyID] = useState('')
   const [jumpboxOS, setJumpboxOS] = useState<JumpboxOS>('unix')
 
+  // Refresh cadence — three tiers based on how much is changing:
+  //
+  //   3s   bootstrap modal is waiting for the new machine to appear
+  //   5s   any machine is < 5 min old, or has status="pending"
+  //          (post-bootstrap window where status flips matter most:
+  //          rathole connecting, agent installing, first health poll)
+  //   15s  steady state — health service polls clients every 60s and
+  //          monitor every 30s, so 15s is enough to surface changes
+  //          quickly without hammering the dashboard
+  //
+  // refetchInterval can be a function — react-query passes the live
+  // query so the cadence self-adjusts: as machines settle into
+  // "connected"/"offline" and age past 5 minutes, polling drops back
+  // to 15s automatically.
   const { data, isLoading } = useQuery({
     queryKey: ['machines'],
     queryFn: () => machinesApi.list(),
-    refetchInterval: bootstrapModal.isOpen && bootstrapModal.phase === 'waiting' ? 3000 : false,
+    refetchInterval: (query) => {
+      if (bootstrapModal.isOpen && bootstrapModal.phase === 'waiting') return 3000
+      const machinesNow = query.state.data?.data ?? []
+      const fiveMinAgo = Date.now() - 5 * 60_000
+      const hasRecent = machinesNow.some(m => {
+        if (m.status === 'pending') return true
+        const created = m.created_at ? Date.parse(m.created_at) : 0
+        return created > fiveMinAgo
+      })
+      return hasRecent ? 5000 : 15000
+    },
   })
   const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
   const { data: keysRes } = useQuery({ queryKey: ['ssh-keys'], queryFn: () => localApi.listSSHKeys() })

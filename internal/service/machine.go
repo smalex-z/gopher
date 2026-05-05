@@ -71,6 +71,18 @@ func (s *MachineService) Update(id string, req dto.UpdateMachineRequest) (*db.Ma
 }
 
 func (s *MachineService) Delete(id string) error {
+	return s.delete(id, false)
+}
+
+// DeleteFromClient is the self-delete entry point: skips the
+// remote-uninstall step because the client is already tearing itself
+// down (this call comes FROM that teardown). Server-side cleanup —
+// tunnels, Caddy, rathole config, machine record — runs as usual.
+func (s *MachineService) DeleteFromClient(id string) error {
+	return s.delete(id, true)
+}
+
+func (s *MachineService) delete(id string, fromClient bool) error {
 	machine, err := db.GetMachine(id)
 	if err != nil {
 		return err
@@ -80,11 +92,14 @@ func (s *MachineService) Delete(id string) error {
 		return err
 	}
 
-	// SSH into the client machine first — while the rathole back-channel is
-	// still fully active — and trigger the uninstall script. Doing this before
-	// any ReconcileServerConfig calls avoids a race where rathole restarts mid-
-	// delete and the SSH tunnel is momentarily unavailable.
-	if s.local != nil {
+	// Server-driven delete: SSH/agent into the client first — while the
+	// rathole back-channel is fully active — and trigger gopher-uninstall.
+	// Doing this before ReconcileServerConfig avoids a race where rathole
+	// restarts mid-delete and the SSH tunnel briefly disappears.
+	//
+	// Self-delete: the client is the caller, gopher-uninstall is already
+	// running there. Skip the remote step to avoid the duplicate trigger.
+	if s.local != nil && !fromClient {
 		_ = s.local.RemoveMachineClient(machine)
 	}
 

@@ -58,6 +58,23 @@ func CreateMachine(machine *Machine) error {
 	return DB.Create(machine).Error
 }
 
+// GetMachineByAgentToken resolves a machine by its per-machine agent bearer
+// token. Used by the self-delete endpoint, where the dying client
+// authenticates with the same token its agent uses for the back-channel.
+func GetMachineByAgentToken(token string) (*Machine, error) {
+	if token == "" {
+		return nil, &apperrors.NotFoundError{Resource: "machine", ID: "(empty token)"}
+	}
+	var m Machine
+	if err := DB.Where("agent_token = ?", token).First(&m).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "machine", ID: "(by agent token)"}
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
 func UpdateMachine(machine *Machine) error {
 	return DB.Save(machine).Error
 }
@@ -72,6 +89,24 @@ func SetMachineStatus(id, status string, lastSeen *time.Time) error {
 	}
 	if lastSeen != nil {
 		updates["last_seen"] = *lastSeen
+	}
+	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
+}
+
+// SetMachineAgentDegraded records the "agent up, rathole down" state: the
+// agent answered but reports rathole-client is not active. We bump
+// AgentLastSeen so the dashboard's agent badge stays green (the
+// control-plane back-channel still works) and flip machine.Status to
+// "offline" so the tunnels list / network map don't keep claiming the
+// machine can serve traffic.
+func SetMachineAgentDegraded(id, version string, when time.Time) error {
+	updates := map[string]any{
+		"agent_installed":     true,
+		"agent_version":       version,
+		"agent_last_seen":     when,
+		"agent_install_error": "",
+		"status":              "offline",
+		"updated_at":          when,
 	}
 	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
 }
@@ -172,12 +207,20 @@ func allUsedPorts() (map[int]bool, error) {
 // assignments (service tunnels, machine SSH tunnels, agent back-channels).
 // Starts from 1024 (first non-privileged port) and finds the first gap.
 //
-// All callers — service tunnels, machine SSH tunnels, agent back-channels —
-// allocate from the same pool, so they can never collide.
-func NextRatholePort() (int, error) {
+// `excluding` lets the caller mark additional ports as in-use that aren't
+// in the DB yet — needed when allocating multiple ports in one transaction
+// (bootstrap allocates an SSH tunnel port and an agent port together; the
+// first allocation isn't persisted by the time the second one queries the
+// DB, so without this both calls would return the same port).
+func NextRatholePort(excluding ...int) (int, error) {
 	used, err := allUsedPorts()
 	if err != nil {
 		return 0, err
+	}
+	for _, p := range excluding {
+		if p > 0 {
+			used[p] = true
+		}
 	}
 	port := 1024
 	for used[port] {
@@ -356,21 +399,6 @@ func PurgeExpiredMigrationTokens() (int64, error) {
 	return res.RowsAffected, res.Error
 }
 
-// NextSSHTunnelPort returns the next available port for a machine SSH tunnel,
-// guaranteed free across both machine SSH tunnels and service tunnels.
-// Starts from 1024 (first non-privileged port) and finds the first gap.
-func NextSSHTunnelPort() (int, error) {
-	used, err := allUsedPorts()
-	if err != nil {
-		return 0, err
-	}
-	port := 1024
-	for used[port] {
-		port++
-	}
-	return port, nil
-}
-
 // App Settings Repository
 
 func GetSettings() (*AppSettings, error) {
@@ -531,9 +559,22 @@ func LatestHealthCheck(subject string) (*HealthCheck, error) {
 
 // MachinesWithoutAgent returns machines that haven't completed the agent install.
 // Used by the dashboard banner to nudge users into the migration flow.
+//
+// Excludes machines that are <10 minutes old: bootstrap.sh installs the agent
+// inline and the health service polls every 60s, so a brand-new machine
+// legitimately has agent_installed=false for ~1-2 minutes. Showing the
+// "needs migration" banner during that window misled operators into thinking
+// the agent had failed when it was just still starting up. After 10 minutes
+// without a successful agent poll, something's actually wrong and the
+// banner is correct to surface it.
 func MachinesWithoutAgent() ([]Machine, error) {
+	const installGrace = 10 * time.Minute
+	cutoff := time.Now().Add(-installGrace)
+
 	var rows []Machine
-	if err := DB.Where("agent_installed = ? OR agent_installed IS NULL", false).Find(&rows).Error; err != nil {
+	if err := DB.
+		Where("(agent_installed = ? OR agent_installed IS NULL) AND created_at < ?", false, cutoff).
+		Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil

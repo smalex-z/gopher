@@ -150,7 +150,13 @@ func (s *HealthService) checkViaAgent(ctx context.Context, m *db.Machine, subjec
 		return false
 	}
 
-	// Agent reachable — but is rathole healthy on the box?
+	// Agent reachable — but is rathole healthy on the box? An "agent up,
+	// rathole down" state means the back-channel works but tunnels don't.
+	// We must flip machine.Status to offline so the dashboard stops claiming
+	// the machine is connected (its tunnels can't actually serve traffic).
+	// Without this update the previous "connected" value from the last good
+	// poll sticks indefinitely — the agent's existence doesn't certify
+	// tunnel health, only its own reachability.
 	if !status.Rathole.Active {
 		errMsg := fmt.Sprintf("rathole-client not active (state=%s/%s)", status.Rathole.State, status.Rathole.Substate)
 		_ = db.RecordHealthCheck(&db.HealthCheck{
@@ -159,6 +165,12 @@ func (s *HealthService) checkViaAgent(ctx context.Context, m *db.Machine, subjec
 			LatencyMS: latency,
 			ErrorMsg:  errMsg,
 		})
+		// AgentLastSeen still updates so the operator can see the agent is
+		// up (the back-channel works). Status reflects rathole, not agent.
+		now := time.Now()
+		if err := db.SetMachineAgentDegraded(m.ID, status.AgentVersion, now); err != nil {
+			log.Printf("health: persist agent-degraded for %s: %v", m.ID, err)
+		}
 		s.maybeRecover(m, "rathole inactive")
 		return true
 	}

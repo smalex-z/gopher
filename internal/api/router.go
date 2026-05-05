@@ -50,6 +50,10 @@ func NewRouter(
 	r.Get("/static/migrate.sh", bootstrapH.ServeMigrateScript)
 	r.Post("/api/bootstrap", bootstrapH.Register)
 	r.Post("/api/migrate", bootstrapH.Migrate)
+	// Self-delete: gopher-uninstall on the client posts here with its
+	// per-machine bearer token before tearing down so the dashboard's
+	// machine record disappears alongside the local cleanup.
+	r.Post("/api/machines/self-delete", machineH.SelfDelete)
 
 	r.Route("/api", func(r chi.Router) {
 		// Public auth + health routes

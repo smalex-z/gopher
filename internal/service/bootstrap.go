@@ -115,7 +115,7 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		}
 		tunnelPort = bt.TunnelPort
 	} else {
-		tunnelPort, err = db.NextSSHTunnelPort()
+		tunnelPort, err = db.NextRatholePort()
 		if err != nil {
 			return nil, fmt.Errorf("failed to allocate tunnel port: %w", err)
 		}
@@ -123,10 +123,16 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 
 	ratholeToken := shortToken()
 
-	// Allocate the agent back-channel up front. Even if the bootstrap script
-	// fails to install the agent (older script, network glitch), we keep the
-	// fields populated so the existing-machine migration tool can complete it.
-	agentRemotePort, err := db.NextRatholePort()
+	// Allocate the agent back-channel up front. Pass tunnelPort to exclude
+	// it from consideration: the SSH tunnel port we just picked isn't in
+	// the DB yet (we haven't created the Machine row), so without the
+	// exclude both calls would return the same port and rathole-server
+	// would try to bind two services to the same address.
+	//
+	// Even if the bootstrap script fails to install the agent (older script,
+	// network glitch), we keep the fields populated so the existing-machine
+	// migration tool can complete it.
+	agentRemotePort, err := db.NextRatholePort(tunnelPort)
 	if err != nil {
 		return nil, fmt.Errorf("failed to allocate agent port: %w", err)
 	}

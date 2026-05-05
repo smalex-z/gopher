@@ -81,8 +81,11 @@ export default function TunnelsPage() {
     setModal({ isOpen: true, editTunnel: t })
   }
 
-  const { data: tunnelsData, isLoading } = useQuery({ queryKey: ['tunnels'], queryFn: () => tunnelsApi.list() })
-  const { data: machinesData } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list() })
+  // 15s refresh: tunnel.Status updates from monitor.go's 30s TCP probes
+  // and machine.Status from the health service (60s) reach the UI inside
+  // a single backend cycle without hammering it.
+  const { data: tunnelsData, isLoading } = useQuery({ queryKey: ['tunnels'], queryFn: () => tunnelsApi.list(), refetchInterval: 15000 })
+  const { data: machinesData } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list(), refetchInterval: 15000 })
   const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
 
   // Stable references so the grouping memo doesn't re-run on every render
@@ -209,10 +212,18 @@ export default function TunnelsPage() {
     }
 
     const out = Array.from(byMachine.entries()).map(([machineId, items]) => {
+      // Management tunnels (SSH back-channel + agent control plane) pin to
+      // the top of each machine's group, with SSH before agent for stable
+      // ordering. User tunnels follow alphabetically by name.
+      const mgmtOrder = (kind?: string) => {
+        if (kind === 'machine-ssh') return 0
+        if (kind === 'machine-agent') return 1
+        return 2
+      }
       items.sort((a, b) => {
-        const aSSH = a.kind === 'machine-ssh' ? 0 : 1
-        const bSSH = b.kind === 'machine-ssh' ? 0 : 1
-        if (aSSH !== bSSH) return aSSH - bSSH
+        const aRank = mgmtOrder(a.kind)
+        const bRank = mgmtOrder(b.kind)
+        if (aRank !== bRank) return aRank - bRank
         return a.name.localeCompare(b.name)
       })
       return {
