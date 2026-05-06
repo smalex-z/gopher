@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { LayoutDashboard, Server, Monitor, Network, LogOut, Map, RefreshCw, Key, Shield, ShieldCheck, ChevronDown } from 'lucide-react'
+import { LayoutDashboard, Server, Monitor, Network, LogOut, Map, RefreshCw, Key, Shield, ShieldCheck, ChevronDown, Activity } from 'lucide-react'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import ToastContainer from './components/ToastContainer'
 import AgentMigrationBanner from './components/AgentMigrationBanner'
@@ -12,6 +12,7 @@ import NetworkMapPage from './pages/NetworkMapPage'
 import SSHKeysPage from './pages/SSHKeysPage'
 import FirewallPage from './pages/FirewallPage'
 import SecurityPage from './pages/SecurityPage'
+import LogsPage from './pages/LogsPage'
 import SetupPage from './pages/SetupPage'
 import LoginPage from './pages/LoginPage'
 import { AuthProvider, useAuth } from './lib/auth'
@@ -144,6 +145,7 @@ function AppShell() {
                   items={[
                     { to: '/firewall', icon: Shield, label: 'Firewall' },
                     { to: '/security', icon: ShieldCheck, label: 'Access Control' },
+                    { to: '/logs', icon: Activity, label: 'Logs' },
                   ]}
                 />
                 <NavLink to="/network" className={navClass}><Map size={16} /> Network Map</NavLink>
@@ -183,6 +185,7 @@ function AppShell() {
           <Route path="/keys" element={<SSHKeysPage />} />
           <Route path="/firewall" element={<FirewallPage />} />
           <Route path="/security" element={<SecurityPage />} />
+          <Route path="/logs" element={<LogsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

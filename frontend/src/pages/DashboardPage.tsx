@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import { machinesApi } from '../api/machines'
 import { tunnelsApi } from '../api/tunnels'
-import { localApi } from '../api/local'
+import { localApi, type ActivityEvent } from '../api/local'
 import { securityApi } from '../api/security'
 import { updateApi } from '../api/update'
 import client from '../api/client'
@@ -117,6 +117,12 @@ export default function DashboardPage() {
     queryKey: ['update-check'],
     queryFn: () => updateApi.check(),
     staleTime: 60_000,
+  })
+
+  const { data: activityData } = useQuery({
+    queryKey: ['activity'],
+    queryFn: () => localApi.activity(),
+    refetchInterval: 30_000,
   })
 
   const machines: Machine[]       = machinesData?.data ?? []
@@ -333,34 +339,33 @@ export default function DashboardPage() {
         <ArrowRight size={14} className="text-gray-300 group-hover:text-blue-500 transition-colors" />
       </button>
       {/* ── Activity Timeline ──────────────────────────────────────────── */}
-      {(() => {
-        const timeline = [
-          ...machines.map(m => ({ type: 'machine' as const, name: m.name, at: m.created_at })),
-          ...tunnels.map(t => ({ type: 'tunnel' as const, name: t.name, at: t.created_at })),
-        ].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime()).slice(0, 8)
-
-        return timeline.length > 0 ? (
-          <div className="bg-white rounded-xl border border-gray-200 px-5 py-4">
-            <div className="mb-3">
-              <span className="text-sm font-semibold text-gray-700">Recent Activity</span>
-            </div>
-            <div className="space-y-2.5 max-h-48 overflow-y-auto">
-              {timeline.map((item, i) => (
-                <div key={i} className="flex items-center gap-3">
-                  <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${item.type === 'machine' ? 'bg-blue-400' : 'bg-green-400'}`} />
-                  <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                    {item.type === 'machine' ? <Monitor size={11} className="text-gray-400 shrink-0" /> : <Network size={11} className="text-gray-400 shrink-0" />}
-                    <span className="text-xs text-gray-700 truncate">
-                      {item.type === 'machine' ? 'Machine' : 'Tunnel'} <span className="font-medium">{item.name}</span> {item.type === 'machine' ? 'registered' : 'created'}
-                    </span>
-                  </div>
-                  <span className="text-xs text-gray-400 shrink-0">{new Date(item.at).toLocaleDateString()}</span>
-                </div>
-              ))}
-            </div>
+      {activityData && activityData.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 px-5 py-4">
+          <div className="mb-3">
+            <span className="text-sm font-semibold text-gray-700">Recent Activity</span>
           </div>
-        ) : null
-      })()}
+          <div className="space-y-2.5 max-h-48 overflow-y-auto">
+            {activityData.slice(0, 8).map((ev: ActivityEvent) => {
+              const isMachine = ev.source === 'machine'
+              const dotColor =
+                ev.severity === 'critical' || ev.severity === 'error' ? 'bg-red-400' :
+                ev.severity === 'warn' ? 'bg-amber-400' :
+                ev.kind.endsWith('_deleted') ? 'bg-gray-400' :
+                isMachine ? 'bg-blue-400' : 'bg-green-400'
+              return (
+                <div key={ev.id} className="flex items-center gap-3">
+                  <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
+                  <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                    {isMachine ? <Monitor size={11} className="text-gray-400 shrink-0" /> : <Network size={11} className="text-gray-400 shrink-0" />}
+                    <span className="text-xs text-gray-700 truncate">{ev.message}</span>
+                  </div>
+                  <span className="text-xs text-gray-400 shrink-0">{new Date(ev.created_at).toLocaleDateString()}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
     </div>
   )

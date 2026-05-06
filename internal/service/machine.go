@@ -116,6 +116,7 @@ func (s *MachineService) delete(id string, fromClient bool) error {
 		}
 	}
 
+	db.LogEvent("machine_deleted", id, machine.Name)
 	if err := db.DeleteMachine(id); err != nil {
 		return err
 	}

@@ -208,3 +208,63 @@ type SSHKey struct {
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
+
+// Event is the unified record for everything worth surfacing on the dashboard
+// or feeding to the (forthcoming) notifications subsystem: lifecycle changes,
+// auth events, health-check transitions, firewall changes, etc.
+//
+// The dashboard "recent activity" widget and the security audit log both read
+// from this single table — filtered by Source / Severity / time range.
+type Event struct {
+	ID        string    `json:"id" gorm:"primaryKey"`
+	CreatedAt time.Time `json:"created_at" gorm:"index"`
+
+	// Severity drives notification routing. info = log only; warn / error /
+	// critical are candidates for alerts once the dispatcher exists.
+	Severity string `json:"severity" gorm:"index"` // info | warn | error | critical
+
+	// Source is the subsystem that produced the event. Indexed so the security
+	// page can cheaply scope to source=auth without scanning the whole table.
+	Source string `json:"source" gorm:"index"` // auth | machine | tunnel | health | firewall | system
+
+	// Kind is a free-form dotted/underscored identifier (machine.connected,
+	// auth.login.failed). Stable strings — used as the join key for kind→severity
+	// defaults and eventually for notification filters.
+	Kind string `json:"kind" gorm:"index"`
+
+	// Actor: the user, service, or component that triggered the event.
+	// "system" for background services, "agent" for events derived from agent
+	// reports, an email address for operator-initiated actions.
+	Actor string `json:"actor,omitempty"`
+
+	// Resource fields are optional — present when the event targets a specific
+	// machine, tunnel, ssh key, etc. ResourceName is denormalized so the UI
+	// can render a deleted resource's name without a stale join.
+	ResourceType string `json:"resource_type,omitempty"`
+	ResourceID   string `json:"resource_id,omitempty"`
+	ResourceName string `json:"resource_name,omitempty"`
+
+	// IP is set for events with a remote origin (auth attempts, API calls).
+	IP string `json:"ip,omitempty"`
+
+	// Message is human-readable, rendered as-is in the UI. Producers should
+	// fill this in even when Kind is descriptive — UIs aren't required to know
+	// every Kind value.
+	Message string `json:"message"`
+
+	// Metadata is an opaque JSON blob for producer-specific extra context
+	// (latency_ms, error details, recovery attempt count). Inspect-only —
+	// don't query into this from the UI; promote a field if it matters.
+	Metadata string `json:"metadata,omitempty"`
+}
+
+// TableName pins the table to "events". GORM's pluralizer would otherwise
+// derive "events" from "Event" anyway, but pinning it makes the migration's
+// rename target explicit.
+func (Event) TableName() string { return "events" }
+
+// ActivityEvent is a back-compat alias kept for any external callers still
+// referring to the old type. New code should use Event.
+//
+// Deprecated: use Event.
+type ActivityEvent = Event

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -379,6 +380,34 @@ func (h *LocalHandler) SetBindIP(w http.ResponseWriter, r *http.Request) {
 	}
 	response.Success(w, map[string]string{"bind_ip": body.BindIP})
 }
+
+// Activity backs the dashboard "recent activity" widget. It returns lifecycle
+// + health events for machines and tunnels — auth events have their own
+// surface (the security page reads them via AuthService.AuditLog).
+func (h *LocalHandler) Activity(w http.ResponseWriter, r *http.Request) {
+	machineEvents, err := db.GetEvents(db.EventFilter{Source: "machine", Limit: 25})
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	tunnelEvents, err := db.GetEvents(db.EventFilter{Source: "tunnel", Limit: 25})
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	merged := append(machineEvents, tunnelEvents...)
+	// Sort newest-first across the two source streams. Each was already
+	// sorted, so a stable merge would be cheaper, but n=50 makes the cost
+	// noise.
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].CreatedAt.After(merged[j].CreatedAt)
+	})
+	if len(merged) > 50 {
+		merged = merged[:50]
+	}
+	response.Success(w, merged)
+}
+
 
 // validDomain matches a reasonable FQDN: labels of alphanumeric + hyphens separated by dots.
 var validDomain = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)

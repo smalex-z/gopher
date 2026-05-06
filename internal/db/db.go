@@ -31,7 +31,7 @@ func Initialize(dsn string) error {
 		return fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
 
-	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &MigrationToken{}, &AppSettings{}, &SSHKey{}, &FirewallRule{}, &BotSession{}, &TOTPDevice{}, &HealthCheck{}); err != nil {
+	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &MigrationToken{}, &AppSettings{}, &SSHKey{}, &FirewallRule{}, &BotSession{}, &TOTPDevice{}, &HealthCheck{}, &Event{}); err != nil {
 		return fmt.Errorf("failed to auto-migrate: %w", err)
 	}
 

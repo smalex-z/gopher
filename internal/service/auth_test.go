@@ -1,57 +1,12 @@
 package service
 
 import (
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
-
-// ---- auditRing --------------------------------------------------------------
-
-func TestAuditRing_AddAndSnapshot(t *testing.T) {
-	var ring auditRing
-	ring.add("LOGIN_SUCCESS", "1.2.3.4")
-	ring.add("LOGIN_FAILED", "5.6.7.8")
-
-	snap := ring.Snapshot()
-	if len(snap) != 2 {
-		t.Fatalf("len = %d, want 2", len(snap))
-	}
-	// Snapshot is newest-first
-	if snap[0].Event != "LOGIN_FAILED" {
-		t.Errorf("newest event = %q, want LOGIN_FAILED", snap[0].Event)
-	}
-	if snap[1].Event != "LOGIN_SUCCESS" {
-		t.Errorf("second event = %q, want LOGIN_SUCCESS", snap[1].Event)
-	}
-}
-
-func TestAuditRing_WrapsAtCapacity(t *testing.T) {
-	var ring auditRing
-	for i := 0; i < auditLogCapacity+10; i++ {
-		ring.add(fmt.Sprintf("event-%d", i), "1.2.3.4")
-	}
-	snap := ring.Snapshot()
-	if len(snap) != auditLogCapacity {
-		t.Errorf("len = %d, want %d (capacity)", len(snap), auditLogCapacity)
-	}
-	// Newest event should be the last one written
-	want := fmt.Sprintf("event-%d", auditLogCapacity+9)
-	if snap[0].Event != want {
-		t.Errorf("newest = %q, want %q", snap[0].Event, want)
-	}
-}
-
-func TestAuditRing_EmptySnapshot(t *testing.T) {
-	var ring auditRing
-	snap := ring.Snapshot()
-	if len(snap) != 0 {
-		t.Errorf("expected empty snapshot, got %d events", len(snap))
-	}
-}
 
 // ---- AuthService: Setup and Login -------------------------------------------
 
@@ -270,20 +225,42 @@ func TestAuthService_AuditLogRecordsEvents(t *testing.T) {
 
 // ---- Audit event timing -----------------------------------------------------
 
-func TestAuditRing_EventHasTimestamp(t *testing.T) {
-	var ring auditRing
-	before := time.Now()
-	ring.add("TEST_EVENT", "1.2.3.4")
-	after := time.Now()
+func TestAuthService_AuditEventHasTimestampAndIP(t *testing.T) {
+	initTestDB(t)
+	svc := NewAuthService()
+	_ = svc.Setup("password123")
 
-	snap := ring.Snapshot()
-	if len(snap) == 0 {
-		t.Fatal("expected 1 event")
+	before := time.Now().Add(-time.Second)
+	_, _ = svc.Login("wrongpassword", "1.2.3.4")
+	after := time.Now().Add(time.Second)
+
+	log := svc.AuditLog()
+	if len(log) == 0 {
+		t.Fatal("expected at least one event")
 	}
-	if snap[0].Time.Before(before) || snap[0].Time.After(after) {
-		t.Errorf("event timestamp %v not in expected range [%v, %v]", snap[0].Time, before, after)
+	first := log[0]
+	if first.Time.Before(before) || first.Time.After(after) {
+		t.Errorf("event time %v not in [%v, %v]", first.Time, before, after)
 	}
-	if snap[0].IP != "1.2.3.4" {
-		t.Errorf("IP = %q, want %q", snap[0].IP, "1.2.3.4")
+	if first.IP != "1.2.3.4" {
+		t.Errorf("IP = %q, want 1.2.3.4", first.IP)
+	}
+}
+
+// AuditLog used to be in-memory and lost on restart. With the unified events
+// table it now persists. A second AuthService against the same DB must see
+// events the first one wrote.
+func TestAuthService_AuditLogPersistsAcrossInstances(t *testing.T) {
+	initTestDB(t)
+	first := NewAuthService()
+	_ = first.Setup("password123")
+	_, _ = first.Login("wrongpassword", "10.0.0.1")
+
+	// Simulate process restart: throw away the AuthService, build a new one
+	// against the same DB.
+	second := NewAuthService()
+	log := second.AuditLog()
+	if len(log) == 0 {
+		t.Fatal("expected events to survive restart, got 0")
 	}
 }
