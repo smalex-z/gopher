@@ -6,6 +6,7 @@ import { tunnelsApi } from '../api/tunnels'
 import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
 import StatusBadge from '../components/StatusBadge'
+import TunnelHealthCell from '../components/TunnelHealthCell'
 import { toast } from '../lib/toast'
 import type { Tunnel } from '../types'
 
@@ -290,7 +291,7 @@ export default function TunnelsPage() {
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 border-b">
                   <tr>
-                    {['Name', 'Machine', 'Routing', 'Status', 'Actions'].map(h => (
+                    {['Name', 'Machine', 'Routing', 'Status', 'Uptime', 'Actions'].map(h => (
                       <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
                     ))}
                   </tr>
@@ -298,7 +299,7 @@ export default function TunnelsPage() {
                 {groups.map(g => (
                   <tbody key={g.machineId} className="divide-y border-t first:border-t-0">
                     <tr className="bg-gray-50/70">
-                      <td colSpan={5} className="px-4 py-2">
+                      <td colSpan={6} className="px-4 py-2">
                         <div className="flex items-center justify-between gap-3">
                           <div className="flex items-center gap-2 min-w-0">
                             <span className="font-semibold text-gray-700 truncate">{g.machineName}</span>
@@ -375,6 +376,9 @@ export default function TunnelsPage() {
                               </div>
                             </td>
                             <td className="px-4 py-3">
+                              <TunnelHealthCell tunnelId={t.id} />
+                            </td>
+                            <td className="px-4 py-3">
                               <div className="flex items-center gap-1">
                                 <button
                                   onClick={() => togglePrivate(t)}
@@ -398,7 +402,7 @@ export default function TunnelsPage() {
                           </tr>
                           {t.private && jumpboxCmd(t) && (
                             <tr className="bg-slate-50 border-t-0">
-                              <td colSpan={5} className="px-4 pb-2 pt-0">
+                              <td colSpan={6} className="px-4 pb-2 pt-0">
                                 <div className="flex items-center gap-2 text-xs text-slate-600">
                                   <Terminal size={11} className="shrink-0" />
                                   <span className="font-medium">Jumpbox:</span>
