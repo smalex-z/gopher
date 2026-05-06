@@ -43,6 +43,7 @@ func NewRouter(
 	updateH := handlers.NewUpdateHandler(updateSvc)
 	backupH := handlers.NewBackupHandler(backupSvc)
 	agentH := handlers.NewAgentHandler(agentInstaller, healthSvc)
+	eventsH := handlers.NewEventsHandler()
 
 	// Public: bootstrap script download and machine self-registration
 	r.Get("/static/bootstrap.sh", bootstrapH.ServeScript)
@@ -77,6 +78,8 @@ func NewRouter(
 			r.Use(AuthMiddleware(authSvc))
 
 			r.Post("/auth/logout", authH.Logout)
+
+			r.Get("/events", eventsH.List)
 
 			r.Route("/security", func(r chi.Router) {
 				r.Get("/stale-tokens", securityH.StaleTokenAttempts)

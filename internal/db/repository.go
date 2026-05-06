@@ -559,13 +559,18 @@ func GetRecentEvents(limit int) ([]Event, error) {
 // EventFilter narrows GetEvents queries. Empty fields mean "no filter on this
 // dimension".
 type EventFilter struct {
-	Source       string    // exact match: auth | machine | tunnel | health | firewall | system
+	Sources      []string  // any of these (OR'd). Empty = all sources.
 	Severity     string    // exact match: info | warn | error | critical
 	MinSeverity  string    // returns events at or above this severity
 	ResourceID   string
+	Search       string    // case-insensitive substring match on message, resource_name, kind
 	Since        time.Time // CreatedAt >=
 	Until        time.Time // CreatedAt <=
+	Before       time.Time // cursor pagination — strictly < (use the oldest CreatedAt from the previous page)
 	Limit        int       // 0 means default (200)
+
+	// Source is a back-compat single-value form. Prefer Sources for new code.
+	Source string
 }
 
 var severityOrder = map[string]int{
@@ -577,7 +582,10 @@ var severityOrder = map[string]int{
 
 func GetEvents(f EventFilter) ([]Event, error) {
 	q := DB.Model(&Event{})
-	if f.Source != "" {
+	switch {
+	case len(f.Sources) > 0:
+		q = q.Where("source IN ?", f.Sources)
+	case f.Source != "":
 		q = q.Where("source = ?", f.Source)
 	}
 	if f.Severity != "" {
@@ -598,11 +606,23 @@ func GetEvents(f EventFilter) ([]Event, error) {
 	if f.ResourceID != "" {
 		q = q.Where("resource_id = ?", f.ResourceID)
 	}
+	if f.Search != "" {
+		// Case-insensitive substring search across the user-facing fields.
+		// SQLite's LIKE is case-insensitive for ASCII by default.
+		needle := "%" + strings.ToLower(f.Search) + "%"
+		q = q.Where(
+			"LOWER(message) LIKE ? OR LOWER(resource_name) LIKE ? OR LOWER(kind) LIKE ?",
+			needle, needle, needle,
+		)
+	}
 	if !f.Since.IsZero() {
 		q = q.Where("created_at >= ?", f.Since)
 	}
 	if !f.Until.IsZero() {
 		q = q.Where("created_at <= ?", f.Until)
+	}
+	if !f.Before.IsZero() {
+		q = q.Where("created_at < ?", f.Before)
 	}
 	limit := f.Limit
 	if limit <= 0 {
@@ -614,6 +634,52 @@ func GetEvents(f EventFilter) ([]Event, error) {
 		return nil, err
 	}
 	return events, nil
+}
+
+// CountEvents returns the total number of events matching the filter,
+// ignoring Limit/Before. Used for pagination headers.
+func CountEvents(f EventFilter) (int64, error) {
+	q := DB.Model(&Event{})
+	switch {
+	case len(f.Sources) > 0:
+		q = q.Where("source IN ?", f.Sources)
+	case f.Source != "":
+		q = q.Where("source = ?", f.Source)
+	}
+	if f.Severity != "" {
+		q = q.Where("severity = ?", f.Severity)
+	}
+	if f.MinSeverity != "" {
+		var allowed []string
+		threshold := severityOrder[f.MinSeverity]
+		for sev, ord := range severityOrder {
+			if ord >= threshold {
+				allowed = append(allowed, sev)
+			}
+		}
+		q = q.Where("severity IN ?", allowed)
+	}
+	if f.ResourceID != "" {
+		q = q.Where("resource_id = ?", f.ResourceID)
+	}
+	if f.Search != "" {
+		needle := "%" + strings.ToLower(f.Search) + "%"
+		q = q.Where(
+			"LOWER(message) LIKE ? OR LOWER(resource_name) LIKE ? OR LOWER(kind) LIKE ?",
+			needle, needle, needle,
+		)
+	}
+	if !f.Since.IsZero() {
+		q = q.Where("created_at >= ?", f.Since)
+	}
+	if !f.Until.IsZero() {
+		q = q.Where("created_at <= ?", f.Until)
+	}
+	var n int64
+	if err := q.Count(&n).Error; err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // PurgeBotSessions deletes all expired bot sessions.
