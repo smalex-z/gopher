@@ -33,6 +33,12 @@ type HealthService struct {
 	// `systemctl restart rathole-client` if the machine is durably broken.
 	mu             sync.Mutex
 	lastRecovery   map[string]time.Time
+
+	// Per-machine last observed status so we can emit events on transition only,
+	// not on every poll. Values: "ok" | "degraded" | "offline". Empty until the
+	// first check for a given machine — a "first observation" is not a
+	// transition and produces no event.
+	lastStatus map[string]string
 }
 
 const (
@@ -50,7 +56,67 @@ func NewHealthService(autoRecover bool) *HealthService {
 		autoRecover:    autoRecover,
 		stopCh:         make(chan struct{}),
 		lastRecovery:   map[string]time.Time{},
+		lastStatus:     map[string]string{},
 	}
+}
+
+// emitTransition records a state change as an event, but only when it's
+// actually a change. First observations produce nothing — we don't want a
+// "machine_connected" event for every machine on every server boot.
+//
+// Returns the previous status string so callers can branch on whether this
+// was a fresh observation (returns "") or a real transition.
+func (s *HealthService) emitTransition(m *db.Machine, newStatus, reason string) string {
+	s.mu.Lock()
+	prev := s.lastStatus[m.ID]
+	s.lastStatus[m.ID] = newStatus
+	s.mu.Unlock()
+
+	if prev == "" || prev == newStatus {
+		return prev
+	}
+
+	var kind string
+	switch newStatus {
+	case "ok":
+		// Came back from a non-ok state. Distinguish recovery (we had recently
+		// triggered a restart) from a passive reconnect.
+		s.mu.Lock()
+		recoveredRecently := false
+		if last, ok := s.lastRecovery[m.ID]; ok && time.Since(last) < 2*healthRecoveryCooldown {
+			recoveredRecently = true
+		}
+		s.mu.Unlock()
+		if recoveredRecently {
+			kind = "machine_recovered"
+		} else {
+			kind = "machine_connected"
+		}
+	case "degraded":
+		kind = "machine_degraded"
+	case "offline":
+		kind = "machine_disconnected"
+	default:
+		return prev
+	}
+
+	meta := ""
+	if reason != "" {
+		meta = fmt.Sprintf(`{"reason":%q}`, reason)
+	}
+	def := db.LookupKindDefault(kind)
+	db.RecordEvent(&db.Event{
+		Severity:     def.Severity,
+		Source:       "machine",
+		Kind:         kind,
+		Actor:        "system",
+		ResourceType: "machine",
+		ResourceID:   m.ID,
+		ResourceName: m.Name,
+		Message:      fmt.Sprintf(def.MessageTemplate, m.Name),
+		Metadata:     meta,
+	})
+	return prev
 }
 
 func (s *HealthService) Start() {
@@ -171,6 +237,7 @@ func (s *HealthService) checkViaAgent(ctx context.Context, m *db.Machine, subjec
 		if err := db.SetMachineAgentDegraded(m.ID, status.AgentVersion, now); err != nil {
 			log.Printf("health: persist agent-degraded for %s: %v", m.ID, err)
 		}
+		s.emitTransition(m, "degraded", errMsg)
 		s.maybeRecover(m, "rathole inactive")
 		return true
 	}
@@ -188,6 +255,7 @@ func (s *HealthService) checkViaAgent(ctx context.Context, m *db.Machine, subjec
 		OK:        true,
 		LatencyMS: latency,
 	})
+	s.emitTransition(m, "ok", "")
 	return true
 }
 
@@ -208,6 +276,7 @@ func (s *HealthService) checkViaTCP(ctx context.Context, m *db.Machine, subject 
 		})
 		// Without the agent we can't auto-restart. Just record the failure.
 		_ = db.SetMachineStatus(m.ID, "offline", nil)
+		s.emitTransition(m, "offline", err.Error())
 		return
 	}
 	_ = conn.Close()
@@ -220,6 +289,7 @@ func (s *HealthService) checkViaTCP(ctx context.Context, m *db.Machine, subject 
 		OK:        true,
 		LatencyMS: latency,
 	})
+	s.emitTransition(m, "ok", "")
 }
 
 // maybeRecover triggers `restart-rathole` via the agent when:
@@ -244,9 +314,26 @@ func (s *HealthService) maybeRecover(m *db.Machine, reason string) {
 		client := NewAgentClient(m)
 		if err := client.RestartRathole(ctx); err != nil {
 			log.Printf("health: restart-rathole on %s failed: %v", m.ID, err)
+			def := db.LookupKindDefault("recovery_failed")
+			db.RecordEvent(&db.Event{
+				Severity:     def.Severity,
+				Source:       "machine",
+				Kind:         "recovery_failed",
+				Actor:        "system",
+				ResourceType: "machine",
+				ResourceID:   m.ID,
+				ResourceName: m.Name,
+				Message:      fmt.Sprintf(def.MessageTemplate, m.Name),
+				Metadata:     fmt.Sprintf(`{"reason":%q,"error":%q}`, reason, err.Error()),
+			})
 			return
 		}
-		// Record the recovery attempt + an immediate re-check.
+		// Record the recovery attempt + an immediate re-check. We don't emit
+		// a "machine_recovered" event here yet — that follows on the next
+		// successful poll, where emitTransition can confirm the restart
+		// actually brought rathole back up. That avoids false-positive
+		// "recovered" events when the restart command succeeds but rathole
+		// fails to start.
 		_ = db.RecordHealthCheck(&db.HealthCheck{
 			Subject:   "machine:" + m.ID,
 			OK:        true,

@@ -346,20 +346,18 @@ export default function DashboardPage() {
           </div>
           <div className="space-y-2.5 max-h-48 overflow-y-auto">
             {activityData.slice(0, 8).map((ev: ActivityEvent) => {
-              const isMachine = ev.kind === 'machine_registered' || ev.kind === 'machine_deleted'
-              const isDelete = ev.kind === 'machine_deleted' || ev.kind === 'tunnel_deleted'
-              const label =
-                ev.kind === 'machine_registered' ? 'registered' :
-                ev.kind === 'machine_deleted'    ? 'deleted' :
-                ev.kind === 'tunnel_created'     ? 'created' : 'deleted'
+              const isMachine = ev.source === 'machine'
+              const dotColor =
+                ev.severity === 'critical' || ev.severity === 'error' ? 'bg-red-400' :
+                ev.severity === 'warn' ? 'bg-amber-400' :
+                ev.kind.endsWith('_deleted') ? 'bg-gray-400' :
+                isMachine ? 'bg-blue-400' : 'bg-green-400'
               return (
                 <div key={ev.id} className="flex items-center gap-3">
-                  <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${isDelete ? 'bg-red-400' : isMachine ? 'bg-blue-400' : 'bg-green-400'}`} />
+                  <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
                   <div className="flex items-center gap-1.5 flex-1 min-w-0">
                     {isMachine ? <Monitor size={11} className="text-gray-400 shrink-0" /> : <Network size={11} className="text-gray-400 shrink-0" />}
-                    <span className="text-xs text-gray-700 truncate">
-                      {isMachine ? 'Machine' : 'Tunnel'} <span className="font-medium">{ev.name}</span> {label}
-                    </span>
+                    <span className="text-xs text-gray-700 truncate">{ev.message}</span>
                   </div>
                   <span className="text-xs text-gray-400 shrink-0">{new Date(ev.created_at).toLocaleDateString()}</span>
                 </div>

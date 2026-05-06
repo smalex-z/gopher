@@ -16,10 +16,15 @@ import (
 const (
 	sessionDuration     = 24 * time.Hour
 	pendingTOTPDuration = 5 * time.Minute
-	auditLogCapacity    = 200
+	auditLogLimit       = 200
 )
 
 // ─── Audit log ───────────────────────────────────────────────────────────────
+//
+// The audit log was previously an in-memory ring buffer that lost everything
+// on restart. It now writes through to the unified `events` table (source="auth")
+// and the AuditLog() query filters back out by source. The AuditEvent shape is
+// preserved so existing handlers and the security page UI keep working.
 
 type AuditEvent struct {
 	Time  time.Time `json:"time"`
@@ -27,34 +32,14 @@ type AuditEvent struct {
 	IP    string    `json:"ip"`
 }
 
-type auditRing struct {
-	mu     sync.Mutex
-	events [auditLogCapacity]AuditEvent
-	next   int
-	count  int
-}
-
-func (a *auditRing) add(event, ip string) {
-	a.mu.Lock()
-	a.events[a.next] = AuditEvent{Time: time.Now(), Event: event, IP: ip}
-	a.next = (a.next + 1) % auditLogCapacity
-	if a.count < auditLogCapacity {
-		a.count++
+// authEventSeverity classifies auth events into the unified-events severity
+// scale. SUCCESS-y events are info; everything else is warn so the dashboard
+// has a stable signal of "something interesting happened."
+func authEventSeverity(event string) string {
+	if strings.HasPrefix(event, "LOGIN_SUCCESS") {
+		return "info"
 	}
-	a.mu.Unlock()
-}
-
-// Snapshot returns events newest-first.
-func (a *auditRing) Snapshot() []AuditEvent {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := make([]AuditEvent, a.count)
-	for i := range out {
-		// Walk backwards from last written slot.
-		idx := (a.next - 1 - i + auditLogCapacity) % auditLogCapacity
-		out[i] = a.events[idx]
-	}
-	return out
+	return "warn"
 }
 
 // ─── Sessions ─────────────────────────────────────────────────────────────────
@@ -79,7 +64,6 @@ type AuthService struct {
 	sessions    map[string]session
 	pendingTOTP map[string]pendingTOTPEntry
 	rl          *loginRateLimiter
-	audit       auditRing
 }
 
 func NewAuthService() *AuthService {
@@ -92,8 +76,21 @@ func NewAuthService() *AuthService {
 
 func (s *AuthService) RateLimiter() *loginRateLimiter { return s.rl }
 
-// AuditLog returns recent auth events, newest first.
-func (s *AuthService) AuditLog() []AuditEvent { return s.audit.Snapshot() }
+// AuditLog returns recent auth events, newest first. Reads from the unified
+// events table filtered to source=auth and projects rows back to the
+// AuditEvent shape the dashboard already expects.
+func (s *AuthService) AuditLog() []AuditEvent {
+	rows, err := db.GetEvents(db.EventFilter{Source: "auth", Limit: auditLogLimit})
+	if err != nil {
+		log.Printf("auth: audit log query failed: %v", err)
+		return nil
+	}
+	out := make([]AuditEvent, len(rows))
+	for i, r := range rows {
+		out[i] = AuditEvent{Time: r.CreatedAt, Event: r.Kind, IP: r.IP}
+	}
+	return out
+}
 
 func (s *AuthService) IsSetup() (bool, error) {
 	settings, err := db.GetSettings()
@@ -574,7 +571,14 @@ func (s *AuthService) createSession() (string, error) {
 }
 
 func (s *AuthService) logEvent(event, ip string) {
-	s.audit.add(event, ip)
+	db.RecordEvent(&db.Event{
+		Severity: authEventSeverity(event),
+		Source:   "auth",
+		Kind:     event,
+		Actor:    "user",
+		IP:       ip,
+		Message:  event, // event names are already human-readable enough; a richer template can come later
+	})
 	log.Printf("gopher-auth: %s ip=%s", event, ip)
 }
 

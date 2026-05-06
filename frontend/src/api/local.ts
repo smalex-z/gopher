@@ -96,10 +96,20 @@ export const localApi = {
     client.get<{ data: ActivityEvent[] }>('/local/activity').then(r => r.data.data),
 }
 
+export type EventSeverity = 'info' | 'warn' | 'error' | 'critical'
+export type EventSource = 'auth' | 'machine' | 'tunnel' | 'health' | 'firewall' | 'system'
+
 export interface ActivityEvent {
   id: string
-  kind: 'machine_registered' | 'machine_deleted' | 'tunnel_created' | 'tunnel_deleted'
-  resource_id: string
-  name: string
   created_at: string
+  severity: EventSeverity
+  source: EventSource
+  kind: string
+  actor?: string
+  resource_type?: string
+  resource_id?: string
+  resource_name?: string
+  ip?: string
+  message: string
+  metadata?: string
 }

@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	apperrors "github.com/smalex-z/gopher/internal/errors"
@@ -465,21 +466,151 @@ func CreateBotSession(s *BotSession) error {
 	return DB.Create(s).Error
 }
 
-// Activity Event Repository
+// ── Event Repository ─────────────────────────────────────────────────────────
+//
+// Producers should call RecordEvent for full control. LogEvent stays as a
+// back-compat shim for the original create/delete activity feed — it derives
+// severity/source/message from the kind so older call sites don't all need
+// to be updated at once.
 
-func LogEvent(kind, resourceID, name string) {
-	_ = DB.Create(&ActivityEvent{
-		ID:         randomID(),
-		Kind:       kind,
-		ResourceID: resourceID,
-		Name:       name,
-		CreatedAt:  time.Now(),
-	}).Error
+// KindDefault maps a known event kind to its default severity, source, and a
+// message template (with one %s slot for ResourceName). Unknown kinds get
+// info / system / kind-as-message.
+type KindDefault struct {
+	Severity        string
+	Source          string
+	MessageTemplate string
 }
 
-func GetRecentEvents(limit int) ([]ActivityEvent, error) {
-	var events []ActivityEvent
+var kindDefaults = map[string]KindDefault{
+	"machine_registered":   {"info", "machine", "Machine %s registered"},
+	"machine_deleted":      {"info", "machine", "Machine %s deleted"},
+	"machine_connected":    {"info", "machine", "Machine %s connected"},
+	"machine_disconnected": {"warn", "machine", "Machine %s disconnected"},
+	"machine_degraded":     {"warn", "machine", "Machine %s rathole inactive"},
+	"machine_recovered":    {"info", "machine", "Machine %s auto-recovered"},
+	"recovery_failed":      {"error", "machine", "Auto-recovery failed for machine %s"},
+	"agent_unreachable":    {"warn", "machine", "Agent unreachable on machine %s"},
+	"tunnel_created":       {"info", "tunnel", "Tunnel %s created"},
+	"tunnel_deleted":       {"info", "tunnel", "Tunnel %s deleted"},
+}
+
+// LookupKindDefault returns the registered defaults for a kind, or a fallback
+// (info / system / kind-as-message) for unknown kinds.
+func LookupKindDefault(kind string) KindDefault {
+	if d, ok := kindDefaults[kind]; ok {
+		return d
+	}
+	return KindDefault{Severity: "info", Source: "system", MessageTemplate: kind}
+}
+
+func RecordEvent(e *Event) {
+	if e.ID == "" {
+		e.ID = randomID()
+	}
+	if e.CreatedAt.IsZero() {
+		e.CreatedAt = time.Now()
+	}
+	if e.Severity == "" {
+		e.Severity = "info"
+	}
+	if e.Source == "" {
+		e.Source = "system"
+	}
+	if e.Actor == "" {
+		e.Actor = "system"
+	}
+	_ = DB.Create(e).Error
+}
+
+// LogEvent is the simple shim for the original activity feed. New code should
+// prefer RecordEvent so it can pass actor/IP/message/metadata explicitly.
+func LogEvent(kind, resourceID, name string) {
+	def := LookupKindDefault(kind)
+	msg := def.MessageTemplate
+	if name != "" && strings.Contains(def.MessageTemplate, "%s") {
+		msg = fmt.Sprintf(def.MessageTemplate, name)
+	}
+	resourceType := def.Source
+	if resourceType == "system" {
+		resourceType = ""
+	}
+	RecordEvent(&Event{
+		Severity:     def.Severity,
+		Source:       def.Source,
+		Kind:         kind,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		ResourceName: name,
+		Message:      msg,
+	})
+}
+
+// GetRecentEvents returns the most recent events (any source/severity).
+// Used by the dashboard "recent activity" widget.
+func GetRecentEvents(limit int) ([]Event, error) {
+	var events []Event
 	if err := DB.Order("created_at DESC").Limit(limit).Find(&events).Error; err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+// EventFilter narrows GetEvents queries. Empty fields mean "no filter on this
+// dimension".
+type EventFilter struct {
+	Source       string    // exact match: auth | machine | tunnel | health | firewall | system
+	Severity     string    // exact match: info | warn | error | critical
+	MinSeverity  string    // returns events at or above this severity
+	ResourceID   string
+	Since        time.Time // CreatedAt >=
+	Until        time.Time // CreatedAt <=
+	Limit        int       // 0 means default (200)
+}
+
+var severityOrder = map[string]int{
+	"info":     0,
+	"warn":     1,
+	"error":    2,
+	"critical": 3,
+}
+
+func GetEvents(f EventFilter) ([]Event, error) {
+	q := DB.Model(&Event{})
+	if f.Source != "" {
+		q = q.Where("source = ?", f.Source)
+	}
+	if f.Severity != "" {
+		q = q.Where("severity = ?", f.Severity)
+	}
+	if f.MinSeverity != "" {
+		// Translate the threshold into the set of severities at or above it.
+		// Cleaner than a stored numeric since we keep severity as a label.
+		var allowed []string
+		threshold := severityOrder[f.MinSeverity]
+		for sev, ord := range severityOrder {
+			if ord >= threshold {
+				allowed = append(allowed, sev)
+			}
+		}
+		q = q.Where("severity IN ?", allowed)
+	}
+	if f.ResourceID != "" {
+		q = q.Where("resource_id = ?", f.ResourceID)
+	}
+	if !f.Since.IsZero() {
+		q = q.Where("created_at >= ?", f.Since)
+	}
+	if !f.Until.IsZero() {
+		q = q.Where("created_at <= ?", f.Until)
+	}
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 200
+	}
+	q = q.Order("created_at DESC").Limit(limit)
+	var events []Event
+	if err := q.Find(&events).Error; err != nil {
 		return nil, err
 	}
 	return events, nil
