@@ -544,6 +544,66 @@ func PurgeHealthChecksBefore(before time.Time) (int64, error) {
 	return res.RowsAffected, res.Error
 }
 
+// HealthSummary aggregates the rolling window for the per-tunnel uptime % and
+// the sparkline pulse-of-life on the dashboard. Window defaults to 24h when
+// `since` is the zero value. UptimePercent is OK-count / total-count * 100,
+// rounded to one decimal; nil when no checks exist yet (caller can render
+// "—" instead of misleading "0%").
+type HealthSummary struct {
+	UptimePercent *float64      `json:"uptime_percent"`
+	TotalChecks   int           `json:"total_checks"`
+	OKChecks      int           `json:"ok_checks"`
+	Recent        []HealthCheck `json:"recent"` // newest-first, capped at 30
+	Latest        *HealthCheck  `json:"latest"`
+}
+
+// GetHealthSummary computes UptimePercent + a recent-checks slice for the
+// given subject in one trip. Used by both /machines/{id}/health and the
+// per-tunnel uptime column.
+func GetHealthSummary(subject string, since time.Time, recentLimit int) (*HealthSummary, error) {
+	if since.IsZero() {
+		since = time.Now().Add(-24 * time.Hour)
+	}
+	if recentLimit <= 0 {
+		recentLimit = 30
+	}
+
+	var totals struct {
+		Total int64
+		OK    int64
+	}
+	row := DB.Model(&HealthCheck{}).
+		Select("COUNT(*) as total, SUM(CASE WHEN ok THEN 1 ELSE 0 END) as ok").
+		Where("subject = ? AND checked_at >= ?", subject, since).
+		Row()
+	if err := row.Scan(&totals.Total, &totals.OK); err != nil {
+		return nil, err
+	}
+
+	summary := &HealthSummary{
+		TotalChecks: int(totals.Total),
+		OKChecks:    int(totals.OK),
+	}
+	if totals.Total > 0 {
+		pct := float64(totals.OK) / float64(totals.Total) * 100
+		// One decimal place — enough resolution to spot 99.x% without
+		// looking spuriously precise.
+		pct = float64(int(pct*10+0.5)) / 10
+		summary.UptimePercent = &pct
+	}
+
+	var recent []HealthCheck
+	if err := DB.Where("subject = ?", subject).Order("checked_at DESC").Limit(recentLimit).Find(&recent).Error; err != nil {
+		return nil, err
+	}
+	summary.Recent = recent
+	if len(recent) > 0 {
+		latest := recent[0]
+		summary.Latest = &latest
+	}
+	return summary, nil
+}
+
 // LatestHealthCheck returns the most recent check for a subject, or nil if none.
 func LatestHealthCheck(subject string) (*HealthCheck, error) {
 	var row HealthCheck

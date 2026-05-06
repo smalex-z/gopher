@@ -152,6 +152,7 @@ func NewRouter(
 				r.Post("/{id}/install-agent", agentH.InstallAgent)
 				r.Get("/{id}/health", agentH.MachineHealth)
 				r.Post("/{id}/health/check", agentH.RunCheck)
+				r.Get("/{id}/agent-status", agentH.AgentStatus)
 			})
 
 			r.Route("/tunnels", func(r chi.Router) {
@@ -162,6 +163,7 @@ func NewRouter(
 				r.Put("/{id}", tunnelH.Update)
 				r.Delete("/{id}", tunnelH.Delete)
 				r.Post("/{id}/test", tunnelH.Test)
+				r.Get("/{id}/health", tunnelH.Health)
 			})
 
 			r.Route("/logs", func(r chi.Router) {

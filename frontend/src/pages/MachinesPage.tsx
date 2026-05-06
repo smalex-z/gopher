@@ -6,6 +6,8 @@ import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
 import { vpsApi } from '../api/vps'
 import StatusBadge from '../components/StatusBadge'
+import MachineHealthPanel from '../components/MachineHealthPanel'
+import { relativeTime } from '../lib/time'
 import { toast } from '../lib/toast'
 import type { Machine, Tunnel, SSHKey } from '../types'
 
@@ -347,7 +349,9 @@ export default function MachinesPage() {
                           </button>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-gray-500">{m.last_seen ? new Date(m.last_seen).toLocaleString() : 'Never'}</td>
+                      <td className="px-4 py-3 text-gray-500" title={m.last_seen ? new Date(m.last_seen).toLocaleString() : ''}>
+                        {m.last_seen ? relativeTime(m.last_seen) : 'Never'}
+                      </td>
                       <td className="px-4 py-3">
                         <div className="flex gap-2">
                           <button
@@ -517,6 +521,12 @@ export default function MachinesPage() {
                           >
                             <Plus size={12} /> Add service tunnel
                           </button>
+
+                          {/* Health panel: uptime, sparkline, live agent
+                              metrics, manual "Test now". Only shown when
+                              the row is expanded — no expense for collapsed
+                              rows. */}
+                          <MachineHealthPanel machine={m} />
                         </td>
                       </tr>
                     )}

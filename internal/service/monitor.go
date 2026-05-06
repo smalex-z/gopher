@@ -127,10 +127,24 @@ func (s *MonitorService) checkTunnel(t db.Tunnel) {
 	if t.RatholePort == 0 {
 		return
 	}
+	start := time.Now()
 	t.Status = probeTunnel(t)
+	latency := int(time.Since(start) / time.Millisecond)
+
 	if err := db.UpdateTunnel(&t); err != nil {
 		log.Printf("monitor: failed to update tunnel %s: %v", t.ID, err)
 	}
+
+	// Record a health-check row per probe so the dashboard can render
+	// per-tunnel uptime % and a sparkline. "active" is the only fully-OK
+	// state — "connected" means rathole sees a client but the upstream
+	// service didn't respond, which the operator should still notice.
+	_ = db.RecordHealthCheck(&db.HealthCheck{
+		Subject:   "tunnel:" + t.ID,
+		OK:        t.Status == "active",
+		LatencyMS: latency,
+		ErrorMsg:  "",
+	})
 }
 
 // probeTunnel connects directly to the rathole port and classifies the result.

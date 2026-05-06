@@ -1,5 +1,5 @@
 import client from './client'
-import type { Machine, HealthCheck, ApiResponse } from '../types'
+import type { Machine, HealthCheck, HealthSummary, AgentStatus, ApiResponse } from '../types'
 
 export const machinesApi = {
   list: () => client.get<ApiResponse<Machine[]>>('/machines/').then(r => r.data),
@@ -19,7 +19,9 @@ export const machinesApi = {
   installAgent: (id: string) =>
     client.post<ApiResponse<{ command: string; instruction: string }>>(`/machines/${id}/install-agent`).then(r => r.data),
   health: (id: string) =>
-    client.get<{ data: { latest: HealthCheck | null; recent: HealthCheck[] } }>(`/machines/${id}/health`).then(r => r.data.data),
+    client.get<ApiResponse<HealthSummary>>(`/machines/${id}/health`).then(r => r.data.data),
   runCheck: (id: string) =>
     client.post<{ data: { check: HealthCheck; now: string } }>(`/machines/${id}/health/check`).then(r => r.data.data),
+  agentStatus: (id: string) =>
+    client.get<ApiResponse<AgentStatus>>(`/machines/${id}/agent-status`).then(r => r.data.data),
 }

@@ -1,5 +1,5 @@
 import client from './client'
-import type { Tunnel, ApiResponse } from '../types'
+import type { Tunnel, HealthSummary, ApiResponse } from '../types'
 
 export const tunnelsApi = {
   list: () => client.get<ApiResponse<Tunnel[]>>('/tunnels/').then(r => r.data),
@@ -9,4 +9,6 @@ export const tunnelsApi = {
   update: (id: string, data: Partial<Tunnel>) => client.put<ApiResponse<Tunnel>>(`/tunnels/${id}`, data).then(r => r.data),
   delete: (id: string) => client.delete(`/tunnels/${id}`).then(r => r.data),
   test: (id: string) => client.post(`/tunnels/${id}/test`).then(r => r.data),
+  health: (id: string) =>
+    client.get<ApiResponse<HealthSummary>>(`/tunnels/${id}/health`).then(r => r.data.data),
 }

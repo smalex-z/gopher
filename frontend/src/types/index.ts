@@ -46,6 +46,43 @@ export interface HealthCheck {
   recovered?: boolean
 }
 
+// HealthSummary aggregates the rolling-window stats the dashboard renders
+// (uptime % + sparkline). Returned by /machines/{id}/health and
+// /tunnels/{id}/health. UptimePercent is null until at least one check
+// has been recorded — the UI shows "—" rather than "0%" in that case.
+export interface HealthSummary {
+  uptime_percent: number | null
+  total_checks: number
+  ok_checks: number
+  recent: HealthCheck[]
+  latest: HealthCheck | null
+}
+
+// AgentStatus mirrors the agent's /status JSON (cmd/agent/main.go).
+// Fetched on demand when the operator expands a machine row.
+export interface AgentStatus {
+  agent_version: string
+  agent_uptime_seconds: number
+  restarts_served: number
+  rathole: {
+    active: boolean
+    state: string
+    substate: string
+  }
+  system: {
+    load_avg_1: number
+    load_avg_5: number
+    load_avg_15: number
+    mem_total_kb: number
+    mem_avail_kb: number
+    disk_free_bytes: number
+    disk_total_bytes: number
+    hostname: string
+    kernel: string
+  }
+  now: string
+}
+
 export interface Tunnel {
   id: string
   machine_id: string
