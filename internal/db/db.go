@@ -98,6 +98,27 @@ func migrateSSHKeysFromSettings() error {
 		return nil // already migrated
 	}
 
+	// Fresh installs never had the legacy ssh_public_key/ssh_private_key
+	// columns on app_settings — those were removed when the dedicated
+	// ssh_keys table landed. Probe the schema first so we don't trip GORM's
+	// warn-level logger with a "no such column" SQL error on every fresh
+	// install.
+	type colInfo struct{ Name string }
+	var cols []colInfo
+	if err := DB.Raw("PRAGMA table_info(app_settings)").Scan(&cols).Error; err != nil {
+		return nil // table doesn't exist yet — no legacy data to migrate
+	}
+	hasLegacyCols := false
+	for _, c := range cols {
+		if c.Name == "ssh_public_key" {
+			hasLegacyCols = true
+			break
+		}
+	}
+	if !hasLegacyCols {
+		return nil
+	}
+
 	// Read raw values directly from the DB column to avoid depending on the struct field.
 	var row struct {
 		PubKey  string `gorm:"column:ssh_public_key"`

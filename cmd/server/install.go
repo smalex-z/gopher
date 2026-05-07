@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,12 @@ const (
 	// jumpbox flow.
 	defaultJumpboxUser    = "gopher-jump"
 	defaultJumpboxHomeDir = "/var/lib/gopher-jump"
+
+	// defaultDashboardPort matches the --port flag's default in cmd/server/main.go.
+	// The install path opens this port in iptables so a freshly installed VPS
+	// is reachable for setup; once the operator picks a different port at
+	// runtime, ApplyDashboardPort handles the transition.
+	defaultDashboardPort = 4321
 )
 
 type installConfig struct {
@@ -79,6 +86,11 @@ func runInstall(args []string) error {
 	if err != nil {
 		return fmt.Errorf("pkill not found: %w", err)
 	}
+	// iptables is best-effort — we only use it to open the dashboard port at
+	// the very end. A box without iptables (e.g. nftables-only) just gets a
+	// warning instead of a hard failure, since the operator can still reach
+	// the dashboard via cloud-firewall rules or by switching modes later.
+	iptablesPath, _ := exec.LookPath("iptables")
 
 	fmt.Println("Installing Gopher service...")
 
@@ -170,12 +182,85 @@ func runInstall(args []string) error {
 		return err
 	}
 
+	if iptablesPath != "" {
+		if err := ensureDashboardPortOpen(iptablesPath, defaultDashboardPort); err != nil {
+			fmt.Printf("Warning: could not open dashboard port %d in iptables: %v\n", defaultDashboardPort, err)
+			fmt.Printf("         Open it manually: sudo iptables -I INPUT -p tcp --dport %d -j ACCEPT\n", defaultDashboardPort)
+		}
+	} else {
+		fmt.Printf("Note: iptables not found; ensure your firewall allows tcp/%d to reach the dashboard.\n", defaultDashboardPort)
+	}
+
+	fmt.Println()
 	fmt.Println("Installation complete.")
-	fmt.Printf("Service: %s\n", cfg.serviceName)
-	fmt.Printf("Binary: %s\n", targetBinary)
-	fmt.Printf("Data: %s\n", cfg.dataDir)
-	fmt.Printf("Manage with: systemctl status %s\n", cfg.serviceName)
+	fmt.Printf("  Service: %s\n", cfg.serviceName)
+	fmt.Printf("  Binary:  %s\n", targetBinary)
+	fmt.Printf("  Data:    %s\n", cfg.dataDir)
+	fmt.Printf("  Manage:  systemctl status %s\n", cfg.serviceName)
+	fmt.Println()
+
+	ips := detectPublicIPs()
+	fmt.Println("Next step — finish setup in your browser:")
+	if len(ips) == 0 {
+		fmt.Printf("  http://<server-ip>:%d\n", defaultDashboardPort)
+	} else {
+		for _, ip := range ips {
+			fmt.Printf("  http://%s:%d\n", ip, defaultDashboardPort)
+		}
+	}
+	fmt.Println()
+	fmt.Println("If your VPS sits behind a cloud firewall (AWS SG, GCP, etc.),")
+	fmt.Printf("  also allow inbound tcp/%d there before opening the URL.\n", defaultDashboardPort)
 	return nil
+}
+
+// ensureDashboardPortOpen idempotently inserts an INPUT ACCEPT rule for the
+// dashboard port. iptables -C exits non-zero if the rule is missing, so we
+// only insert when -C reports absent.
+func ensureDashboardPortOpen(iptablesPath string, port int) error {
+	portStr := fmt.Sprintf("%d", port)
+	check := exec.Command(iptablesPath, "-C", "INPUT", "-p", "tcp", "--dport", portStr, "-j", "ACCEPT")
+	if err := check.Run(); err == nil {
+		return nil // rule already present
+	}
+	insert := exec.Command(iptablesPath, "-I", "INPUT", "-p", "tcp", "--dport", portStr, "-j", "ACCEPT")
+	if out, err := insert.CombinedOutput(); err != nil {
+		return fmt.Errorf("%w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// detectPublicIPs returns non-loopback IPv4 addresses from local interfaces.
+// This is a best-effort hint for the operator — on cloud VMs the public IP
+// is usually NAT'd outside the box, but the private one we surface is still
+// useful for confirming "yes the service is bound" before they SSH into it.
+func detectPublicIPs() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var ips []string
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipNet.IP.To4()
+			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+				continue
+			}
+			ips = append(ips, ip.String())
+		}
+	}
+	return ips
 }
 
 func ensureSystemUser(username, homeDir string) error {
