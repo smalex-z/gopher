@@ -213,10 +213,25 @@ const jumpboxUsername = "gopher-jump"
 // jumpboxKeyOptions wraps each authorized_keys line with OpenSSH options
 // that lock the key to TCP-forwarding into local ports — exactly what the
 // jumpbox flow needs (`ssh -J gopher-jump@vps -p <rathole_port> ...`) and
-// nothing else. `restrict` disables shell, X11, agent forwarding, env,
-// and `~/.ssh/rc`. `permitopen=127.0.0.1:*` and `permitopen=localhost:*`
-// whitelist the only legitimate forward target — the rathole binds.
-const jumpboxKeyOptions = `restrict,permitopen="127.0.0.1:*",permitopen="localhost:*"`
+// nothing else.
+//
+// Layered semantics:
+//   - `restrict` disables shell, X11, agent forwarding, env, ~/.ssh/rc,
+//     PTY, AND port forwarding. It's the safe-by-default base.
+//   - `port-forwarding` re-enables port forwarding specifically. This
+//     IS required: `restrict,permitopen=...` alone leaves
+//     permit_port_forwarding_flag at 0 and sshd denies the channel
+//     before consulting the permitopen list (auth-options.c). The
+//     symptom is "channel 0: open failed: administratively prohibited"
+//     even though sshd accepts the publickey.
+//   - `permitopen="127.0.0.1:*"` / `permitopen="localhost:*"` narrow
+//     the now-enabled port forwarding down to localhost-only targets,
+//     i.e. the rathole bind addresses operators legitimately reach via
+//     the jumpbox flow.
+//
+// Net result: shell off, agent forwarding off, X11 off — but jumpbox
+// forwards to localhost ports work.
+const jumpboxKeyOptions = `restrict,port-forwarding,permitopen="127.0.0.1:*",permitopen="localhost:*"`
 
 // jumpboxUserExists reports whether the dedicated jumpbox user is set up.
 // During upgrades from pre-v0.1.0 deployments this returns false until the
