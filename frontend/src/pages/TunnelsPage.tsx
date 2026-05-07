@@ -152,13 +152,18 @@ export default function TunnelsPage() {
     updateMutation.mutate({ id: t.id, data: { name: t.name, local_port: t.local_port, subdomain: t.subdomain, private: !t.private } })
   }
 
-  // VPS config for jumpbox commands
+  // VPS config for jumpbox commands. The localStatus query above carries
+  // jumpbox_user — the dedicated, restricted system user we want operators
+  // to SSH into, not the dashboard's service user. Falls back to
+  // vps.username on legacy installs that haven't created the jumpbox user
+  // yet (re-running `gopher install` creates it and migrates the keys).
   const { data: vpsData } = useQuery({ queryKey: ['vps'], queryFn: () => import('../api/vps').then(m => m.vpsApi.get()) })
   const vps = vpsData?.data
 
   const jumpboxCmd = (t: Tunnel) => {
     if (!vps) return ''
-    const vpsAddr = `${vps.username}@${vps.host}`
+    const sshUser = localStatus?.jumpbox_user || vps.username
+    const vpsAddr = `${sshUser}@${vps.host}`
     return `ssh -L ${t.local_port}:localhost:${t.rathole_port} ${vpsAddr} -N`
   }
 

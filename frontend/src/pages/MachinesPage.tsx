@@ -102,7 +102,13 @@ export default function MachinesPage() {
   const machineSSHCmd = (m: Machine, key: SSHKey | undefined, os: JumpboxOS = 'unix'): { cmd: string; label: string; keyMissing: boolean; isJumpbox: boolean } | null => {
     if (m.tunnel_port === 0) return null
     const vpsHost = displayHost || vps?.host || '<vps-host>'
-    const vpsUser = vps?.username ?? localStatus?.os_user ?? '<vps-user>'
+    // Jumpbox commands target the dedicated gopher-jump user when it
+    // exists. Falls back to os_user (the dashboard service user) on
+    // legacy installs that haven't re-run `gopher install` yet — those
+    // installs are still vulnerable to the old "all keys in dashboard
+    // user's authorized_keys" misconfiguration; the operator should
+    // upgrade ASAP.
+    const vpsUser = localStatus?.jumpbox_user || vps?.username || localStatus?.os_user || '<vps-user>'
     const keyFile = key ? `~/.ssh/${toKeyFilename(key.name) || 'id_rsa'}` : null
     if (m.public_ssh) {
       const keyFlag = keyFile ? ` -i ${keyFile}` : ''
