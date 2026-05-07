@@ -56,9 +56,15 @@ type LocalServiceStatus struct {
 	DashboardPrivate     bool   `json:"dashboard_private"`
 	// DashboardPort is the port Gopher's HTTP server listens on.
 	DashboardPort        int    `json:"dashboard_port"`
-	// OSUser is the OS username Gopher runs as (e.g. "ubuntu"). Used to pre-fill
-	// the VPS jump-host username in SSH jumpbox commands.
+	// OSUser is the OS username Gopher runs as (e.g. "gopher"). Used for
+	// path/ownership checks and as a fallback for jumpbox commands when
+	// the dedicated jumpbox user isn't installed yet (legacy deployments).
 	OSUser               string `json:"os_user"`
+	// JumpboxUser is the dedicated, privilege-free user whose authorized_keys
+	// holds Gopher-managed keys. Frontend pre-fills SSH jumpbox commands
+	// with this. Empty string means the user hasn't been created yet — the
+	// frontend should warn the operator to re-run `gopher install`.
+	JumpboxUser          string `json:"jumpbox_user"`
 	// Fail2banSetupDone is true once fail2ban has been installed and configured
 	// by Gopher. Used to prompt existing installs to run the fail2ban setup step.
 	Fail2banSetupDone    bool     `json:"fail2ban_setup_done"`
@@ -99,6 +105,7 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 		DashboardPrivate:     settings.DashboardPrivate,
 		DashboardPort:        dashboardPort,
 		OSUser:               osUser,
+		JumpboxUser:          s.JumpboxUser(),
 		Fail2banSetupDone:    settings.Fail2banSetupDone,
 		BindIP:               settings.BindIP,
 		HostIPs:              detectHostIPs(),
@@ -196,31 +203,103 @@ func (s *LocalSetupService) DownloadSSHKey(id string) (string, error) {
 	return key.PrivateKey, nil
 }
 
-// ReconcileAuthorizedKeys ensures all current Gopher public keys are present
-// in ~/.ssh/authorized_keys so any Gopher key works as -i for both the
-// jump-host hop and the destination machine.
+// jumpboxUsername is the dedicated, privilege-free system user whose
+// ~/.ssh/authorized_keys holds Gopher-managed keys. Lookup-fail returns
+// an empty string + false; callers should fall back loudly rather than
+// silently writing to the dashboard's OS user (the historical, unsafe
+// behaviour). Re-running the install path creates the user.
+const jumpboxUsername = "gopher-jump"
+
+// jumpboxKeyOptions wraps each authorized_keys line with OpenSSH options
+// that lock the key to TCP-forwarding into local ports — exactly what the
+// jumpbox flow needs (`ssh -J gopher-jump@vps -p <rathole_port> ...`) and
+// nothing else. `restrict` disables shell, X11, agent forwarding, env,
+// and `~/.ssh/rc`. `permitopen=127.0.0.1:*` and `permitopen=localhost:*`
+// whitelist the only legitimate forward target — the rathole binds.
+const jumpboxKeyOptions = `restrict,permitopen="127.0.0.1:*",permitopen="localhost:*"`
+
+// jumpboxUserExists reports whether the dedicated jumpbox user is set up.
+// During upgrades from pre-v0.1.0 deployments this returns false until the
+// operator re-runs the installer; ReconcileAuthorizedKeys then loudly
+// surfaces the gap so they know to upgrade.
+func jumpboxUserExists() bool {
+	_, err := user.Lookup(jumpboxUsername)
+	return err == nil
+}
+
+// JumpboxUser returns the username SSH-jumpbox commands should target on
+// the VPS, or an empty string when no jumpbox user is configured.
+// Surfaced via /api/local/status so the frontend can build the correct
+// `ssh -J <user>@<host>` command.
+func (s *LocalSetupService) JumpboxUser() string {
+	if jumpboxUserExists() {
+		return jumpboxUsername
+	}
+	return ""
+}
+
+// ReconcileAuthorizedKeys ensures every Gopher-managed key is present in
+// the jumpbox user's ~/.ssh/authorized_keys (with restrict + permitopen
+// options) and removed from the dashboard OS user's authorized_keys —
+// auto-migrating pre-v0.1.0 deployments where the keys were dangerously
+// installed into the dashboard user's account.
+//
+// On installs that haven't created the jumpbox user yet (legacy deployments
+// that haven't re-run install/reinstall after upgrading) this falls back
+// to the historical behaviour with a loud warning. Operators who see the
+// warning should re-run the install command — that creates the user and
+// the next reconcile auto-migrates.
 func (s *LocalSetupService) ReconcileAuthorizedKeys() {
 	keys, err := db.GetSSHKeys()
 	if err != nil {
 		fmt.Printf("WARN: reconcile authorized_keys: could not list keys: %v\n", err)
 		return
 	}
+
+	if !jumpboxUserExists() {
+		fmt.Printf("WARN: jumpbox user %q not present; falling back to dashboard user's authorized_keys (insecure). Re-run `gopher install` to create the jumpbox user and migrate keys.\n", jumpboxUsername)
+		// Fall back to the historical (unsafe) path so existing operator
+		// workflows don't break before they upgrade.
+		dashboardUser, err := user.Current()
+		if err != nil {
+			fmt.Printf("WARN: reconcile authorized_keys (fallback): %v\n", err)
+			return
+		}
+		for _, k := range keys {
+			if err := addToAuthorizedKeysFor(dashboardUser.Username, k.PublicKey, ""); err != nil {
+				fmt.Printf("WARN: reconcile authorized_keys: %q: %v\n", k.Name, err)
+			}
+		}
+		return
+	}
+
+	// Write to gopher-jump's authorized_keys with the restrict line.
 	for _, k := range keys {
-		if err := addToAuthorizedKeys(k.PublicKey); err != nil {
-			fmt.Printf("WARN: reconcile authorized_keys: could not add key %q: %v\n", k.Name, err)
+		if err := addToAuthorizedKeysFor(jumpboxUsername, k.PublicKey, jumpboxKeyOptions); err != nil {
+			fmt.Printf("WARN: reconcile authorized_keys (jumpbox): %q: %v\n", k.Name, err)
+		}
+	}
+
+	// Migrate: remove every Gopher-managed key from the dashboard user's
+	// authorized_keys. Matching is on type+keydata, so any pre-existing
+	// non-Gopher keys (operator-added) survive untouched.
+	if dashboardUser, err := user.Current(); err == nil && dashboardUser.Username != jumpboxUsername {
+		for _, k := range keys {
+			if err := removeFromAuthorizedKeysFor(dashboardUser.Username, k.PublicKey); err != nil {
+				fmt.Printf("WARN: scrub dashboard authorized_keys: %q: %v\n", k.Name, err)
+			}
 		}
 	}
 }
 
-// addToAuthorizedKeys idempotently appends pubKey to ~/.ssh/authorized_keys.
-// Matching is on type+keydata only (comment field is ignored).
-// Falls back to sudo for directory/file operations when running as a system user.
-func addToAuthorizedKeys(pubKey string) error {
-	path, err := authorizedKeysPath()
-	if err != nil {
-		return err
-	}
-	u, err := user.Current()
+// addToAuthorizedKeysFor idempotently appends pubKey to the named user's
+// ~/.ssh/authorized_keys. Matching is on type+keydata only (options +
+// comment fields are ignored), so re-running with different options
+// updates the line without duplicating it. Falls back to sudo for
+// directory/file operations when the dashboard user can't write to the
+// target homedir directly.
+func addToAuthorizedKeysFor(username, pubKey, options string) error {
+	path, err := authorizedKeysPathFor(username)
 	if err != nil {
 		return err
 	}
@@ -231,11 +310,10 @@ func addToAuthorizedKeys(pubKey string) error {
 		if err2 := exec.Command("sudo", "mkdir", "-p", sshDir).Run(); err2 != nil { // #nosec G204
 			return fmt.Errorf("mkdir %s: %w", sshDir, err2)
 		}
-		_ = exec.Command("sudo", "chmod", "700", sshDir).Run()                              // #nosec G204
-		_ = exec.Command("sudo", "chown", u.Username+":"+u.Username, sshDir).Run()          // #nosec G204
+		_ = exec.Command("sudo", "chmod", "700", sshDir).Run()                       // #nosec G204
+		_ = exec.Command("sudo", "chown", username+":"+username, sshDir).Run()       // #nosec G204
 	}
 
-	// Read existing content.
 	var existing []byte
 	if data, rerr := os.ReadFile(path); rerr == nil {
 		existing = data
@@ -248,19 +326,35 @@ func addToAuthorizedKeys(pubKey string) error {
 	if len(parts) < 2 {
 		return fmt.Errorf("invalid public key format")
 	}
-	token := parts[0] + " " + parts[1]
-	for _, line := range strings.Split(string(existing), "\n") {
-		lp := strings.Fields(line)
-		if len(lp) >= 2 && lp[0]+" "+lp[1] == token {
-			return nil // already present
-		}
+
+	// authorized_keys lines may have option prefixes; locate the keydata
+	// inside each line so we match on type+blob and don't duplicate.
+	keydataToken, err := keydataToken(trimmed)
+	if err != nil {
+		return err
 	}
 
-	content := string(existing)
-	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
-		content += "\n"
+	// If a line for the same key already exists, replace it in place — that
+	// way upgrading from no-options to restrict/permitopen rewrites the
+	// existing line without leaving an unrestricted duplicate behind.
+	var rebuilt []string
+	updated := false
+	wantLine := authorizedKeysLine(trimmed, options)
+	for _, line := range strings.Split(string(existing), "\n") {
+		if line == "" {
+			continue
+		}
+		if tok, ok := keydataTokenFromLine(line); ok && tok == keydataToken {
+			rebuilt = append(rebuilt, wantLine)
+			updated = true
+			continue
+		}
+		rebuilt = append(rebuilt, line)
 	}
-	content += trimmed + "\n"
+	if !updated {
+		rebuilt = append(rebuilt, wantLine)
+	}
+	content := strings.Join(rebuilt, "\n") + "\n"
 
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		cmd := exec.Command("sudo", "tee", path) // #nosec G204
@@ -269,19 +363,18 @@ func addToAuthorizedKeys(pubKey string) error {
 		if err2 := cmd.Run(); err2 != nil {
 			return err2
 		}
-		_ = exec.Command("sudo", "chmod", "600", path).Run()                             // #nosec G204
-		_ = exec.Command("sudo", "chown", u.Username+":"+u.Username, path).Run()         // #nosec G204
+		_ = exec.Command("sudo", "chmod", "600", path).Run()                       // #nosec G204
+		_ = exec.Command("sudo", "chown", username+":"+username, path).Run()       // #nosec G204
 	}
 	return nil
 }
 
-// removeFromAuthorizedKeys removes the line matching pubKey from authorized_keys.
-func removeFromAuthorizedKeys(pubKey string) error {
-	path, err := authorizedKeysPath()
-	if err != nil {
-		return err
-	}
-	u, err := user.Current()
+// removeFromAuthorizedKeysFor removes the line matching pubKey (by
+// type+keydata, ignoring options and comment) from the named user's
+// authorized_keys. Used during migration to scrub the dashboard user's
+// file after writing the same key under the jumpbox user.
+func removeFromAuthorizedKeysFor(username, pubKey string) error {
+	path, err := authorizedKeysPathFor(username)
 	if err != nil {
 		return err
 	}
@@ -292,19 +385,17 @@ func removeFromAuthorizedKeys(pubKey string) error {
 	} else if out, rerr2 := exec.Command("sudo", "cat", path).Output(); rerr2 == nil { // #nosec G204
 		existing = out
 	} else {
-		return nil // file doesn't exist, nothing to do
-	}
-
-	trimmed := strings.TrimSpace(pubKey)
-	parts := strings.Fields(trimmed)
-	if len(parts) < 2 {
 		return nil
 	}
-	token := parts[0] + " " + parts[1]
+
+	keydataToken, err := keydataToken(pubKey)
+	if err != nil {
+		return nil
+	}
+
 	var kept []string
 	for _, line := range strings.Split(string(existing), "\n") {
-		lp := strings.Fields(line)
-		if len(lp) >= 2 && lp[0]+" "+lp[1] == token {
+		if tok, ok := keydataTokenFromLine(line); ok && tok == keydataToken {
 			continue
 		}
 		kept = append(kept, line)
@@ -321,18 +412,140 @@ func removeFromAuthorizedKeys(pubKey string) error {
 		if err2 := cmd.Run(); err2 != nil {
 			return err2
 		}
-		_ = exec.Command("sudo", "chmod", "600", path).Run()                             // #nosec G204
-		_ = exec.Command("sudo", "chown", u.Username+":"+u.Username, path).Run()         // #nosec G204
+		_ = exec.Command("sudo", "chmod", "600", path).Run()                       // #nosec G204
+		_ = exec.Command("sudo", "chown", username+":"+username, path).Run()       // #nosec G204
 	}
 	return nil
 }
 
-func authorizedKeysPath() (string, error) {
+// addToAuthorizedKeys is the legacy helper kept so existing call sites in
+// bootstrap.go / CreateSSHKey continue to compile. It now routes to the
+// jumpbox user when configured and falls back to the historical
+// dashboard-user path with a loud warning otherwise.
+func addToAuthorizedKeys(pubKey string) error {
+	if jumpboxUserExists() {
+		return addToAuthorizedKeysFor(jumpboxUsername, pubKey, jumpboxKeyOptions)
+	}
+	fmt.Printf("WARN: jumpbox user %q not present; adding key to dashboard user's authorized_keys (insecure). Re-run `gopher install`.\n", jumpboxUsername)
 	u, err := user.Current()
 	if err != nil {
-		return "", err
+		return err
+	}
+	return addToAuthorizedKeysFor(u.Username, pubKey, "")
+}
+
+func removeFromAuthorizedKeys(pubKey string) error {
+	if jumpboxUserExists() {
+		_ = removeFromAuthorizedKeysFor(jumpboxUsername, pubKey)
+	}
+	if u, err := user.Current(); err == nil {
+		_ = removeFromAuthorizedKeysFor(u.Username, pubKey)
+	}
+	return nil
+}
+
+// authorizedKeysPathFor resolves the absolute path of the named user's
+// authorized_keys file via the system passwd database. We don't synthesise
+// "/home/<u>" because system users (gopher-jump) commonly live elsewhere
+// (/var/lib/gopher-jump per install.go).
+func authorizedKeysPathFor(username string) (string, error) {
+	u, err := user.Lookup(username)
+	if err != nil {
+		return "", fmt.Errorf("lookup user %q: %w", username, err)
+	}
+	if u.HomeDir == "" {
+		return "", fmt.Errorf("user %q has no home directory in passwd", username)
 	}
 	return filepath.Join(u.HomeDir, ".ssh", "authorized_keys"), nil
+}
+
+// keydataToken returns the "type keydata" pair from a public key line —
+// the portion that identifies a unique key regardless of options or
+// comment. Returns ("", error) on malformed input.
+func keydataToken(line string) (string, error) {
+	parts := strings.Fields(strings.TrimSpace(line))
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid public key format")
+	}
+	return parts[0] + " " + parts[1], nil
+}
+
+// keydataTokenFromLine extracts type+keydata from an authorized_keys line
+// that may begin with options. Options are a comma-separated list with
+// optional `key="quoted value"` pairs that may themselves contain commas;
+// we walk the string honouring quotes and stop at the first whitespace
+// outside quotes. Whatever follows is the standard `type keydata [comment]`
+// format. Returns ("", false) for blank or comment-only lines.
+func keydataTokenFromLine(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", false
+	}
+	// If the line starts with a known key type, there are no options.
+	if isKnownKeyType(firstField(trimmed)) {
+		tok, err := keydataToken(trimmed)
+		return tok, err == nil
+	}
+	// Otherwise parse past an options list.
+	rest := skipOptionsList(trimmed)
+	if rest == "" {
+		return "", false
+	}
+	tok, err := keydataToken(rest)
+	return tok, err == nil
+}
+
+// authorizedKeysLine assembles the final line we'll write — `options key
+// comment` when options is non-empty, else just `key comment`.
+func authorizedKeysLine(pubKey, options string) string {
+	trimmed := strings.TrimSpace(pubKey)
+	if options == "" {
+		return trimmed
+	}
+	return options + " " + trimmed
+}
+
+// isKnownKeyType returns true when s is one of the public-key algorithm
+// identifiers OpenSSH writes at the start of an authorized_keys line.
+// The minimal set covers everything modern Gopher generates — extend as
+// needed if we ever support more.
+func isKnownKeyType(s string) bool {
+	switch s {
+	case "ssh-rsa", "ssh-dss", "ssh-ed25519", "ssh-ed25519-cert-v01@openssh.com",
+		"ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+		"sk-ecdsa-sha2-nistp256@openssh.com", "sk-ssh-ed25519@openssh.com":
+		return true
+	}
+	return false
+}
+
+// firstField returns s up to the first whitespace, or all of s if none.
+func firstField(s string) string {
+	for i, r := range s {
+		if r == ' ' || r == '\t' {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+// skipOptionsList returns the remainder of an authorized_keys line after
+// the leading options list. Whitespace inside quoted values doesn't
+// terminate the list — `permitopen="127.0.0.1:*",restrict` is valid.
+func skipOptionsList(line string) string {
+	inQuotes := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch c {
+		case '"':
+			inQuotes = !inQuotes
+		case ' ', '\t':
+			if !inQuotes {
+				return strings.TrimLeft(line[i:], " \t")
+			}
+		}
+	}
+	return ""
 }
 
 // writeLocalFile writes content to path. If the direct write fails due to

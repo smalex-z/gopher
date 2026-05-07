@@ -18,6 +18,20 @@ for cmd in /usr/sbin/iptables /sbin/iptables /usr/sbin/iptables-save /sbin/iptab
 done
 echo "✓ Sudoers up to date"
 
+echo "→ Ensuring jumpbox system user exists..."
+# Dedicated, privilege-free user whose ~/.ssh/authorized_keys holds
+# Gopher-managed keys. Created here too (not just by `gopher install`)
+# so legacy deployments running scripts/reinstall.sh as their upgrade
+# path get the safer config without an extra step.
+JUMPBOX_USER="gopher-jump"
+JUMPBOX_HOME="/var/lib/gopher-jump"
+if ! id -u "$JUMPBOX_USER" >/dev/null 2>&1; then
+  sudo useradd --system --shell /usr/sbin/nologin --home-dir "$JUMPBOX_HOME" --create-home "$JUMPBOX_USER"
+  echo "  Created system user $JUMPBOX_USER (home $JUMPBOX_HOME)"
+fi
+sudo install -d -m 0700 -o "$JUMPBOX_USER" -g "$JUMPBOX_USER" "$JUMPBOX_HOME/.ssh"
+echo "✓ Jumpbox user ready"
+
 echo "→ Reloading systemd units..."
 sudo systemctl daemon-reload
 

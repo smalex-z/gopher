@@ -16,6 +16,22 @@ const (
 	defaultInstallDir  = "/opt/gopher"
 	defaultDataDir     = "/var/lib/gopher"
 	defaultServiceName = "gopher"
+
+	// defaultJumpboxUser is a separate, deliberately privilege-free system
+	// user whose ~/.ssh/authorized_keys holds Gopher-managed keys. The
+	// dashboard's OS user (defaultInstallUser) used to hold those keys
+	// directly, which meant a leaked Gopher SSH key gave the holder shell
+	// access to the dashboard host with sudo iptables rights and read
+	// access to gopher.db (every per-machine SSH private key, every token).
+	//
+	// The jumpbox user has no shell, no sudo, no homedir contents the
+	// dashboard cares about. Its authorized_keys lines are written with
+	// `restrict,permitopen="127.0.0.1:*"` so even a fully-compromised key
+	// can only be used to forward to localhost ports on the VPS — exactly
+	// the rathole bind addresses operators legitimately reach via the
+	// jumpbox flow.
+	defaultJumpboxUser    = "gopher-jump"
+	defaultJumpboxHomeDir = "/var/lib/gopher-jump"
 )
 
 type installConfig struct {
@@ -68,6 +84,23 @@ func runInstall(args []string) error {
 
 	if err := ensureSystemUser(cfg.user, cfg.installDir); err != nil {
 		return err
+	}
+
+	// Create the jumpbox user. Idempotent — pre-existing installs that
+	// re-run install pick this up automatically. The user is created with
+	// no shell so even if its authorized_keys lines somehow lacked the
+	// `restrict` option, the keys still couldn't open a shell.
+	if err := ensureSystemUser(defaultJumpboxUser, defaultJumpboxHomeDir); err != nil {
+		return fmt.Errorf("create jumpbox user: %w", err)
+	}
+	// Ensure ~gopher-jump/.ssh exists with correct perms so the runtime
+	// reconcile can write authorized_keys there without race-creating it.
+	jumpboxSSHDir := filepath.Join(defaultJumpboxHomeDir, ".ssh")
+	if err := os.MkdirAll(jumpboxSSHDir, 0700); err != nil {
+		return fmt.Errorf("create %s: %w", jumpboxSSHDir, err)
+	}
+	if err := chownRecursive(defaultJumpboxUser, jumpboxSSHDir); err != nil {
+		return fmt.Errorf("chown %s: %w", jumpboxSSHDir, err)
 	}
 
 	if err := os.MkdirAll(cfg.installDir, 0755); err != nil {
