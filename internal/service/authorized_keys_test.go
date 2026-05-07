@@ -1,6 +1,9 @@
 package service
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // keydataTokenFromLine handles four authorized_keys line shapes:
 //   1. Plain: "ssh-ed25519 AAAA... comment"
@@ -87,8 +90,28 @@ func TestAuthorizedKeysLine_NoOptions(t *testing.T) {
 
 func TestAuthorizedKeysLine_WithOptions(t *testing.T) {
 	got := authorizedKeysLine("ssh-ed25519 AAAA gopher", jumpboxKeyOptions)
-	want := `restrict,permitopen="127.0.0.1:*",permitopen="localhost:*" ssh-ed25519 AAAA gopher`
+	want := `restrict,port-forwarding,permitopen="127.0.0.1:*",permitopen="localhost:*" ssh-ed25519 AAAA gopher`
 	if got != want {
 		t.Errorf("line = %q, want %q", got, want)
+	}
+}
+
+// TestJumpboxKeyOptions_HasPortForwardingReEnable guards against a future
+// refactor that drops `port-forwarding` from the options string.
+//
+// `restrict` alone disables port forwarding — the permitopen filter list
+// is consulted only AFTER permit_port_forwarding_flag is enabled. Without
+// `port-forwarding`, sshd denies the channel-open with "administratively
+// prohibited" even though authentication succeeds, which broke every
+// operator's `ssh -J gopher-jump@vps -p <rathole_port> ...` flow.
+//
+// The order matters too: `port-forwarding` must come AFTER `restrict`
+// (left-to-right evaluation; later options override earlier ones).
+func TestJumpboxKeyOptions_HasPortForwardingReEnable(t *testing.T) {
+	if !strings.HasPrefix(jumpboxKeyOptions, "restrict,port-forwarding,") {
+		t.Fatalf(
+			"jumpboxKeyOptions must start with `restrict,port-forwarding,` to "+
+				"actually permit jumpbox forwarding; got %q", jumpboxKeyOptions,
+		)
 	}
 }
