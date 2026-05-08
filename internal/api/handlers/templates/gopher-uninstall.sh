@@ -89,34 +89,50 @@ else
 fi
 
 # ── Notify the server BEFORE tearing down local services ─────────────────────
-# Best-effort: pulls GOPHER_AGENT_TOKEN from the agent's env file, posts it to
+# Pulls GOPHER_AGENT_TOKEN from the agent's env file, posts it to
 # /api/machines/self-delete on the dashboard. The dashboard resolves the
 # token to the machine record and deletes it, so the dashboard's machine
 # list doesn't show a stale entry after a local uninstall.
 #
-# Skipped silently when:
-#   - HOST_URL wasn't templated in (e.g. someone running an old script copy)
-#   - the agent isn't installed (machine pre-dates the agent)
-#   - curl/wget aren't available
-# All failure modes leave the local cleanup proceeding normally — the
-# operator can delete the machine from the dashboard manually if needed.
-if [ -n "$HOST_URL" ] && [ -f "$AGENT_CONFIG" ]; then
+# We loudly warn when we can't notify (rather than skipping silently) — a
+# stale machine record on the dashboard is the kind of dangling state an
+# operator wants to know to clean up manually. The local teardown still
+# proceeds in every failure mode.
+NOTIFIED=0
+if [ -z "$HOST_URL" ]; then
+  echo "Skipping server notification: this script was installed before HOST_URL templating (re-bootstrap or update from the dashboard to fix)."
+elif [ ! -f "$AGENT_CONFIG" ]; then
+  echo "Skipping server notification: $AGENT_CONFIG missing (agent not installed, or pre-agent machine)."
+else
   AGENT_TOKEN=$(grep -E '^GOPHER_AGENT_TOKEN=' "$AGENT_CONFIG" 2>/dev/null | head -1 | cut -d= -f2-)
-  if [ -n "$AGENT_TOKEN" ]; then
+  if [ -z "$AGENT_TOKEN" ]; then
+    echo "Skipping server notification: GOPHER_AGENT_TOKEN not found in $AGENT_CONFIG."
+  else
     echo "Notifying $HOST_URL that this machine is being uninstalled..."
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL -X POST "$HOST_URL/api/machines/self-delete" \
-        -H "Authorization: Bearer $AGENT_TOKEN" \
-        --max-time 10 >/dev/null 2>&1 \
-        && echo "  Server notified" \
-        || echo "  Warning: server did not acknowledge (continuing anyway)"
+      if curl -fsS -X POST "$HOST_URL/api/machines/self-delete" \
+           -H "Authorization: Bearer $AGENT_TOKEN" \
+           --max-time 10 >/dev/null 2>&1; then
+        NOTIFIED=1
+        echo "  Server notified"
+      else
+        echo "  WARN: curl call to /api/machines/self-delete failed"
+      fi
     elif command -v wget >/dev/null 2>&1; then
-      wget -q --method=POST --header="Authorization: Bearer $AGENT_TOKEN" \
-        --timeout=10 "$HOST_URL/api/machines/self-delete" -O /dev/null \
-        && echo "  Server notified" \
-        || echo "  Warning: server did not acknowledge (continuing anyway)"
+      if wget -q --method=POST --header="Authorization: Bearer $AGENT_TOKEN" \
+           --timeout=10 "$HOST_URL/api/machines/self-delete" -O /dev/null; then
+        NOTIFIED=1
+        echo "  Server notified"
+      else
+        echo "  WARN: wget call to /api/machines/self-delete failed"
+      fi
+    else
+      echo "  WARN: neither curl nor wget is installed — cannot notify server"
     fi
   fi
+fi
+if [ "$NOTIFIED" != "1" ]; then
+  echo "  → Open the dashboard and remove this machine manually so its record doesn't linger."
 fi
 
 # Remove the VPS SSH public key from authorized_keys so the server can no

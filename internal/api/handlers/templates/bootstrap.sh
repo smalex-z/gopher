@@ -252,27 +252,47 @@ if [ -n "$AGENT_TOKEN" ] && [ "$AGENT_TOKEN" != "null" ] && [ -n "$AGENT_PORT" ]
     $SUDO touch "$SUDOERS_FILE"
     $SUDO sh -c "grep -v '^gopher ' '$SUDOERS_FILE' 2>/dev/null > '$SUDOERS_FILE.tmp' || true; echo 'gopher ALL=(ALL) NOPASSWD: ALL' >> '$SUDOERS_FILE.tmp'; mv '$SUDOERS_FILE.tmp' '$SUDOERS_FILE'; chmod 0440 '$SUDOERS_FILE'"
 
-    # 3. Download agent binary.
-    AGENT_URL="$HOST_URL/static/agents/gopher-agent-${AGENT_ARCH_TAG}"
-    rm -f /tmp/gopher-agent.new
-    if command -v wget &>/dev/null; then
-      wget -q "$AGENT_URL" -O /tmp/gopher-agent.new || { echo "  WARN: agent download failed"; rm -f /tmp/gopher-agent.new; }
-    else
-      curl -fsSL "$AGENT_URL" -o /tmp/gopher-agent.new || { echo "  WARN: agent download failed"; rm -f /tmp/gopher-agent.new; }
-    fi
-    if [ -s /tmp/gopher-agent.new ]; then
-      $SUDO install -m 0755 -o root -g root /tmp/gopher-agent.new /usr/local/bin/gopher-agent
-      rm -f /tmp/gopher-agent.new
-
-      # 4. Agent config (env file consumed by EnvironmentFile=).
-      $SUDO mkdir -p /etc/gopher-agent
-      $SUDO tee /etc/gopher-agent/config.env >/dev/null <<EOF || true
+    # 3. Pre-write the agent config BEFORE attempting the binary download.
+    # Two benefits: (a) gopher-uninstall.sh can still authenticate against
+    # /api/machines/self-delete if the binary install fails, so the dashboard
+    # stays in sync after a manual cleanup; (b) the migration tool can finish
+    # the install later without round-tripping the token through the user.
+    $SUDO mkdir -p /etc/gopher-agent
+    $SUDO tee /etc/gopher-agent/config.env >/dev/null <<EOF || true
 GOPHER_AGENT_TOKEN=$AGENT_TOKEN
 GOPHER_AGENT_PORT=$AGENT_PORT
 GOPHER_AGENT_UNIT=rathole-client.service
 EOF
-      $SUDO chmod 640 /etc/gopher-agent/config.env
-      $SUDO chown root:gopher /etc/gopher-agent/config.env
+    $SUDO chmod 640 /etc/gopher-agent/config.env
+    $SUDO chown root:gopher /etc/gopher-agent/config.env
+
+    # 4. Download agent binary. We prefer curl (its -fS pair shows transport
+    # errors loudly so a failed download stops being a silent skip) and fall
+    # back to a cert-tolerant retry the way migrate.sh does — old distros
+    # without recent CA bundles otherwise fail TLS even though the URL is
+    # fine. wget is the no-curl fallback; we drop -q so the same diagnostics
+    # surface there too.
+    AGENT_URL="$HOST_URL/static/agents/gopher-agent-${AGENT_ARCH_TAG}"
+    rm -f /tmp/gopher-agent.new
+    echo "  Downloading agent: $AGENT_URL"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fSL "$AGENT_URL" -o /tmp/gopher-agent.new \
+        || { echo "  curl failed; retrying with --insecure (cert validation off)"; \
+             curl -fSL --insecure "$AGENT_URL" -o /tmp/gopher-agent.new || true; }
+    elif command -v wget >/dev/null 2>&1; then
+      wget -nv "$AGENT_URL" -O /tmp/gopher-agent.new \
+        || { echo "  wget failed; retrying with --no-check-certificate"; \
+             wget -nv --no-check-certificate "$AGENT_URL" -O /tmp/gopher-agent.new || true; }
+    else
+      echo "  ERROR: neither curl nor wget is installed — cannot download agent"
+    fi
+    if [ ! -s /tmp/gopher-agent.new ]; then
+      echo "  WARN: agent download failed — dashboard's migration tool can finish the install later (token stored at /etc/gopher-agent/config.env)"
+      rm -f /tmp/gopher-agent.new
+    fi
+    if [ -s /tmp/gopher-agent.new ]; then
+      $SUDO install -m 0755 -o root -g root /tmp/gopher-agent.new /usr/local/bin/gopher-agent
+      rm -f /tmp/gopher-agent.new
 
       # 5. Hand /etc/rathole/client.toml to gopher so the agent can write
       # config-push directly without sudo. rathole-client (running as
