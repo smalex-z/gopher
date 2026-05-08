@@ -71,7 +71,7 @@ function NavDropdown({ label, icon: Icon, items }: {
 }
 
 function AppShell() {
-  const { isLoading, isSetup, isAuthenticated, localSetupDone, firewallConfigured, fail2banSetupDone, refetch } = useAuth()
+  const { isLoading, isSetup, isAuthenticated, localSetupDone, firewallConfigured, sshKeyConfigured, fail2banSetupDone, refetch } = useAuth()
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [isUpdating, setIsUpdating] = useState(false)
 
@@ -113,6 +113,7 @@ function AppShell() {
   if (!isAuthenticated) return <LoginPage />
   if (!localSetupDone) return <SetupPage initialStep={2} />
   if (!firewallConfigured) return <SetupPage initialStep={3} />
+  if (!sshKeyConfigured) return <SetupPage initialStep={4} />
   if (!fail2banSetupDone) return <SetupPage initialStep={5} />
 
   const handleLogout = async () => {

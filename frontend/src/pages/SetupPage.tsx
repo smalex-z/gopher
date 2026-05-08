@@ -121,17 +121,15 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
 
   const load = () => localApi.status().then(setStatus).catch(() => {})
 
-  // On first mount, load status and pre-populate domain if already saved
+  // On first mount, load status and pre-populate domain if already saved.
+  // (We can't reach this step with local_setup_done=true — the gate in AppShell
+  // would skip past us — so no else-branch is needed.)
   useEffect(() => {
     localApi.status().then(s => {
       setStatus(s)
       if (s.domain) {
         setDomain(s.domain)
-        setServerHost(s.domain)
         setSkipCaddy(false)
-      } else if (s.local_setup_done) {
-        setSkipCaddy(true)
-        if (s.server_host) setServerHost(s.server_host)
       }
     }).catch(() => {})
   }, [])
@@ -452,26 +450,45 @@ function FirewallStep({ onDone }: { onDone: () => void }) {
   const [done, setDone] = useState(false)
   const [skipping, setSkipping] = useState(false)
   const [domain, setDomain] = useState('')
+  const [caddyInstalled, setCaddyInstalled] = useState(false)
+  // Countdown shown on the success card before we redirect / advance.
+  const [countdown, setCountdown] = useState(5)
 
   useEffect(() => {
     localApi.detectFirewall()
       .then(setDetected)
       .catch(() => setDetected(null))
       .finally(() => setLoading(false))
-    // Cache domain so we know whether to redirect to router.{domain} after takeover.
-    localApi.status().then(s => setDomain(s.domain || '')).catch(() => {})
+    // Cache domain + caddy install state so we know whether to redirect to
+    // router.{domain} after takeover (only meaningful when Caddy was set up).
+    localApi.status().then(s => {
+      setDomain(s.domain || '')
+      setCaddyInstalled(Boolean(s.caddy_installed))
+    }).catch(() => {})
   }, [])
 
-  // After gopher-mode takeover succeeds, the dashboard port (4321) becomes
-  // private, so the current URL stops working. Redirect to https://router.{domain}
-  // where Caddy now serves the dashboard. For manual/none modes, no redirect needed.
-  const finishGopher = () => {
-    if (domain) {
-      window.location.href = `https://router.${domain}`
+  // After gopher-mode takeover succeeds, the dashboard port (4321) is locked
+  // down to localhost. If Caddy was installed and we have a domain, the
+  // dashboard now lives at https://router.{domain} — redirect there. The 5s
+  // wait gives Caddy time to complete the ACME challenge against the
+  // newly-opened ports 80/443 before the browser hits the new URL. Without
+  // Caddy / a domain there's no router.{domain}, so we just advance via
+  // refetch and let AppShell's gates pick the next step (step 4 SSH key).
+  const shouldRedirect = caddyInstalled && domain !== ''
+
+  useEffect(() => {
+    if (!done) return
+    if (countdown <= 0) {
+      if (shouldRedirect) {
+        window.location.href = `https://router.${domain}`
+      } else {
+        onDone()
+      }
       return
     }
-    onDone()
-  }
+    const t = setTimeout(() => setCountdown(c => c - 1), 1000)
+    return () => clearTimeout(t)
+  }, [done, countdown, shouldRedirect, domain, onDone])
 
   const handleContinue = () => {
     if (selected === 'gopher') {
@@ -489,6 +506,9 @@ function FirewallStep({ onDone }: { onDone: () => void }) {
   }
 
   if (done) {
+    const skipNow = () => {
+      setCountdown(0)
+    }
     return (
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-4">
         <div className="flex items-center gap-2 text-blue-600">
@@ -500,18 +520,23 @@ function FirewallStep({ onDone }: { onDone: () => void }) {
           <div className="text-sm text-green-800">
             <div className="font-semibold">Firewall configured successfully</div>
             <div className="text-xs mt-1">iptables rules are active and will persist across reboots.</div>
-            {domain && (
+            {shouldRedirect ? (
               <div className="text-xs mt-2">
-                Continuing at <strong>https://router.{domain}</strong> — TLS cert may take ~30s to issue on first load.
+                The dashboard now lives at <strong>https://router.{domain}</strong>.
+                Waiting <strong>{countdown}s</strong> for Caddy to issue the TLS cert before redirecting…
+              </div>
+            ) : (
+              <div className="text-xs mt-2">
+                Continuing in <strong>{countdown}s</strong>…
               </div>
             )}
           </div>
         </div>
         <button
-          onClick={finishGopher}
+          onClick={skipNow}
           className="w-full bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors"
         >
-          {domain ? `Continue at https://router.${domain} →` : 'Continue →'}
+          {shouldRedirect ? `Go to https://router.${domain} now →` : 'Continue now →'}
         </button>
       </div>
     )
@@ -975,7 +1000,7 @@ export default function SetupPage({ initialStep = 1 }: { initialStep?: SetupStep
           : step === 2
           ? <ServicesStep onDone={() => setStep(3)} />
           : step === 3
-          ? <FirewallStep onDone={initialStep === 3 ? refetch : () => setStep(4)} />
+          ? <FirewallStep onDone={refetch} />
           : step === 5
           ? <Fail2banStep onDone={refetch} />
           : <SSHKeyStep onDone={refetch} />
