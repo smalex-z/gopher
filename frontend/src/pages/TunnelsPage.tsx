@@ -115,17 +115,29 @@ export default function TunnelsPage() {
     ? (domainIP && routerIP && domainIP === routerIP ? domain : `router.${domain}`)
     : undefined
 
-  // Deep-link entry from MachinesPage ("/tunnels?machine=..."). Route through
-  // openAddModal so we get the same nextPort() prefetch as the in-page "Add
-  // Tunnel" button — without this, the rathole-port input lands empty and the
-  // operator has to type-and-cycle to find the first available port.
+  // Deep-link entry from MachinesPage ("/tunnels?machine=..."). Mirrors
+  // openAddModal's nextPort() prefetch so the rathole-port input lands
+  // pre-populated instead of empty (without this the operator has to
+  // type-and-cycle to find the first available port).
   useEffect(() => {
     const machineId = searchParams.get('machine')
-    if (machineId) openAddModal(machineId)
-    // openAddModal is stable for our purposes (it doesn't read state from a
-    // closure that changes meaningfully across renders); we only want this to
-    // re-fire when the URL param changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (!machineId) return
+    let cancelled = false
+    setNextPortLoading(true)
+    tunnelsApi.nextPort()
+      .then(port => {
+        if (cancelled) return
+        setForm({ ...defaultForm, rathole_port: port, machine_id: machineId })
+      })
+      .catch(() => {
+        if (cancelled) return
+        setForm({ ...defaultForm, machine_id: machineId })
+      })
+      .finally(() => {
+        if (!cancelled) setNextPortLoading(false)
+      })
+    setModal({ isOpen: true })
+    return () => { cancelled = true }
   }, [searchParams])
 
   const createMutation = useMutation({
