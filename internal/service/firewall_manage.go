@@ -122,13 +122,30 @@ func firewallTakeover(logWriter io.Writer) error {
 	// Step 7: Reload fail2ban so it recreates its chains on top of the fresh ruleset.
 	// iptables -F/-X above wiped fail2ban's f2b-* chains; without a reload, active
 	// bans remain in fail2ban's internal state but are no longer enforced in iptables.
+	// Use systemd's reload-or-restart so a fail2ban that's not yet up doesn't error
+	// out the takeover (its socket may not be ready right after the install step).
 	if isCommandAvailable("fail2ban-client") {
 		fmt.Fprintln(logWriter, "Step 7: Reloading fail2ban to restore ban rules...")
-		reloadCmd := append(sudo, "fail2ban-client", "reload")
+		reloadCmd := append(sudo, "systemctl", "reload-or-restart", "fail2ban")
 		if err := exec.Command(reloadCmd[0], reloadCmd[1:]...).Run(); err != nil { // #nosec G204
 			fmt.Fprintf(logWriter, "  WARN: fail2ban reload failed: %v\n", err)
 		} else {
 			fmt.Fprintln(logWriter, "  fail2ban reloaded ✓")
+		}
+	}
+
+	// Step 8: Kick Caddy so it retries ACME cert issuance immediately now that
+	// port 80 is open. Without this, Caddy keeps backing off (up to ~minutes)
+	// from earlier failed attempts before the firewall opened.
+	if isCommandAvailable("caddy") {
+		if settings, sErr := db.GetSettings(); sErr == nil && settings.Domain != "" {
+			fmt.Fprintln(logWriter, "Step 8: Reloading Caddy to retry cert issuance on now-open port 80...")
+			reloadCaddy := append(sudo, "systemctl", "reload", "caddy")
+			if err := exec.Command(reloadCaddy[0], reloadCaddy[1:]...).Run(); err != nil { // #nosec G204
+				fmt.Fprintf(logWriter, "  WARN: caddy reload failed: %v\n", err)
+			} else {
+				fmt.Fprintln(logWriter, "  Caddy reloaded ✓ (cert issuance may take ~30s)")
+			}
 		}
 	}
 

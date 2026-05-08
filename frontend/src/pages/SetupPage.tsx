@@ -184,18 +184,15 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
     return () => { if (dnsTimerRef.current) clearTimeout(dnsTimerRef.current) }
   }, [domain, skipCaddy])
 
-  // Redirect to router.domain after install completes
+  // Advance to step 3 (firewall) once install completes. We deliberately do NOT
+  // redirect to https://router.{domain} here — port 80/443 may still be blocked by
+  // the existing firewall, so Caddy can't obtain a cert yet. The redirect happens
+  // after the firewall step, when ports are guaranteed open.
   useEffect(() => {
     if (!installComplete) return
-    const t = setTimeout(() => {
-      if (skipCaddy || !domain.trim()) {
-        window.location.href = '/'
-        return
-      }
-      window.location.href = `https://router.${domain.trim()}`
-    }, skipCaddy || !domain.trim() ? 1000 : 5000)
+    const t = setTimeout(onDone, 1500)
     return () => clearTimeout(t)
-  }, [installComplete, domain, skipCaddy])
+  }, [installComplete, onDone])
 
   const allGood = status?.caddy_active === 'active' && status?.rathole_active === 'active'
 
@@ -367,21 +364,11 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
         </div>
       )}
 
-      {/* Post-install redirect notice */}
+      {/* Post-install advance notice */}
       {installComplete && (
         <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-sm text-green-800 space-y-1">
-          <div className="font-semibold flex items-center gap-2"><CheckCircle2 size={15} /> Installation complete!</div>
-          {skipCaddy || !domain ? (
-            <p>Redirecting you to the dashboard…</p>
-          ) : (
-            <p>
-              Redirecting you to{' '}
-              <a href={`https://router.${domain}`} className="underline font-medium">
-                https://router.{domain}
-              </a>{' '}
-              in about 5 seconds…
-            </p>
-          )}
+          <div className="font-semibold flex items-center gap-2"><CheckCircle2 size={15} /> Local services installed</div>
+          <p>Continuing to firewall configuration…</p>
         </div>
       )}
 
@@ -464,13 +451,27 @@ function FirewallStep({ onDone }: { onDone: () => void }) {
   const [showLogs, setShowLogs] = useState(false)
   const [done, setDone] = useState(false)
   const [skipping, setSkipping] = useState(false)
+  const [domain, setDomain] = useState('')
 
   useEffect(() => {
     localApi.detectFirewall()
       .then(setDetected)
       .catch(() => setDetected(null))
       .finally(() => setLoading(false))
+    // Cache domain so we know whether to redirect to router.{domain} after takeover.
+    localApi.status().then(s => setDomain(s.domain || '')).catch(() => {})
   }, [])
+
+  // After gopher-mode takeover succeeds, the dashboard port (4321) becomes
+  // private, so the current URL stops working. Redirect to https://router.{domain}
+  // where Caddy now serves the dashboard. For manual/none modes, no redirect needed.
+  const finishGopher = () => {
+    if (domain) {
+      window.location.href = `https://router.${domain}`
+      return
+    }
+    onDone()
+  }
 
   const handleContinue = () => {
     if (selected === 'gopher') {
@@ -499,13 +500,18 @@ function FirewallStep({ onDone }: { onDone: () => void }) {
           <div className="text-sm text-green-800">
             <div className="font-semibold">Firewall configured successfully</div>
             <div className="text-xs mt-1">iptables rules are active and will persist across reboots.</div>
+            {domain && (
+              <div className="text-xs mt-2">
+                Continuing at <strong>https://router.{domain}</strong> — TLS cert may take ~30s to issue on first load.
+              </div>
+            )}
           </div>
         </div>
         <button
-          onClick={onDone}
+          onClick={finishGopher}
           className="w-full bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors"
         >
-          Continue →
+          {domain ? `Continue at https://router.${domain} →` : 'Continue →'}
         </button>
       </div>
     )
