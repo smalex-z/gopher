@@ -40,7 +40,15 @@ const WindowsIcon = () => (
   </svg>
 )
 
-type BootstrapPhase = 'waiting' | 'success' | 'timeout'
+// Bootstrap phases:
+//   waiting    — token issued, no machine row yet
+//   verifying  — machine row appeared (script hit /api/bootstrap) but the
+//                agent hasn't reported in yet; we wait so the modal doesn't
+//                show "success" while rathole + agent install is still
+//                running on the box
+//   success    — agent_installed flipped true, end-to-end working
+//   timeout    — 10 min elapsed without success (operator can close + debug)
+type BootstrapPhase = 'waiting' | 'verifying' | 'success' | 'timeout'
 interface BootstrapModal { isOpen: boolean; command: string; token: string; expiresAt: string; phase: BootstrapPhase }
 
 export default function MachinesPage() {
@@ -78,7 +86,7 @@ export default function MachinesPage() {
     queryKey: ['machines'],
     queryFn: () => machinesApi.list(),
     refetchInterval: (query) => {
-      if (bootstrapModal.isOpen && bootstrapModal.phase === 'waiting') return 3000
+      if (bootstrapModal.isOpen && (bootstrapModal.phase === 'waiting' || bootstrapModal.phase === 'verifying')) return 3000
       const machinesNow = query.state.data?.data ?? []
       const fiveMinAgo = Date.now() - 5 * 60_000
       const hasRecent = machinesNow.some(m => {
@@ -143,11 +151,26 @@ export default function MachinesPage() {
     ? (domainIP && routerIP && domainIP === routerIP ? domain : `router.${domain}`)
     : ''
 
-  // Detect new machine registration while bootstrap modal is open
+  // Drive the bootstrap modal through its phases off the live machine list:
+  //
+  //   waiting    + new machine row appears     → verifying
+  //   verifying  + machine.agent_installed     → success (auto-close 2s)
+  //
+  // The 10-min timeout from generateToken still fires from either non-success
+  // phase, so a stuck install doesn't keep the modal open forever.
   useEffect(() => {
-    if (!bootstrapModal.isOpen || bootstrapModal.phase !== 'waiting') return
+    if (!bootstrapModal.isOpen) return
+    if (bootstrapModal.phase === 'success' || bootstrapModal.phase === 'timeout') return
     const newMachine = machines.find(m => !knownMachineIds.current.has(m.id))
-    if (!newMachine) return
+    if (bootstrapModal.phase === 'waiting') {
+      if (!newMachine) return
+      setBootstrapModal(prev => ({ ...prev, phase: 'verifying' }))
+      qc.invalidateQueries({ queryKey: ['tunnels'] })
+      return
+    }
+    // phase === 'verifying'
+    if (!newMachine) return // shouldn't happen — machine row got deleted between renders
+    if (!newMachine.agent_installed) return
     if (bootstrapTimeoutRef.current) clearTimeout(bootstrapTimeoutRef.current)
     setBootstrapModal(prev => ({ ...prev, phase: 'success' }))
     qc.invalidateQueries({ queryKey: ['tunnels'] })
@@ -237,9 +260,13 @@ export default function MachinesPage() {
           expiresAt: result.data.expires_at,
           phase: 'waiting',
         })
-        // 10-minute timeout
+        // 10-minute timeout — fires from either pre-success phase.
         bootstrapTimeoutRef.current = setTimeout(() => {
-          setBootstrapModal(prev => prev.phase === 'waiting' ? { ...prev, phase: 'timeout' } : prev)
+          setBootstrapModal(prev =>
+            prev.phase === 'waiting' || prev.phase === 'verifying'
+              ? { ...prev, phase: 'timeout' }
+              : prev,
+          )
         }, 10 * 60 * 1000)
       }
     } catch (err) {
@@ -677,7 +704,7 @@ export default function MachinesPage() {
                     <li>Enable a systemd service to keep the tunnel running</li>
                   </ol>
                 </div>
-                {/* Waiting / timeout indicator */}
+                {/* Phase indicator — waiting → verifying → success/timeout */}
                 <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 ${
                   bootstrapModal.phase === 'timeout'
                     ? 'bg-amber-50 border border-amber-200 text-amber-700'
@@ -685,6 +712,8 @@ export default function MachinesPage() {
                 }`}>
                   {bootstrapModal.phase === 'timeout' ? (
                     <>⚠ Still waiting — bootstrap is taking longer than expected. Check the machine for errors.</>
+                  ) : bootstrapModal.phase === 'verifying' ? (
+                    <><Loader2 size={12} className="animate-spin shrink-0" /> Machine registered — waiting for agent to come online…</>
                   ) : (
                     <><Loader2 size={12} className="animate-spin shrink-0" /> Waiting for machine to connect…</>
                   )}

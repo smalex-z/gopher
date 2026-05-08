@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -182,6 +183,11 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 
 	// Async: wait for tunnel then verify SSH connectivity.
 	go s.awaitSSHHealth(machine, sshKey.PrivateKey)
+	// Async: poll the agent's back-channel until it answers, so the bootstrap
+	// modal can flip "machine registered" → "agent ready" within seconds of
+	// the agent service starting on the client (vs. waiting up to a minute
+	// for the next health-poll cycle).
+	go s.awaitAgentReady(machine)
 
 	return &BootstrapResponse{
 		TunnelPort:      tunnelPort,
@@ -219,6 +225,51 @@ func (s *BootstrapService) awaitSSHHealth(machine *db.Machine, privateKey string
 	// observes successful SSH after slower bootstrap completions.
 	machine.Status = "pending"
 	_ = db.UpdateMachine(machine)
+}
+
+const (
+	bootstrapAgentReadyTimeout = 5 * time.Minute
+	bootstrapAgentReadyPoll    = 3 * time.Second
+)
+
+// awaitAgentReady polls the agent's /status endpoint via the rathole back-channel
+// until it answers, then marks Machine.AgentInstalled=true. The first poll fires
+// 3s after the call so the bootstrap script has a head start.
+//
+// Without this, agent_installed stays false until the next 60s HealthService
+// cycle catches it, which makes the bootstrap UX feel like the agent is
+// hanging when it's actually already up.
+//
+// The probe re-fetches the machine each iteration: the bootstrap script writes
+// a fresh AgentToken via /api/bootstrap before the agent comes online, but the
+// in-memory copy here is from before the script ran — re-reading keeps us in
+// sync if anything else (the migration tool, manual edits) updates the row.
+func (s *BootstrapService) awaitAgentReady(machine *db.Machine) {
+	if machine.AgentRemotePort == 0 || machine.AgentToken == "" {
+		return // older bootstrap path with no agent fields — nothing to wait for
+	}
+	deadline := time.Now().Add(bootstrapAgentReadyTimeout)
+	time.Sleep(bootstrapAgentReadyPoll)
+	for time.Now().Before(deadline) {
+		current, err := db.GetMachine(machine.ID)
+		if err != nil {
+			return // machine deleted (or DB unreachable) — stop polling
+		}
+		if current.AgentInstalled {
+			return // health service or another path already flipped it
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		client := NewAgentClient(current)
+		status, err := client.Status(ctx)
+		cancel()
+		if err == nil {
+			now := time.Now()
+			_ = db.SetMachineAgentSeen(current.ID, status.AgentVersion, now)
+			db.LogEvent("agent_ready", current.ID, current.Name)
+			return
+		}
+		time.Sleep(bootstrapAgentReadyPoll)
+	}
 }
 
 // shortToken returns 16 random hex characters (8 bytes of entropy).
