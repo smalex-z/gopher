@@ -22,9 +22,16 @@ var frontendDist embed.FS
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "install":
+		case "install", "upgrade":
+			// `upgrade` is a clarity alias for `install`. install is fully
+			// idempotent (users / sudoers / systemd unit / data dir are all
+			// no-ops on a re-run) and the binary swap is atomic-rename, so
+			// running it on top of a live install hot-swaps the binary +
+			// restarts the service without touching gopher.db. That's the
+			// supported path for "I downloaded a new release, apply it
+			// without redoing the setup wizard."
 			if err := runInstall(os.Args[2:]); err != nil {
-				log.Fatalf("Install failed: %v", err)
+				log.Fatalf("%s failed: %v", os.Args[1], err)
 			}
 			return
 		case "uninstall":

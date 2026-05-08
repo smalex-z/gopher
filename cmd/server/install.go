@@ -294,22 +294,41 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return os.Chmod(dst, mode)
 	}
 
+	// Write to a sibling temp file then atomic-rename over dst. open(O_TRUNC)
+	// on a running ELF binary fails with ETXTBSY ("text file busy"), so we
+	// can't truncate-and-write the destination directly when the gopher
+	// service is currently executing /opt/gopher/gopher. rename(2) is a
+	// directory-entry swap; the running process keeps its old inode open
+	// until it exits, and the next systemctl restart picks up the new file.
+	// This is what makes `gopher install` safe to re-run as an upgrade
+	// path without first stopping the service.
 	s, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
 
-	t, err := os.Create(dst)
+	tmp := dst + ".new"
+	t, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
 		return err
 	}
-	defer t.Close()
-
 	if _, err := io.Copy(t, s); err != nil {
+		_ = t.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := t.Chmod(mode); err != nil {
+		_ = t.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := t.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	return nil
