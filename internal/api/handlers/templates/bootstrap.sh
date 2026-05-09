@@ -19,6 +19,35 @@ fi
 
 echo "=== Gopher Machine Bootstrap ==="
 echo ""
+
+# ── Detect prior install and clean up before re-bootstrap ────────────────────
+# A leftover /usr/local/bin/gopher-uninstall (or rathole-client systemd unit,
+# or /etc/rathole) from a previous bootstrap will conflict with the new one:
+# stale tunnels in client.toml, stale agent token in /etc/gopher-agent, the
+# old VPS public key still in authorized_keys. Run gopher-uninstall first so
+# the new bootstrap starts from a known-clean state. The uninstall script
+# notifies the previous server of the deletion (best-effort) and removes all
+# local services/configs/binaries.
+if [ -x /usr/local/bin/gopher-uninstall ] || [ -f /etc/systemd/system/rathole-client.service ] || [ -d /etc/rathole ]; then
+  echo "Detected an existing Gopher install on this machine."
+  echo "Running gopher-uninstall to clear it before re-bootstrapping..."
+  if [ -x /usr/local/bin/gopher-uninstall ]; then
+    $SUDO /usr/local/bin/gopher-uninstall || echo "  WARN: prior gopher-uninstall reported errors — continuing"
+  else
+    # Old/partial install with no uninstaller on disk. Stop services + remove
+    # the directories the new bootstrap will recreate. Best-effort — failures
+    # are logged but don't abort.
+    $SUDO systemctl stop gopher-agent rathole-client 2>/dev/null || true
+    $SUDO systemctl disable gopher-agent rathole-client 2>/dev/null || true
+    $SUDO rm -f /etc/systemd/system/gopher-agent.service /etc/systemd/system/rathole-client.service
+    $SUDO rm -rf /etc/rathole /etc/gopher-agent
+    $SUDO rm -f /usr/local/bin/gopher-agent /usr/local/bin/rathole
+    $SUDO systemctl daemon-reload 2>/dev/null || true
+    echo "  Removed legacy service files and configs"
+  fi
+  echo ""
+fi
+
 printf "Machine name (e.g. 'web-server'): " >/dev/tty
 read -r MACHINE_NAME </dev/tty
 while [ -z "$MACHINE_NAME" ]; do

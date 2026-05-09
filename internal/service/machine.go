@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -70,7 +71,20 @@ func (s *MachineService) Update(id string, req dto.UpdateMachineRequest) (*db.Ma
 	return machine, nil
 }
 
-func (s *MachineService) Delete(id string) error {
+// DeleteResult reports the outcome of a machine delete to the API caller.
+// Server-side cleanup always runs (machine row, tunnel rows, Caddy, rathole
+// reconcile) and any failure there returns an error from Delete. The
+// client-cleanup step is best-effort and its result is reported here so the
+// dashboard can show a warning toast when the box wasn't actually torn down
+// (e.g. tunnel was already dead, agent unreachable, no SSH key on file).
+type DeleteResult struct {
+	ID                string `json:"id"`
+	ClientCleanupOK   bool   `json:"client_cleanup_ok"`
+	ClientCleanupPath string `json:"client_cleanup_path,omitempty"` // "agent" | "ssh" | "skipped"
+	ClientCleanupErr  string `json:"client_cleanup_error,omitempty"`
+}
+
+func (s *MachineService) Delete(id string) (*DeleteResult, error) {
 	return s.delete(id, false)
 }
 
@@ -78,19 +92,21 @@ func (s *MachineService) Delete(id string) error {
 // remote-uninstall step because the client is already tearing itself
 // down (this call comes FROM that teardown). Server-side cleanup —
 // tunnels, Caddy, rathole config, machine record — runs as usual.
-func (s *MachineService) DeleteFromClient(id string) error {
+func (s *MachineService) DeleteFromClient(id string) (*DeleteResult, error) {
 	return s.delete(id, true)
 }
 
-func (s *MachineService) delete(id string, fromClient bool) error {
+func (s *MachineService) delete(id string, fromClient bool) (*DeleteResult, error) {
 	machine, err := db.GetMachine(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tunnels, err := db.GetTunnelsByMachine(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
+
+	result := &DeleteResult{ID: id, ClientCleanupOK: true, ClientCleanupPath: "skipped"}
 
 	// Server-driven delete: SSH/agent into the client first — while the
 	// rathole back-channel is fully active — and trigger gopher-uninstall.
@@ -100,34 +116,43 @@ func (s *MachineService) delete(id string, fromClient bool) error {
 	// Self-delete: the client is the caller, gopher-uninstall is already
 	// running there. Skip the remote step to avoid the duplicate trigger.
 	if s.local != nil && !fromClient {
-		_ = s.local.RemoveMachineClient(machine)
+		if machine.AgentInstalled && machine.AgentRemotePort > 0 {
+			result.ClientCleanupPath = "agent"
+		} else {
+			result.ClientCleanupPath = "ssh"
+		}
+		if err := s.local.RemoveMachineClient(machine); err != nil {
+			log.Printf("client cleanup for %s (%s) failed via %s: %v", machine.ID, machine.Name, result.ClientCleanupPath, err)
+			result.ClientCleanupOK = false
+			result.ClientCleanupErr = err.Error()
+		}
 	}
 
 	// Delete each tunnel from DB, then do a single reconcile + Caddy cleanup.
 	for i := range tunnels {
 		tunnel := &tunnels[i]
 		if err := db.DeleteTunnel(tunnel.ID); err != nil {
-			return err
+			return nil, err
 		}
 		if s.local != nil {
 			if err := s.local.RemoveServiceTunnelCaddy(tunnel); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 
 	db.LogEvent("machine_deleted", id, machine.Name)
 	if err := db.DeleteMachine(id); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Single reconcile after all DB deletions — avoids multiple rathole restarts.
 	if s.local != nil {
 		if err := s.local.ReconcileServerConfig(); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return result, nil
 }
 
 func (s *MachineService) Deploy(id string) error {

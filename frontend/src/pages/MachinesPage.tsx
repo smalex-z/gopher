@@ -184,10 +184,19 @@ export default function MachinesPage() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => machinesApi.delete(id),
-    onSuccess: () => {
+    onSuccess: (resp) => {
       qc.invalidateQueries({ queryKey: ['machines'] })
       qc.invalidateQueries({ queryKey: ['tunnels'] })
-      toast.success('Machine deleted.')
+      // Server-side teardown always succeeds when we reach here; client-side
+      // teardown (running gopher-uninstall on the box) is best-effort. Surface
+      // a warning so the operator knows to SSH in and run gopher-uninstall
+      // manually if it failed.
+      if (resp.data?.client_cleanup_ok === false) {
+        const reason = resp.data.client_cleanup_error || 'unknown reason'
+        toast.error(`Machine deleted on server, but client cleanup failed (${resp.data.client_cleanup_path}): ${reason}. Run sudo /usr/local/bin/gopher-uninstall on the box to finish.`)
+      } else {
+        toast.success('Machine deleted.')
+      }
     },
     onError: (e: Error) => toast.error(e.message),
   })

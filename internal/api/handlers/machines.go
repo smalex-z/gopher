@@ -79,7 +79,8 @@ func (h *MachineHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 func (h *MachineHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := h.svc.Delete(id); err != nil {
+	res, err := h.svc.Delete(id)
+	if err != nil {
 		if _, ok := err.(*apperrors.NotFoundError); ok {
 			response.NotFound(w, "machine not found")
 			return
@@ -87,7 +88,10 @@ func (h *MachineHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, err.Error())
 		return
 	}
-	response.NoContent(w)
+	// Use Success (not NoContent) so the caller can read client_cleanup_ok /
+	// client_cleanup_error and surface a "machine deleted but client wasn't
+	// cleaned up" warning when applicable.
+	response.Success(w, res)
 }
 
 // SelfDelete is called by gopher-uninstall on the client when an operator
@@ -120,7 +124,7 @@ func (h *MachineHandler) SelfDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.DeleteFromClient(machine.ID); err != nil {
+	if _, err := h.svc.DeleteFromClient(machine.ID); err != nil {
 		response.InternalError(w, err.Error())
 		return
 	}

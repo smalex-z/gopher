@@ -6,7 +6,13 @@ export const machinesApi = {
   get: (id: string) => client.get<ApiResponse<Machine>>(`/machines/${id}`).then(r => r.data),
   create: (data: Partial<Machine>) => client.post<ApiResponse<Machine>>('/machines/', data).then(r => r.data),
   update: (id: string, data: Partial<Machine>) => client.put<ApiResponse<Machine>>(`/machines/${id}`, data).then(r => r.data),
-  delete: (id: string) => client.delete(`/machines/${id}`).then(r => r.data),
+  delete: (id: string) =>
+    client.delete<ApiResponse<{
+      id: string
+      client_cleanup_ok: boolean
+      client_cleanup_path?: 'agent' | 'ssh' | 'skipped'
+      client_cleanup_error?: string
+    }>>(`/machines/${id}`).then(r => r.data),
   deploy: (id: string) => client.post(`/machines/${id}/deploy`).then(r => r.data),
   status: (id: string) => client.get(`/machines/${id}/status`).then(r => r.data),
   networkInfo: (id: string) =>

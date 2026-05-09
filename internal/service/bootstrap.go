@@ -206,6 +206,15 @@ const bootstrapSSHHealthTimeout = 4 * time.Minute
 // awaitSSHHealth polls localhost:tunnelPort for initial bootstrap SSH readiness.
 // Some machines take longer than a minute on first bootstraps (package installs,
 // systemd startup), so timeout keeps status as "pending" instead of hard-failing.
+//
+// Uses SetMachineStatus (column-level UPDATE) rather than UpdateMachine
+// (DB.Save full-row replace) to avoid clobbering AgentInstalled. This
+// goroutine runs concurrently with awaitAgentReady — both hold the same
+// in-memory *db.Machine struct that Register handed them, with its stale
+// AgentInstalled=false. Saving that struct after awaitAgentReady has already
+// flipped agent_installed=true in the DB would race-revert the flag, making
+// the dashboard's agent badge oscillate "Install Agent" → "v0.x" → "Install
+// Agent" until the next health-poll cycle re-promoted it.
 func (s *BootstrapService) awaitSSHHealth(machine *db.Machine, privateKey string) {
 	deadline := time.Now().Add(bootstrapSSHHealthTimeout)
 	for time.Now().Before(deadline) {
@@ -215,16 +224,13 @@ func (s *BootstrapService) awaitSSHHealth(machine *db.Machine, privateKey string
 			continue
 		}
 		c.Close()
-		machine.Status = "connected"
 		now := time.Now()
-		machine.LastSeen = &now
-		_ = db.UpdateMachine(machine)
+		_ = db.SetMachineStatus(machine.ID, "connected", &now)
 		return
 	}
 	// Keep machine in pending state; monitor loop can flip to connected once it
 	// observes successful SSH after slower bootstrap completions.
-	machine.Status = "pending"
-	_ = db.UpdateMachine(machine)
+	_ = db.SetMachineStatus(machine.ID, "pending", nil)
 }
 
 const (
