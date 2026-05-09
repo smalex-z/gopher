@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/smalex-z/gopher/internal/api/dto"
 	"github.com/smalex-z/gopher/internal/api/response"
+	"github.com/smalex-z/gopher/internal/db"
 	apperrors "github.com/smalex-z/gopher/internal/errors"
 	"github.com/smalex-z/gopher/internal/service"
 )
@@ -112,6 +115,50 @@ func (h *TunnelHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.NoContent(w)
+}
+
+// GET /api/tunnels/{id}/health — uptime % + recent checks (sparkline source).
+//
+// 24-hour rolling window. Tunnels collect health rows from monitor.go's
+// 30s probe loop; for managed entries (machine-ssh / machine-agent) the
+// data lives under "machine:<id>" since they share lifecycle with the
+// machine itself.
+func (h *TunnelHandler) Health(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		response.BadRequest(w, "tunnel id required")
+		return
+	}
+	subject := "tunnel:" + id
+	if mid, ok := parseManagedTunnelID(id); ok {
+		subject = "machine:" + mid
+	}
+	summary, err := db.GetHealthSummary(subject, time.Time{}, 30)
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, summary)
+}
+
+// parseManagedTunnelID extracts the machine ID from synthesized SSH /
+// agent tunnel IDs (e.g. "machine-abc123-ssh" or "machine-abc123-agent").
+// Returns ("", false) for regular service tunnels.
+func parseManagedTunnelID(id string) (string, bool) {
+	const prefix = "machine-"
+	if !strings.HasPrefix(id, prefix) {
+		return "", false
+	}
+	body := strings.TrimPrefix(id, prefix)
+	for _, suffix := range []string{"-ssh", "-agent"} {
+		if strings.HasSuffix(body, suffix) {
+			machineID := strings.TrimSuffix(body, suffix)
+			if machineID != "" {
+				return machineID, true
+			}
+		}
+	}
+	return "", false
 }
 
 func (h *TunnelHandler) Test(w http.ResponseWriter, r *http.Request) {

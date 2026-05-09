@@ -6,6 +6,8 @@ import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
 import { vpsApi } from '../api/vps'
 import StatusBadge from '../components/StatusBadge'
+import MachineHealthPanel from '../components/MachineHealthPanel'
+import { relativeTime } from '../lib/time'
 import { toast } from '../lib/toast'
 import type { Machine, Tunnel, SSHKey } from '../types'
 
@@ -38,7 +40,15 @@ const WindowsIcon = () => (
   </svg>
 )
 
-type BootstrapPhase = 'waiting' | 'success' | 'timeout'
+// Bootstrap phases:
+//   waiting    — token issued, no machine row yet
+//   verifying  — machine row appeared (script hit /api/bootstrap) but the
+//                agent hasn't reported in yet; we wait so the modal doesn't
+//                show "success" while rathole + agent install is still
+//                running on the box
+//   success    — agent_installed flipped true, end-to-end working
+//   timeout    — 10 min elapsed without success (operator can close + debug)
+type BootstrapPhase = 'waiting' | 'verifying' | 'success' | 'timeout'
 interface BootstrapModal { isOpen: boolean; command: string; token: string; expiresAt: string; phase: BootstrapPhase }
 
 export default function MachinesPage() {
@@ -58,10 +68,34 @@ export default function MachinesPage() {
   const [reassignKeyID, setReassignKeyID] = useState('')
   const [jumpboxOS, setJumpboxOS] = useState<JumpboxOS>('unix')
 
+  // Refresh cadence — three tiers based on how much is changing:
+  //
+  //   3s   bootstrap modal is waiting for the new machine to appear
+  //   5s   any machine is < 5 min old, or has status="pending"
+  //          (post-bootstrap window where status flips matter most:
+  //          rathole connecting, agent installing, first health poll)
+  //   15s  steady state — health service polls clients every 60s and
+  //          monitor every 30s, so 15s is enough to surface changes
+  //          quickly without hammering the dashboard
+  //
+  // refetchInterval can be a function — react-query passes the live
+  // query so the cadence self-adjusts: as machines settle into
+  // "connected"/"offline" and age past 5 minutes, polling drops back
+  // to 15s automatically.
   const { data, isLoading } = useQuery({
     queryKey: ['machines'],
     queryFn: () => machinesApi.list(),
-    refetchInterval: bootstrapModal.isOpen && bootstrapModal.phase === 'waiting' ? 3000 : false,
+    refetchInterval: (query) => {
+      if (bootstrapModal.isOpen && (bootstrapModal.phase === 'waiting' || bootstrapModal.phase === 'verifying')) return 3000
+      const machinesNow = query.state.data?.data ?? []
+      const fiveMinAgo = Date.now() - 5 * 60_000
+      const hasRecent = machinesNow.some(m => {
+        if (m.status === 'pending') return true
+        const created = m.created_at ? Date.parse(m.created_at) : 0
+        return created > fiveMinAgo
+      })
+      return hasRecent ? 5000 : 15000
+    },
   })
   const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
   const { data: keysRes } = useQuery({ queryKey: ['ssh-keys'], queryFn: () => localApi.listSSHKeys() })
@@ -76,7 +110,13 @@ export default function MachinesPage() {
   const machineSSHCmd = (m: Machine, key: SSHKey | undefined, os: JumpboxOS = 'unix'): { cmd: string; label: string; keyMissing: boolean; isJumpbox: boolean } | null => {
     if (m.tunnel_port === 0) return null
     const vpsHost = displayHost || vps?.host || '<vps-host>'
-    const vpsUser = vps?.username ?? localStatus?.os_user ?? '<vps-user>'
+    // Jumpbox commands target the dedicated gopher-jump user when it
+    // exists. Falls back to os_user (the dashboard service user) on
+    // legacy installs that haven't re-run `gopher install` yet — those
+    // installs are still vulnerable to the old "all keys in dashboard
+    // user's authorized_keys" misconfiguration; the operator should
+    // upgrade ASAP.
+    const vpsUser = localStatus?.jumpbox_user || vps?.username || localStatus?.os_user || '<vps-user>'
     const keyFile = key ? `~/.ssh/${toKeyFilename(key.name) || 'id_rsa'}` : null
     if (m.public_ssh) {
       const keyFlag = keyFile ? ` -i ${keyFile}` : ''
@@ -111,11 +151,26 @@ export default function MachinesPage() {
     ? (domainIP && routerIP && domainIP === routerIP ? domain : `router.${domain}`)
     : ''
 
-  // Detect new machine registration while bootstrap modal is open
+  // Drive the bootstrap modal through its phases off the live machine list:
+  //
+  //   waiting    + new machine row appears     → verifying
+  //   verifying  + machine.agent_installed     → success (auto-close 2s)
+  //
+  // The 10-min timeout from generateToken still fires from either non-success
+  // phase, so a stuck install doesn't keep the modal open forever.
   useEffect(() => {
-    if (!bootstrapModal.isOpen || bootstrapModal.phase !== 'waiting') return
+    if (!bootstrapModal.isOpen) return
+    if (bootstrapModal.phase === 'success' || bootstrapModal.phase === 'timeout') return
     const newMachine = machines.find(m => !knownMachineIds.current.has(m.id))
-    if (!newMachine) return
+    if (bootstrapModal.phase === 'waiting') {
+      if (!newMachine) return
+      setBootstrapModal(prev => ({ ...prev, phase: 'verifying' }))
+      qc.invalidateQueries({ queryKey: ['tunnels'] })
+      return
+    }
+    // phase === 'verifying'
+    if (!newMachine) return // shouldn't happen — machine row got deleted between renders
+    if (!newMachine.agent_installed) return
     if (bootstrapTimeoutRef.current) clearTimeout(bootstrapTimeoutRef.current)
     setBootstrapModal(prev => ({ ...prev, phase: 'success' }))
     qc.invalidateQueries({ queryKey: ['tunnels'] })
@@ -129,10 +184,19 @@ export default function MachinesPage() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => machinesApi.delete(id),
-    onSuccess: () => {
+    onSuccess: (resp) => {
       qc.invalidateQueries({ queryKey: ['machines'] })
       qc.invalidateQueries({ queryKey: ['tunnels'] })
-      toast.success('Machine deleted.')
+      // Server-side teardown always succeeds when we reach here; client-side
+      // teardown (running gopher-uninstall on the box) is best-effort. Surface
+      // a warning so the operator knows to SSH in and run gopher-uninstall
+      // manually if it failed.
+      if (resp.data?.client_cleanup_ok === false) {
+        const reason = resp.data.client_cleanup_error || 'unknown reason'
+        toast.error(`Machine deleted on server, but client cleanup failed (${resp.data.client_cleanup_path}): ${reason}. Run sudo /usr/local/bin/gopher-uninstall on the box to finish.`)
+      } else {
+        toast.success('Machine deleted.')
+      }
     },
     onError: (e: Error) => toast.error(e.message),
   })
@@ -147,6 +211,38 @@ export default function MachinesPage() {
       toast.success('SSH key updated — new key installed on machine.')
     },
     onError: (e: Error) => toast.error(e.message),
+  })
+
+  // Agent install can't run remotely from the dashboard — installing the
+  // agent needs root on the target. So clicking "Install Agent" returns
+  // the curl-bash one-liner the operator pastes on the machine. Once the
+  // agent comes online, HealthService detects it and the badge flips green
+  // automatically (no second click required).
+  const [agentInstallModal, setAgentInstallModal] = useState<{
+    open: boolean
+    machineName: string
+    command: string
+    instruction: string
+  }>({ open: false, machineName: '', command: '', instruction: '' })
+  const [agentInstallCopied, setAgentInstallCopied] = useState(false)
+
+  const installAgentMutation = useMutation({
+    mutationFn: (id: string) => machinesApi.installAgent(id),
+    onSuccess: (resp, id) => {
+      const data = resp.data
+      if (data?.command) {
+        setAgentInstallModal({
+          open: true,
+          machineName: machines.find(m => m.id === id)?.name ?? 'machine',
+          command: data.command,
+          instruction: data.instruction ?? '',
+        })
+        setAgentInstallCopied(false)
+      }
+      qc.invalidateQueries({ queryKey: ['machines'] })
+      qc.invalidateQueries({ queryKey: ['agent-pending'] })
+    },
+    onError: (e: Error) => toast.error(`Agent install failed: ${e.message}`),
   })
 
   const openConfigModal = () => {
@@ -173,9 +269,13 @@ export default function MachinesPage() {
           expiresAt: result.data.expires_at,
           phase: 'waiting',
         })
-        // 10-minute timeout
+        // 10-minute timeout — fires from either pre-success phase.
         bootstrapTimeoutRef.current = setTimeout(() => {
-          setBootstrapModal(prev => prev.phase === 'waiting' ? { ...prev, phase: 'timeout' } : prev)
+          setBootstrapModal(prev =>
+            prev.phase === 'waiting' || prev.phase === 'verifying'
+              ? { ...prev, phase: 'timeout' }
+              : prev,
+          )
         }, 10 * 60 * 1000)
       }
     } catch (err) {
@@ -246,7 +346,7 @@ export default function MachinesPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
               <tr>
-                {['', 'Name', 'Username', 'Status', 'Last Seen', 'Actions'].map(h => (
+                {['', 'Name', 'Username', 'Status', 'Agent', 'Last Seen', 'Actions'].map(h => (
                   <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
@@ -267,7 +367,33 @@ export default function MachinesPage() {
                       <td className="px-4 py-3 font-medium text-gray-900">{m.name}</td>
                       <td className="px-4 py-3 text-gray-600">{m.username}</td>
                       <td className="px-4 py-3"><StatusBadge status={m.status} /></td>
-                      <td className="px-4 py-3 text-gray-500">{m.last_seen ? new Date(m.last_seen).toLocaleString() : 'Never'}</td>
+                      <td className="px-4 py-3">
+                        {m.agent_installed ? (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium text-green-700 bg-green-50 border border-green-200">
+                            <CheckCircle size={11} /> v{m.agent_version || '–'}
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => installAgentMutation.mutate(m.id)}
+                            disabled={installAgentMutation.isPending && installAgentMutation.variables === m.id}
+                            title={m.agent_install_error ? `Last error: ${m.agent_install_error}` : 'Install gopher-agent on this machine'}
+                            className={`px-2 py-1 text-xs rounded border flex items-center gap-1 transition-colors ${
+                              m.agent_install_error
+                                ? 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
+                                : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
+                            }`}
+                          >
+                            {installAgentMutation.isPending && installAgentMutation.variables === m.id
+                              ? <><Loader2 size={11} className="animate-spin" /> Installing…</>
+                              : m.agent_install_error
+                                ? <>Retry install</>
+                                : <>Install agent</>}
+                          </button>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-gray-500" title={m.last_seen ? new Date(m.last_seen).toLocaleString() : ''}>
+                        {m.last_seen ? relativeTime(m.last_seen) : 'Never'}
+                      </td>
                       <td className="px-4 py-3">
                         <div className="flex gap-2">
                           <button
@@ -290,7 +416,7 @@ export default function MachinesPage() {
                     {isOpen && (
                       <tr className="bg-gray-50">
                         <td /> {/* chevron col */}
-                        <td colSpan={5} className="px-4 py-3">
+                        <td colSpan={6} className="px-4 py-3">
                           {/* SSH key row */}
                           <div className="flex items-center gap-2 mb-2">
                             <Key size={11} className="text-gray-400 shrink-0" />
@@ -437,6 +563,12 @@ export default function MachinesPage() {
                           >
                             <Plus size={12} /> Add service tunnel
                           </button>
+
+                          {/* Health panel: uptime, sparkline, live agent
+                              metrics, manual "Test now". Only shown when
+                              the row is expanded — no expense for collapsed
+                              rows. */}
+                          <MachineHealthPanel machine={m} />
                         </td>
                       </tr>
                     )}
@@ -581,7 +713,7 @@ export default function MachinesPage() {
                     <li>Enable a systemd service to keep the tunnel running</li>
                   </ol>
                 </div>
-                {/* Waiting / timeout indicator */}
+                {/* Phase indicator — waiting → verifying → success/timeout */}
                 <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 ${
                   bootstrapModal.phase === 'timeout'
                     ? 'bg-amber-50 border border-amber-200 text-amber-700'
@@ -589,6 +721,8 @@ export default function MachinesPage() {
                 }`}>
                   {bootstrapModal.phase === 'timeout' ? (
                     <>⚠ Still waiting — bootstrap is taking longer than expected. Check the machine for errors.</>
+                  ) : bootstrapModal.phase === 'verifying' ? (
+                    <><Loader2 size={12} className="animate-spin shrink-0" /> Machine registered — waiting for agent to come online…</>
                   ) : (
                     <><Loader2 size={12} className="animate-spin shrink-0" /> Waiting for machine to connect…</>
                   )}
@@ -605,6 +739,56 @@ export default function MachinesPage() {
                 className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm"
               >
                 {bootstrapModal.phase === 'success' ? 'Done' : 'Close'}
+              </button>
+            </div>
+          </div>
+        </div></div>
+      )}
+
+      {/* Agent Install Modal — operator pastes the curl-bash on the target.
+          Closes automatically once HealthService detects the agent is up
+          (Machine.agent_installed flips true via the health poll loop). */}
+      {agentInstallModal.open && (
+        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl">
+            <div className="flex items-center justify-between p-4 border-b">
+              <h2 className="text-lg font-semibold">Install agent on {agentInstallModal.machineName}</h2>
+              <button
+                onClick={() => setAgentInstallModal(m => ({ ...m, open: false }))}
+                className="text-gray-400 hover:text-gray-600 text-xl"
+              >
+                ×
+              </button>
+            </div>
+            <div className="p-4 space-y-4">
+              <p className="text-sm text-gray-600">{agentInstallModal.instruction}</p>
+              <div className="relative">
+                <pre className="bg-gray-900 text-green-400 text-xs rounded-lg p-4 pr-12 overflow-x-auto whitespace-pre-wrap break-all">
+                  {agentInstallModal.command}
+                </pre>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(agentInstallModal.command).then(() => {
+                      setAgentInstallCopied(true)
+                      setTimeout(() => setAgentInstallCopied(false), 2000)
+                    })
+                  }}
+                  className="absolute top-2 right-2 p-1.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
+                  title="Copy command"
+                >
+                  {agentInstallCopied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+                </button>
+              </div>
+              <div className="text-xs text-gray-500 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
+                One-time per machine. Once you paste, the agent registers itself via the existing rathole tunnel — no second click needed. The badge on this page flips green within ~60s.
+              </div>
+            </div>
+            <div className="flex justify-end p-4 border-t">
+              <button
+                onClick={() => setAgentInstallModal(m => ({ ...m, open: false }))}
+                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm"
+              >
+                Close
               </button>
             </div>
           </div>

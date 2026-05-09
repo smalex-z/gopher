@@ -13,6 +13,35 @@ fi
 
 echo "=== Gopher Machine Bootstrap ==="
 echo ""
+
+# ── Detect prior install and clean up before re-bootstrap ────────────────────
+# A leftover /usr/local/bin/gopher-uninstall (or rathole-client systemd unit,
+# or /etc/rathole) from a previous bootstrap will conflict with the new one:
+# stale tunnels in client.toml, stale agent token in /etc/gopher-agent, the
+# old VPS public key still in authorized_keys. Run gopher-uninstall first so
+# the new bootstrap starts from a known-clean state. The uninstall script
+# notifies the previous server of the deletion (best-effort) and removes all
+# local services/configs/binaries.
+if [ -x /usr/local/bin/gopher-uninstall ] || [ -f /etc/systemd/system/rathole-client.service ] || [ -d /etc/rathole ]; then
+  echo "Detected an existing Gopher install on this machine."
+  echo "Running gopher-uninstall to clear it before re-bootstrapping..."
+  if [ -x /usr/local/bin/gopher-uninstall ]; then
+    $SUDO /usr/local/bin/gopher-uninstall || echo "  WARN: prior gopher-uninstall reported errors — continuing"
+  else
+    # Old/partial install with no uninstaller on disk. Stop services + remove
+    # the directories the new bootstrap will recreate. Best-effort — failures
+    # are logged but don't abort.
+    $SUDO systemctl stop gopher-agent rathole-client 2>/dev/null || true
+    $SUDO systemctl disable gopher-agent rathole-client 2>/dev/null || true
+    $SUDO rm -f /etc/systemd/system/gopher-agent.service /etc/systemd/system/rathole-client.service
+    $SUDO rm -rf /etc/rathole /etc/gopher-agent
+    $SUDO rm -f /usr/local/bin/gopher-agent /usr/local/bin/rathole
+    $SUDO systemctl daemon-reload 2>/dev/null || true
+    echo "  Removed legacy service files and configs"
+  fi
+  echo ""
+fi
+
 # Prefer the explicit env var. Otherwise prompt only when /dev/tty is actually
 # usable — the device file exists in many non-interactive contexts (piped SSH,
 # containers) but reads/writes fail with "no such device or address". Probe
@@ -88,6 +117,8 @@ _json() {
 TUNNEL_PORT=$(_json tunnel_port)
 VPS_PUBLIC_KEY=$(_json vps_ssh_public_key)
 RATHOLE_CONFIG=$(_json rathole_client_config)
+AGENT_TOKEN=$(_json agent_token 2>/dev/null || echo "")
+AGENT_PORT=$(_json agent_local_port 2>/dev/null || echo "")
 
 if [ -z "$TUNNEL_PORT" ] || [ "$TUNNEL_PORT" = "null" ]; then
   echo "ERROR: Unexpected response from server."
@@ -192,9 +223,15 @@ if [ -s /tmp/gopher-uninstall.sh ]; then
   # Grant the current user passwordless sudo for commands the gopher server
   # needs to trigger non-interactively over SSH.
   SUDOERS_FILE="/etc/sudoers.d/gopher"
+  # The agent uses `systemctl start` (not restart) for recovery so existing
+  # tunnels on the box don't flap; reset-failed clears systemd's failure
+  # counter when a unit has hit its restart-burst limit. Restart is kept for
+  # operator-triggered hard restarts.
   printf '%s\n' \
     "$SSH_USER ALL=(ALL) NOPASSWD: /usr/local/bin/gopher-uninstall" \
-    "$SSH_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart rathole-client" | $SUDO tee "$SUDOERS_FILE" >/dev/null
+    "$SSH_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start rathole-client" \
+    "$SSH_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart rathole-client" \
+    "$SSH_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl reset-failed rathole-client" | $SUDO tee "$SUDOERS_FILE" >/dev/null
   $SUDO chmod 0440 "$SUDOERS_FILE"
   echo "  Sudoers rule written to $SUDOERS_FILE"
 else
@@ -225,6 +262,119 @@ $SUDO systemctl daemon-reload || handle_sudo_failure
 $SUDO systemctl enable rathole-client || handle_sudo_failure
 $SUDO systemctl restart rathole-client || handle_sudo_failure
 echo "  Service installed (system). Check: systemctl status rathole-client"
+
+# ── Install gopher-agent ─────────────────────────────────────────────────────
+# Mirrors migrate.sh exactly so new bootstraps and migrated machines end up
+# in the same shape. Agent runs as a dedicated `gopher` system user with
+# NOPASSWD: ALL — same model as the server-side gopher user.
+#
+# Optional. If AGENT_TOKEN/AGENT_PORT are missing (older server) the install
+# is skipped and the migration UI on the dashboard will offer to add it later.
+if [ -n "$AGENT_TOKEN" ] && [ "$AGENT_TOKEN" != "null" ] && [ -n "$AGENT_PORT" ] && [ "$AGENT_PORT" != "null" ]; then
+  echo "Installing gopher-agent..."
+  AGENT_ARCH_TAG="linux-amd64"
+  case "$(uname -m)" in
+    x86_64)         AGENT_ARCH_TAG="linux-amd64" ;;
+    aarch64|arm64)  AGENT_ARCH_TAG="linux-arm64" ;;
+    *)
+      echo "  WARN: unsupported arch $(uname -m); skipping agent install"
+      AGENT_ARCH_TAG=""
+      ;;
+  esac
+  if [ -n "$AGENT_ARCH_TAG" ]; then
+    # 1. Create gopher system user (idempotent).
+    if ! id -u gopher >/dev/null 2>&1; then
+      $SUDO useradd --system --shell /usr/sbin/nologin --home-dir /nonexistent --no-create-home gopher
+      echo "  Created gopher system user"
+    fi
+
+    # 2. Sudoers: gopher gets NOPASSWD: ALL. Strip any prior gopher-* line
+    # (e.g. older bootstraps that scoped narrower) before re-adding.
+    SUDOERS_FILE="/etc/sudoers.d/gopher"
+    $SUDO touch "$SUDOERS_FILE"
+    $SUDO sh -c "grep -v '^gopher ' '$SUDOERS_FILE' 2>/dev/null > '$SUDOERS_FILE.tmp' || true; echo 'gopher ALL=(ALL) NOPASSWD: ALL' >> '$SUDOERS_FILE.tmp'; mv '$SUDOERS_FILE.tmp' '$SUDOERS_FILE'; chmod 0440 '$SUDOERS_FILE'"
+
+    # 3. Pre-write the agent config BEFORE attempting the binary download.
+    # Two benefits: (a) gopher-uninstall.sh can still authenticate against
+    # /api/machines/self-delete if the binary install fails, so the dashboard
+    # stays in sync after a manual cleanup; (b) the migration tool can finish
+    # the install later without round-tripping the token through the user.
+    $SUDO mkdir -p /etc/gopher-agent
+    $SUDO tee /etc/gopher-agent/config.env >/dev/null <<EOF || true
+GOPHER_AGENT_TOKEN=$AGENT_TOKEN
+GOPHER_AGENT_PORT=$AGENT_PORT
+GOPHER_AGENT_UNIT=rathole-client.service
+EOF
+    $SUDO chmod 640 /etc/gopher-agent/config.env
+    $SUDO chown root:gopher /etc/gopher-agent/config.env
+
+    # 4. Download agent binary. We prefer curl (its -fS pair shows transport
+    # errors loudly so a failed download stops being a silent skip) and fall
+    # back to a cert-tolerant retry the way migrate.sh does — old distros
+    # without recent CA bundles otherwise fail TLS even though the URL is
+    # fine. wget is the no-curl fallback; we drop -q so the same diagnostics
+    # surface there too.
+    AGENT_URL="$HOST_URL/static/agents/gopher-agent-${AGENT_ARCH_TAG}"
+    rm -f /tmp/gopher-agent.new
+    echo "  Downloading agent: $AGENT_URL"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fSL "$AGENT_URL" -o /tmp/gopher-agent.new \
+        || { echo "  curl failed; retrying with --insecure (cert validation off)"; \
+             curl -fSL --insecure "$AGENT_URL" -o /tmp/gopher-agent.new || true; }
+    elif command -v wget >/dev/null 2>&1; then
+      wget -nv "$AGENT_URL" -O /tmp/gopher-agent.new \
+        || { echo "  wget failed; retrying with --no-check-certificate"; \
+             wget -nv --no-check-certificate "$AGENT_URL" -O /tmp/gopher-agent.new || true; }
+    else
+      echo "  ERROR: neither curl nor wget is installed — cannot download agent"
+    fi
+    if [ ! -s /tmp/gopher-agent.new ]; then
+      echo "  WARN: agent download failed — dashboard's migration tool can finish the install later (token stored at /etc/gopher-agent/config.env)"
+      rm -f /tmp/gopher-agent.new
+    fi
+    if [ -s /tmp/gopher-agent.new ]; then
+      $SUDO install -m 0755 -o root -g root /tmp/gopher-agent.new /usr/local/bin/gopher-agent
+      rm -f /tmp/gopher-agent.new
+
+      # 5. Hand /etc/rathole/client.toml to gopher so the agent can write
+      # config-push directly without sudo. rathole-client (running as
+      # $SSH_USER) keeps reading via mode 0644.
+      $SUDO chown gopher:gopher /etc/rathole/client.toml
+      $SUDO chmod 0644 /etc/rathole/client.toml
+
+      # 6. systemd unit + service start. User=gopher, not $SSH_USER.
+      $SUDO tee /etc/systemd/system/gopher-agent.service >/dev/null <<EOF || true
+[Unit]
+Description=Gopher Agent (control-plane back-channel)
+After=network.target
+
+[Service]
+Type=simple
+User=gopher
+EnvironmentFile=/etc/gopher-agent/config.env
+ExecStart=/usr/local/bin/gopher-agent
+Restart=always
+RestartSec=5
+# KillMode=process so the agent's children (the detached gopher-uninstall
+# worker spawned from POST /uninstall) survive when this unit is stopped.
+# With the default control-group, systemctl-stopping gopher-agent would
+# kill gopher-uninstall mid-cleanup — exactly what we don't want.
+KillMode=process
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      $SUDO systemctl daemon-reload || true
+      $SUDO systemctl enable gopher-agent || true
+      $SUDO systemctl restart gopher-agent || true
+      echo "  gopher-agent installed and started on 127.0.0.1:$AGENT_PORT (user: gopher)"
+    fi
+  fi
+else
+  echo "Skipping gopher-agent install (server didn't return agent fields)"
+fi
 
 echo ""
 echo "=== Bootstrap complete! ==="

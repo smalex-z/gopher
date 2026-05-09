@@ -31,7 +31,9 @@ func Initialize(dsn string) error {
 		return fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
 
-	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &AppSettings{}, &SSHKey{}, &FirewallRule{}, &BotSession{}, &ExternalMachine{}, &ExternalTunnel{}, &ActivityEvent{}, &TOTPDevice{}); err != nil {
+	// ActivityEvent is now an alias for Event; we only need to register the
+	// underlying type once.
+	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &MigrationToken{}, &AppSettings{}, &SSHKey{}, &FirewallRule{}, &BotSession{}, &TOTPDevice{}, &ExternalMachine{}, &ExternalTunnel{}, &HealthCheck{}, &Event{}); err != nil {
 		return fmt.Errorf("failed to auto-migrate: %w", err)
 	}
 
@@ -96,6 +98,27 @@ func migrateSSHKeysFromSettings() error {
 	}
 	if count > 0 {
 		return nil // already migrated
+	}
+
+	// Fresh installs never had the legacy ssh_public_key/ssh_private_key
+	// columns on app_settings — those were removed when the dedicated
+	// ssh_keys table landed. Probe the schema first so we don't trip GORM's
+	// warn-level logger with a "no such column" SQL error on every fresh
+	// install.
+	type colInfo struct{ Name string }
+	var cols []colInfo
+	if err := DB.Raw("PRAGMA table_info(app_settings)").Scan(&cols).Error; err != nil {
+		return nil // table doesn't exist yet — no legacy data to migrate
+	}
+	hasLegacyCols := false
+	for _, c := range cols {
+		if c.Name == "ssh_public_key" {
+			hasLegacyCols = true
+			break
+		}
+	}
+	if !hasLegacyCols {
+		return nil
 	}
 
 	// Read raw values directly from the DB column to avoid depending on the struct field.

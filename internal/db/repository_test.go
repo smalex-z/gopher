@@ -219,16 +219,35 @@ func TestNextRatholePort_FindsGap(t *testing.T) {
 	}
 }
 
-func TestNextSSHTunnelPort_SharesPortSpace(t *testing.T) {
+func TestNextRatholePort_SharesPortSpace(t *testing.T) {
 	initTestDB(t)
 	seedMachine(t, "m1")
 	seedTunnel(t, "t1", "m1", 1024)
-	port, err := NextSSHTunnelPort()
+	port, err := NextRatholePort()
 	if err != nil {
-		t.Fatalf("NextSSHTunnelPort: %v", err)
+		t.Fatalf("NextRatholePort: %v", err)
 	}
 	if port != 1025 {
 		t.Errorf("port = %d, want 1025", port)
+	}
+}
+
+// Allocating two ports back-to-back (e.g. SSH tunnel + agent back-channel
+// at bootstrap time) must yield distinct ports even though the first
+// allocation hasn't been written to the DB yet — that's the whole point
+// of the variadic excluding parameter.
+func TestNextRatholePort_ExcludesUncommittedPort(t *testing.T) {
+	initTestDB(t)
+	first, err := NextRatholePort()
+	if err != nil {
+		t.Fatalf("NextRatholePort first: %v", err)
+	}
+	second, err := NextRatholePort(first)
+	if err != nil {
+		t.Fatalf("NextRatholePort second: %v", err)
+	}
+	if first == second {
+		t.Fatalf("two consecutive allocations returned the same port (%d) — bootstrap would bind SSH and agent to the same address", first)
 	}
 }
 
@@ -443,5 +462,115 @@ func TestGetTunnelBySubdomain(t *testing.T) {
 	_, err = GetTunnelBySubdomain("missing")
 	if err == nil {
 		t.Fatal("expected error for missing subdomain, got nil")
+	}
+}
+
+// ---- Partial machine updaters -----------------------------------------------
+//
+// SetMachineStatus and SetMachineAgentSeen both exist so concurrent writers
+// (monitor + health) don't clobber each other's columns via a full-record
+// GORM Save. These tests lock the contract: each helper updates *only* its
+// declared columns and leaves the rest alone.
+
+func TestSetMachineStatus_OnlyUpdatesStatusAndLastSeen(t *testing.T) {
+	initTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	m := &Machine{
+		ID:                "m1",
+		Name:              "preserve-me",
+		Status:            "pending",
+		AgentInstalled:    true,
+		AgentVersion:      "0.1.0",
+		AgentLastSeen:     &now,
+		AgentToken:        "secret",
+		AgentRemotePort:   1234,
+		AgentLocalPort:    4322,
+		AgentRatholeToken: "rt",
+	}
+	if err := CreateMachine(m); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	later := now.Add(2 * time.Minute)
+	if err := SetMachineStatus("m1", "offline", &later); err != nil {
+		t.Fatalf("SetMachineStatus: %v", err)
+	}
+
+	got, err := GetMachine("m1")
+	if err != nil {
+		t.Fatalf("GetMachine: %v", err)
+	}
+	if got.Status != "offline" {
+		t.Errorf("Status = %q, want offline", got.Status)
+	}
+	if got.LastSeen == nil || !got.LastSeen.Equal(later) {
+		t.Errorf("LastSeen = %v, want %v", got.LastSeen, later)
+	}
+	// Untouched fields stay put.
+	if !got.AgentInstalled {
+		t.Errorf("AgentInstalled was clobbered")
+	}
+	if got.AgentVersion != "0.1.0" {
+		t.Errorf("AgentVersion = %q, want 0.1.0", got.AgentVersion)
+	}
+	if got.AgentToken != "secret" {
+		t.Errorf("AgentToken was clobbered")
+	}
+	if got.AgentRemotePort != 1234 {
+		t.Errorf("AgentRemotePort was clobbered")
+	}
+}
+
+func TestSetMachineAgentSeen_FlipsInstalledAndPreservesNonAgentFields(t *testing.T) {
+	initTestDB(t)
+	m := &Machine{
+		ID:                 "m2",
+		Name:               "agent-seen",
+		Status:             "pending",
+		TunnelPort:         1024,
+		RatholeSSHToken:    "ssh-tok",
+		AgentInstalled:     false,
+		AgentRemotePort:    1025,
+		AgentLocalPort:     4322,
+		AgentRatholeToken:  "agent-rt",
+		AgentInstallError:  "previous error",
+	}
+	if err := CreateMachine(m); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	when := time.Now().UTC().Truncate(time.Second)
+	if err := SetMachineAgentSeen("m2", "0.1.0", when); err != nil {
+		t.Fatalf("SetMachineAgentSeen: %v", err)
+	}
+
+	got, err := GetMachine("m2")
+	if err != nil {
+		t.Fatalf("GetMachine: %v", err)
+	}
+	if !got.AgentInstalled {
+		t.Errorf("AgentInstalled should flip true once agent is reachable")
+	}
+	if got.AgentVersion != "0.1.0" {
+		t.Errorf("AgentVersion = %q, want 0.1.0", got.AgentVersion)
+	}
+	if got.AgentInstallError != "" {
+		t.Errorf("AgentInstallError should clear on successful sighting, got %q", got.AgentInstallError)
+	}
+	if got.Status != "connected" {
+		t.Errorf("Status should reflect successful agent contact, got %q", got.Status)
+	}
+	if got.AgentLastSeen == nil || !got.AgentLastSeen.Equal(when) {
+		t.Errorf("AgentLastSeen = %v, want %v", got.AgentLastSeen, when)
+	}
+	// Non-agent fields preserved.
+	if got.Name != "agent-seen" {
+		t.Errorf("Name was clobbered")
+	}
+	if got.TunnelPort != 1024 {
+		t.Errorf("TunnelPort was clobbered")
+	}
+	if got.RatholeSSHToken != "ssh-tok" {
+		t.Errorf("RatholeSSHToken was clobbered")
 	}
 }

@@ -185,8 +185,15 @@ func TestMachineDelete_DeletesTunnelsThenMachineClientThenMachine(t *testing.T) 
 
 	fake := &fakeLocalOps{}
 	svc := NewMachineService(nil, fake)
-	if err := svc.Delete("m1"); err != nil {
+	res, err := svc.Delete("m1")
+	if err != nil {
 		t.Fatalf("machine delete failed: %v", err)
+	}
+	if res == nil || res.ID != "m1" {
+		t.Fatalf("expected DeleteResult for m1, got %+v", res)
+	}
+	if !res.ClientCleanupOK {
+		t.Fatalf("expected client cleanup ok with fake local ops, got %+v", res)
 	}
 
 	if _, err := db.GetMachine("m1"); err == nil {

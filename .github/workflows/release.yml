@@ -57,6 +57,17 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Build gopher-agent (linux/amd64 + linux/arm64)
+        # The server embeds these binaries via //go:embed all:agents and serves
+        # them at /static/agents/<arch>; without this step the published
+        # release artifact 404s on every agent download from a bootstrapping
+        # client, breaking the migration / agent install flow entirely.
+        # Mirrors the local scripts/build.sh agent step.
+        run: |
+          mkdir -p cmd/server/agents
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o cmd/server/agents/gopher-agent-linux-amd64 ./cmd/agent/
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o cmd/server/agents/gopher-agent-linux-arm64 ./cmd/agent/
+
       - name: Build linux binaries
         run: |
           mkdir -p dist

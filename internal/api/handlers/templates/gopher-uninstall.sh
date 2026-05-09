@@ -1,16 +1,22 @@
 #!/bin/sh
-# gopher-uninstall - Gopher machine uninstall/cleanup script
+# gopher-uninstall - Gopher machine helper script (root-privileged via sudoers)
 #
 # Usage:
-#   gopher-uninstall                               Full uninstall (removes everything)
-#   gopher-uninstall --remove-tunnel <TUNNEL_ID>   Remove a specific tunnel from client.toml
+#   gopher-uninstall                              Full uninstall (removes everything)
+#   gopher-uninstall --remove-tunnel  <TUNNEL_ID> Remove a tunnel from client.toml
 #   gopher-uninstall --remove-machine <MACHINE_ID> Remove machine SSH section from client.toml
+#
+# Full-uninstall mode notifies the dashboard via POST /api/machines/self-delete
+# (best-effort) before tearing down local services, so the server's machine
+# list stays in sync when an operator runs this directly on the box.
 
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 
 CONFIG_FILE="/etc/rathole/client.toml"
 VPS_KEY_FILE="/etc/rathole/vps_key.pub"
 INSTALL_PATH="/usr/local/bin/gopher-uninstall"
+HOST_URL="{{.HostURL}}"
+AGENT_CONFIG="/etc/gopher-agent/config.env"
 
 # Remove a marker-delimited section from a file.
 # Usage: remove_section <file> <start_marker> <end_marker>
@@ -82,6 +88,53 @@ else
   REAL_HOME="$HOME"
 fi
 
+# ── Notify the server BEFORE tearing down local services ─────────────────────
+# Pulls GOPHER_AGENT_TOKEN from the agent's env file, posts it to
+# /api/machines/self-delete on the dashboard. The dashboard resolves the
+# token to the machine record and deletes it, so the dashboard's machine
+# list doesn't show a stale entry after a local uninstall.
+#
+# We loudly warn when we can't notify (rather than skipping silently) — a
+# stale machine record on the dashboard is the kind of dangling state an
+# operator wants to know to clean up manually. The local teardown still
+# proceeds in every failure mode.
+NOTIFIED=0
+if [ -z "$HOST_URL" ]; then
+  echo "Skipping server notification: this script was installed before HOST_URL templating (re-bootstrap or update from the dashboard to fix)."
+elif [ ! -f "$AGENT_CONFIG" ]; then
+  echo "Skipping server notification: $AGENT_CONFIG missing (agent not installed, or pre-agent machine)."
+else
+  AGENT_TOKEN=$(grep -E '^GOPHER_AGENT_TOKEN=' "$AGENT_CONFIG" 2>/dev/null | head -1 | cut -d= -f2-)
+  if [ -z "$AGENT_TOKEN" ]; then
+    echo "Skipping server notification: GOPHER_AGENT_TOKEN not found in $AGENT_CONFIG."
+  else
+    echo "Notifying $HOST_URL that this machine is being uninstalled..."
+    if command -v curl >/dev/null 2>&1; then
+      if curl -fsS -X POST "$HOST_URL/api/machines/self-delete" \
+           -H "Authorization: Bearer $AGENT_TOKEN" \
+           --max-time 10 >/dev/null 2>&1; then
+        NOTIFIED=1
+        echo "  Server notified"
+      else
+        echo "  WARN: curl call to /api/machines/self-delete failed"
+      fi
+    elif command -v wget >/dev/null 2>&1; then
+      if wget -q --method=POST --header="Authorization: Bearer $AGENT_TOKEN" \
+           --timeout=10 "$HOST_URL/api/machines/self-delete" -O /dev/null; then
+        NOTIFIED=1
+        echo "  Server notified"
+      else
+        echo "  WARN: wget call to /api/machines/self-delete failed"
+      fi
+    else
+      echo "  WARN: neither curl nor wget is installed — cannot notify server"
+    fi
+  fi
+fi
+if [ "$NOTIFIED" != "1" ]; then
+  echo "  → Open the dashboard and remove this machine manually so its record doesn't linger."
+fi
+
 # Remove the VPS SSH public key from authorized_keys so the server can no
 # longer SSH back into this machine.
 if [ -f "$VPS_KEY_FILE" ]; then
@@ -101,6 +154,11 @@ if [ -f "$VPS_KEY_FILE" ]; then
   fi
 fi
 
+echo "Stopping gopher-agent service..."
+$SUDO systemctl stop gopher-agent 2>/dev/null || true
+$SUDO systemctl disable gopher-agent 2>/dev/null || true
+$SUDO rm -f /etc/systemd/system/gopher-agent.service 2>/dev/null || true
+
 echo "Stopping rathole-client service..."
 $SUDO systemctl stop rathole-client 2>/dev/null || true
 $SUDO systemctl disable rathole-client 2>/dev/null || true
@@ -113,7 +171,23 @@ $SUDO rm -rf /etc/rathole 2>/dev/null || true
 echo "Removing rathole binary..."
 $SUDO rm -f /usr/local/bin/rathole 2>/dev/null || true
 
-# Self-destruct last so the script can finish cleanly.
-rm -f "$INSTALL_PATH" 2>/dev/null || true
+echo "Removing gopher-agent binary and config..."
+$SUDO rm -f /usr/local/bin/gopher-agent 2>/dev/null || true
+$SUDO rm -rf /etc/gopher-agent 2>/dev/null || true
+
+# Remove the dedicated gopher system user. `userdel` fails if processes are
+# still owned by the user, so it must run AFTER stopping the agent service.
+# Errors ignored — user may not exist on machines that pre-date the agent.
+if id -u gopher >/dev/null 2>&1; then
+  $SUDO userdel gopher 2>/dev/null || true
+fi
+
+# Self-destruct: remove via $SUDO so it works regardless of how the script
+# was invoked (must happen BEFORE we drop /etc/sudoers.d/gopher; after that
+# point the agent's gopher user can't sudo anymore).
+$SUDO rm -f "$INSTALL_PATH" 2>/dev/null || true
+
+# Drop sudoers entries last so the operations above could still use sudo -n.
+$SUDO rm -f /etc/sudoers.d/gopher 2>/dev/null || true
 
 echo "=== Gopher uninstall complete ==="

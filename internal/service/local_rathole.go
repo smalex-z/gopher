@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -127,9 +129,9 @@ func stripGopherServiceSections(content string) string {
 }
 
 // AddServiceTunnel adds a user-defined service tunnel to the server's
-// /etc/rathole/server.toml and SSHes into the machine to update its
-// /etc/rathole/client.toml. If subdomain is set it also writes a managed
-// Caddy site file under /etc/caddy/conf.d.
+// /etc/rathole/server.toml and pushes the regenerated client.toml to the
+// machine. The agent back-channel is preferred; SSH/SFTP is the fallback
+// for machines that don't yet have the agent installed.
 func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Machine) error {
 	settings, err := db.GetSettings()
 	if err != nil {
@@ -157,7 +159,86 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
 	}
 
-	// --- 3. SSH into client and update client.toml ---
+	// --- 3. Push the regenerated client.toml ---
+	machineTunnels, err := db.GetTunnelsByMachine(machine.ID)
+	if err != nil {
+		return fmt.Errorf("failed to load machine tunnels: %w", err)
+	}
+	ratholeHost := settings.ServerHost
+	if ratholeHost == "" {
+		ratholeHost = settings.Domain
+	}
+	transformer := func(existing string) (string, error) {
+		return mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost)
+	}
+	if err := s.updateClientToml(machine, transformer); err != nil {
+		return fmt.Errorf("failed to write client.toml on machine: %w", err)
+	}
+	return nil
+}
+
+// RemoveServiceTunnelClient removes only the tunnel's section from the
+// client machine's /etc/rathole/client.toml (or user-level fallback).
+func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine *db.Machine) error {
+	if tunnel == nil || machine == nil {
+		return nil
+	}
+	transformer := func(existing string) (string, error) {
+		return removeClientManagedSection(existing, "tunnel", tunnel.ID), nil
+	}
+	return s.updateClientToml(machine, transformer)
+}
+
+// updateClientToml is the read-transform-write loop for a machine's
+// /etc/rathole/client.toml. It prefers the gopher-agent back-channel and
+// falls back to SSH/SFTP for legacy machines that don't have the agent yet.
+//
+// The fallback is deliberate: until every machine is migrated, both transports
+// must work. Once the migration UI flips every machine, this fallback can be
+// dropped and the SSH path retired.
+func (s *LocalSetupService) updateClientToml(machine *db.Machine, transform func(existing string) (string, error)) error {
+	if machine == nil {
+		return fmt.Errorf("nil machine")
+	}
+
+	if machine.AgentInstalled && machine.AgentRemotePort > 0 {
+		if err := s.updateClientTomlViaAgent(machine, transform); err == nil {
+			return nil
+		} else {
+			// Agent failed (network, timeout, permission). Fall back to SSH so
+			// the operation still completes; log so we can spot persistent
+			// agent issues that should be debugged.
+			log.Printf("agent client.toml push failed for machine %s (%s): %v — falling back to SSH", machine.ID, machine.Name, err)
+		}
+	}
+
+	return s.updateClientTomlViaSSH(machine, transform)
+}
+
+func (s *LocalSetupService) updateClientTomlViaAgent(machine *db.Machine, transform func(existing string) (string, error)) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	client := NewAgentClient(machine)
+
+	existing, err := client.GetRatholeConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("agent get config: %w", err)
+	}
+	updated, err := transform(existing)
+	if err != nil {
+		return err
+	}
+	if updated == existing {
+		// No-op write would still bump mtime and cause notify reload churn.
+		return nil
+	}
+	if err := client.PutRatholeConfig(ctx, updated); err != nil {
+		return fmt.Errorf("agent put config: %w", err)
+	}
+	return nil
+}
+
+func (s *LocalSetupService) updateClientTomlViaSSH(machine *db.Machine, transform func(existing string) (string, error)) error {
 	sshKey, sshKeyErr := db.GetSSHKeyForMachine(machine)
 	if sshKeyErr != nil {
 		return fmt.Errorf("no server SSH key available; machine may need to be re-bootstrapped")
@@ -178,26 +259,16 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	}
 	defer sshClient.Close()
 
-	// Read existing client.toml
 	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
 	if err != nil {
 		existing = ""
 	}
-	machineTunnels, err := db.GetTunnelsByMachine(machine.ID)
-	if err != nil {
-		return fmt.Errorf("failed to load machine tunnels: %w", err)
-	}
-	ratholeHost := settings.ServerHost
-	if ratholeHost == "" {
-		ratholeHost = settings.Domain
-	}
-	updated, err := mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost)
+	updated, err := transform(existing)
 	if err != nil {
 		return err
 	}
 
-	// Determine the absolute config path on the remote machine.
-	// SFTP does not expand shell variables, so resolve the home dir explicitly.
+	// Resolve absolute config path (SFTP cannot expand $HOME).
 	configPath := "/etc/rathole/client.toml"
 	if _, err2 := sshClient.Execute("test -f /etc/rathole/client.toml"); err2 != nil {
 		homeDir, _ := sshClient.Execute("echo $HOME")
@@ -209,64 +280,13 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		_, _ = sshClient.Execute("mkdir -p " + homeDir + "/.config/rathole")
 	}
 
-	// Write config directly via SFTP — works when the SSH user owns /etc/rathole/
-	// (bootstrap runs chown for sudo-capable machines). UploadFileSudo handles legacy
-	// machines where the file ended up root-owned by falling back to a sudo mv.
 	if err := sshClient.UploadFileSudo([]byte(updated), configPath, machine.Username); err != nil {
 		return fmt.Errorf("failed to write client.toml on machine: %w", err)
 	}
 
-	// rathole's notify watcher picks up client.toml via inotify — adding or
-	// removing a [services.X] block reloads in-place without dropping the
-	// other tunnels on this machine. pkill / systemctl restart would flap
-	// every existing connection on every provision.
-	// systemctl start is a no-op on an active unit; covers the "not running"
-	// case for both system and user units without forcing a restart on
-	// healthy ones.
-	_, _ = sshClient.Execute(`{ [ "$(id -u)" -eq 0 ] && systemctl start rathole-client || sudo -n systemctl start rathole-client; } 2>/dev/null; systemctl --user start rathole-client 2>/dev/null; true`)
-
-	return nil
-}
-
-// RemoveServiceTunnelClient removes only the tunnel's section from the
-// client machine's /etc/rathole/client.toml (or user-level fallback).
-func (s *LocalSetupService) RemoveServiceTunnelClient(tunnel *db.Tunnel, machine *db.Machine) error {
-	if tunnel == nil || machine == nil {
-		return nil
-	}
-	sshKey, err := db.GetSSHKeyForMachine(machine)
-	if err != nil {
-		return nil
-	}
-	sshClient, err := sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
-	if err != nil {
-		return err
-	}
-	defer sshClient.Close()
-
-	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
-	if err != nil {
-		return nil
-	}
-	updated := removeClientManagedSection(existing, "tunnel", tunnel.ID)
-
-	// Resolve absolute config path (SFTP cannot expand $HOME).
-	confPath := "/etc/rathole/client.toml"
-	if _, err2 := sshClient.Execute("test -f /etc/rathole/client.toml"); err2 != nil {
-		homeDir, _ := sshClient.Execute("echo $HOME")
-		homeDir = strings.TrimSpace(homeDir)
-		if homeDir == "" {
-			homeDir = "/home/" + machine.Username
-		}
-		confPath = homeDir + "/.config/rathole/client.toml"
-	}
-
-	if err := sshClient.UploadFileSudo([]byte(updated), confPath, machine.Username); err != nil {
-		return err
-	}
-	// See AddServiceTunnel: rathole's notify watcher reloads on file
-	// change, so removing a [services.X] block does not require a kill or
-	// restart. systemctl start is a no-op on healthy units.
+	// rathole's notify watcher reloads on file change; systemctl start is a
+	// no-op on a healthy unit and covers the "stopped" case without flapping
+	// existing tunnels.
 	_, _ = sshClient.Execute(`{ [ "$(id -u)" -eq 0 ] && systemctl start rathole-client || sudo -n systemctl start rathole-client; } 2>/dev/null; systemctl --user start rathole-client 2>/dev/null; true`)
 	return nil
 }
@@ -297,18 +317,57 @@ func (s *LocalSetupService) RemoveServiceTunnel(tunnel *db.Tunnel, machine *db.M
 	_ = s.RemoveServiceTunnelCaddy(tunnel)
 }
 
-// RemoveMachineClient SSHes into a client machine via its reverse tunnel and
-// removes all gopher-managed configuration: the rathole-client service,
-// client.toml, and the VPS public key from ~/.ssh/authorized_keys.
+// RemoveMachineClient triggers full cleanup on the client machine: stops
+// gopher-agent + rathole-client, removes their binaries, configs, sudoers
+// rule, and the VPS public key from authorized_keys.
 //
-// Errors are best-effort — callers should proceed with DB cleanup even on failure.
+// Two transports:
+//   - agent path: POST /uninstall to the agent over the rathole back-channel.
+//     The agent spawns a detached worker (own session via setsid) that
+//     outlives both the agent process and the rathole tunnel, then runs the
+//     canonical /usr/local/bin/gopher-uninstall script. No SSH involved.
+//   - SSH fallback: for legacy machines without the agent, exec the same
+//     /usr/local/bin/gopher-uninstall script over SSH using nohup + setsid
+//     so it survives the SSH session drop.
+//
+// Errors are best-effort — callers should proceed with DB cleanup even on
+// failure (the worst case is a stale client; the operator can re-run
+// gopher-uninstall manually on the box).
 func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
+	if machine.TunnelPort == 0 {
+		return fmt.Errorf("machine has no tunnel port")
+	}
+
+	if machine.AgentInstalled && machine.AgentRemotePort > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := NewAgentClient(machine).Uninstall(ctx); err == nil {
+			return nil
+		} else {
+			// Agent unreachable — likely already partially torn down. Fall
+			// through to SSH so we still try to leave the box clean.
+			log.Printf("agent uninstall for %s (%s) failed, falling back to SSH: %v", machine.ID, machine.Name, err)
+		}
+	}
+
+	return s.removeMachineClientViaSSH(machine)
+}
+
+// removeMachineClientViaSSH is the legacy delete path. Used for machines that
+// haven't been migrated to the agent yet. Identical end-state to the agent
+// path — invokes the same on-disk gopher-uninstall script in a detached
+// worker via setsid.
+//
+// We precheck that gopher-uninstall both exists and is allowed under
+// NOPASSWD sudoers BEFORE firing the detached worker. The detached worker
+// runs `sudo -n` (non-interactive); without that sudoers line it silently
+// exits 1, and because the worker is backgrounded we never observe the
+// failure — the box is left dirty and the operator has no signal as to why.
+// The precheck collapses both failure modes into a clear error.
+func (s *LocalSetupService) removeMachineClientViaSSH(machine *db.Machine) error {
 	sshKey, err := db.GetSSHKeyForMachine(machine)
 	if err != nil {
 		return fmt.Errorf("no server SSH key available")
-	}
-	if machine.TunnelPort == 0 {
-		return fmt.Errorf("machine has no tunnel port")
 	}
 
 	sshClient, err := sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
@@ -317,62 +376,27 @@ func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
 	}
 	defer sshClient.Close()
 
-	// Resolve the home directory (SFTP can't expand $HOME).
-	homeDir, _ := sshClient.Execute("echo $HOME")
-	homeDir = strings.TrimSpace(homeDir)
-	// Sanitize: reject values that look like shell injection attempts.
-	if !strings.HasPrefix(homeDir, "/") || strings.ContainsAny(homeDir, ";|&$`\\\"'") {
-		homeDir = "/home/" + machine.Username
+	// Precheck 1: script is on disk + executable. `sh -c` to keep it portable
+	// across the various login shells the bootstrap script may have run as.
+	if out, perr := sshClient.Execute("test -x /usr/local/bin/gopher-uninstall && echo OK"); perr != nil || strings.TrimSpace(out) != "OK" {
+		return fmt.Errorf("gopher-uninstall not found on machine (was bootstrap completed? expected at /usr/local/bin/gopher-uninstall): %v", perr)
+	}
+	// Precheck 2: passwordless sudo for the script. `sudo -nl <cmd>` exits 0
+	// only when the user has a NOPASSWD entry for that exact path; otherwise
+	// it prints "a password is required" or "may not run" to stderr and exits
+	// non-zero. Capture that for the operator-visible error message.
+	if out, perr := sshClient.Execute("sudo -nl /usr/local/bin/gopher-uninstall 2>&1"); perr != nil {
+		return fmt.Errorf("client lacks NOPASSWD sudo for gopher-uninstall (re-run bootstrap to refresh /etc/sudoers.d/gopher; %s): %w", strings.TrimSpace(out), perr)
 	}
 
-	// Remove the VPS public key from authorized_keys.
-	if sshKey.PublicKey != "" {
-		akContent, readErr := sshClient.Execute("cat " + homeDir + "/.ssh/authorized_keys 2>/dev/null")
-		if readErr == nil {
-			filtered := removeSSHPublicKey(akContent, sshKey.PublicKey)
-			_ = sshClient.UploadFile([]byte(filtered), homeDir+"/.ssh/authorized_keys")
-		}
-	}
-
-	// Run uninstall asynchronously on the client so it can complete even after
-	// rathole is stopped and this SSH-over-tunnel session drops.
-	const remoteScriptPath = "/tmp/.gopher-remove-rathole.sh"
-	script := buildMachineClientCleanupScript(homeDir, remoteScriptPath)
-	if err := sshClient.UploadFile([]byte(script), remoteScriptPath); err != nil {
-		return fmt.Errorf("failed to upload remote cleanup script: %w", err)
-	}
-	_, _ = sshClient.Execute("chmod +x " + remoteScriptPath)
-	_, err = sshClient.Execute("nohup sh " + remoteScriptPath + " >/tmp/.gopher-remove-rathole.log 2>&1 < /dev/null &")
+	// Fire detached uninstall. setsid + nohup keeps the script alive when
+	// gopher-uninstall stops rathole-client (which kills our SSH session).
+	// Output goes to /tmp/.gopher-uninstall.log on the client for post-mortem.
+	_, err = sshClient.Execute(`setsid nohup sh -c 'sleep 3; sudo -n /usr/local/bin/gopher-uninstall' >/tmp/.gopher-uninstall.log 2>&1 </dev/null &`)
 	if err != nil {
-		return fmt.Errorf("failed to start remote cleanup script: %w", err)
+		return fmt.Errorf("failed to spawn remote uninstall worker: %w", err)
 	}
-
 	return nil
-}
-
-func buildMachineClientCleanupScript(homeDir, scriptPath string) string {
-	return fmt.Sprintf(`#!/bin/sh
-set -e
-HOME_DIR=%q
-
-sudo -n systemctl stop rathole-client 2>/dev/null || true
-sudo -n systemctl disable rathole-client 2>/dev/null || true
-systemctl --user stop rathole-client 2>/dev/null || true
-systemctl --user disable rathole-client 2>/dev/null || true
-
-sudo -n rm -f /etc/systemd/system/rathole-client.service 2>/dev/null || true
-rm -f "$HOME_DIR/.config/systemd/user/rathole-client.service" 2>/dev/null || true
-sudo -n systemctl daemon-reload 2>/dev/null || true
-systemctl --user daemon-reload 2>/dev/null || true
-
-sudo -n rm -f /etc/rathole/client.toml 2>/dev/null || true
-rm -f "$HOME_DIR/.config/rathole/client.toml" 2>/dev/null || true
-
-sudo -n rm -f /usr/local/bin/rathole 2>/dev/null || true
-rm -f "$HOME_DIR/.local/bin/rathole" 2>/dev/null || true
-
-rm -f %q 2>/dev/null || true
-`, homeDir, scriptPath)
 }
 
 // removeSSHPublicKey removes a public key line from an authorized_keys document.
@@ -433,6 +457,23 @@ local_addr = "0.0.0.0:22"
 `, machine.ID, machine.ID, machine.RatholeSSHToken, machine.ID)
 }
 
+// buildClientMachineAgentSection emits the rathole client entry that connects
+// the local gopher-agent (127.0.0.1:AgentLocalPort) to the VPS-side bind so
+// the control plane can reach the agent. Empty when the machine doesn't have
+// agent fields populated — legacy machines without the agent fall through.
+func buildClientMachineAgentSection(machine *db.Machine) string {
+	if machine == nil || machine.ID == "" || machine.AgentRatholeToken == "" || machine.AgentLocalPort == 0 {
+		return ""
+	}
+	return fmt.Sprintf(`# gopher-machine-agent-start: %s
+[client.services.machine-%s-agent]
+type = "tcp"
+token = "%s"
+local_addr = "127.0.0.1:%d"
+# gopher-machine-agent-end: %s
+`, machine.ID, machine.ID, machine.AgentRatholeToken, machine.AgentLocalPort, machine.ID)
+}
+
 func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db.Tunnel, ratholeHost string) (string, error) {
 	base := strings.TrimSpace(existing)
 	if base == "" {
@@ -452,6 +493,9 @@ func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db
 	updated := strings.TrimRight(cleaned, "\n")
 
 	sections := []string{machineSection}
+	if agentSection := strings.TrimSpace(buildClientMachineAgentSection(machine)); agentSection != "" {
+		sections = append(sections, agentSection)
+	}
 	for i := range tunnels {
 		if tunnels[i].MachineID != "" && machine != nil && tunnels[i].MachineID != machine.ID {
 			continue
@@ -491,6 +535,12 @@ func stripClientManagedMarkerBlocks(content string) string {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if skip == "" {
+			// Order matters: machine-agent must be checked before machine
+			// because both share the "# gopher-machine" prefix.
+			if strings.HasPrefix(trimmed, "# gopher-machine-agent-start:") {
+				skip = "machine-agent"
+				continue
+			}
 			if strings.HasPrefix(trimmed, "# gopher-machine-start:") {
 				skip = "machine"
 				continue
@@ -503,6 +553,10 @@ func stripClientManagedMarkerBlocks(content string) string {
 			continue
 		}
 
+		if skip == "machine-agent" && strings.HasPrefix(trimmed, "# gopher-machine-agent-end:") {
+			skip = ""
+			continue
+		}
 		if skip == "machine" && strings.HasPrefix(trimmed, "# gopher-machine-end:") {
 			skip = ""
 			continue
@@ -570,6 +624,9 @@ func removeClientManagedSection(content, entryType, id string) string {
 	}
 	if entryType == "machine" {
 		updated = removeTomlSection(updated, fmt.Sprintf("client.services.machine-%s-ssh", id))
+	}
+	if entryType == "machine-agent" {
+		updated = removeTomlSection(updated, fmt.Sprintf("client.services.machine-%s-agent", id))
 	}
 	return updated
 }

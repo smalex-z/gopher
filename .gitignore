@@ -1,6 +1,8 @@
-# Go binary
+# Go binaries
 gopher
 gopher.exe
+# Stray `go build` output from cmd/agent/ if invoked from repo root
+/agent
 
 # Database
 *.db
@@ -13,6 +15,10 @@ frontend/node_modules/
 # Frontend build output (embedded into Go binary via go:embed; produced by build.sh)
 cmd/server/frontend/dist/
 cmd/server/frontend
+
+# Cross-compiled agent binaries (embedded into Go binary via go:embed; produced by build.sh).
+# .gitkeep is kept so the directory survives for go:embed on fresh checkouts.
+cmd/server/agents/gopher-agent-*
 
 # IDE
 .vscode/

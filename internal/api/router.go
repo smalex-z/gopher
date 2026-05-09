@@ -20,6 +20,8 @@ func NewRouter(
 	updateSvc *service.UpdateService,
 	secSvc *service.SecurityService,
 	backupSvc *service.BackupService,
+	agentInstaller *service.AgentInstaller,
+	healthSvc *service.HealthService,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -41,11 +43,19 @@ func NewRouter(
 	updateH := handlers.NewUpdateHandler(updateSvc)
 	externalH := handlers.NewExternalAPIHandler(bootstrapSvc, tunnelSvc, machineSvc, localSvc)
 	backupH := handlers.NewBackupHandler(backupSvc)
+	agentH := handlers.NewAgentHandler(agentInstaller, healthSvc)
+	eventsH := handlers.NewEventsHandler()
 
 	// Public: bootstrap script download and machine self-registration
 	r.Get("/static/bootstrap.sh", bootstrapH.ServeScript)
 	r.Get("/static/gopher-uninstall.sh", bootstrapH.ServeUninstallScript)
+	r.Get("/static/migrate.sh", bootstrapH.ServeMigrateScript)
 	r.Post("/api/bootstrap", bootstrapH.Register)
+	r.Post("/api/migrate", bootstrapH.Migrate)
+	// Self-delete: gopher-uninstall on the client posts here with its
+	// per-machine bearer token before tearing down so the dashboard's
+	// machine record disappears alongside the local cleanup.
+	r.Post("/api/machines/self-delete", machineH.SelfDelete)
 
 	// Public: pre-tokenized bootstrap script for external API callers (e.g. Nimbus)
 	r.Get("/bootstrap/{token}", bootstrapH.ServeTokenizedScript)
@@ -99,6 +109,8 @@ func NewRouter(
 			r.Use(AuthMiddleware(authSvc))
 
 			r.Post("/auth/logout", authH.Logout)
+
+			r.Get("/events", eventsH.List)
 
 			r.Route("/security", func(r chi.Router) {
 				r.Get("/stale-tokens", securityH.StaleTokenAttempts)
@@ -173,6 +185,12 @@ func NewRouter(
 				r.Get("/{id}/status", machineH.Status)
 				r.Get("/{id}/network-info", machineH.NetworkInfo)
 				r.Put("/{id}/ssh-key", machineH.ReassignSSHKey)
+				// Agent migration / health
+				r.Get("/agent/pending", agentH.PendingMigrations)
+				r.Post("/{id}/install-agent", agentH.InstallAgent)
+				r.Get("/{id}/health", agentH.MachineHealth)
+				r.Post("/{id}/health/check", agentH.RunCheck)
+				r.Get("/{id}/agent-status", agentH.AgentStatus)
 			})
 
 			r.Route("/tunnels", func(r chi.Router) {
@@ -183,6 +201,7 @@ func NewRouter(
 				r.Put("/{id}", tunnelH.Update)
 				r.Delete("/{id}", tunnelH.Delete)
 				r.Post("/{id}/test", tunnelH.Test)
+				r.Get("/{id}/health", tunnelH.Health)
 			})
 
 			r.Route("/logs", func(r chi.Router) {

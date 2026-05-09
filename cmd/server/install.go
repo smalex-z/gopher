@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,28 @@ const (
 	defaultInstallDir  = "/opt/gopher"
 	defaultDataDir     = "/var/lib/gopher"
 	defaultServiceName = "gopher"
+
+	// defaultJumpboxUser is a separate, deliberately privilege-free system
+	// user whose ~/.ssh/authorized_keys holds Gopher-managed keys. The
+	// dashboard's OS user (defaultInstallUser) used to hold those keys
+	// directly, which meant a leaked Gopher SSH key gave the holder shell
+	// access to the dashboard host with sudo iptables rights and read
+	// access to gopher.db (every per-machine SSH private key, every token).
+	//
+	// The jumpbox user has no shell, no sudo, no homedir contents the
+	// dashboard cares about. Its authorized_keys lines are written with
+	// `restrict,permitopen="127.0.0.1:*"` so even a fully-compromised key
+	// can only be used to forward to localhost ports on the VPS — exactly
+	// the rathole bind addresses operators legitimately reach via the
+	// jumpbox flow.
+	defaultJumpboxUser    = "gopher-jump"
+	defaultJumpboxHomeDir = "/var/lib/gopher-jump"
+
+	// defaultDashboardPort matches the --port flag's default in cmd/server/main.go.
+	// The install path opens this port in iptables so a freshly installed VPS
+	// is reachable for setup; once the operator picks a different port at
+	// runtime, ApplyDashboardPort handles the transition.
+	defaultDashboardPort = 4321
 )
 
 type installConfig struct {
@@ -63,11 +86,33 @@ func runInstall(args []string) error {
 	if err != nil {
 		return fmt.Errorf("pkill not found: %w", err)
 	}
+	// iptables is best-effort — we only use it to open the dashboard port at
+	// the very end. A box without iptables (e.g. nftables-only) just gets a
+	// warning instead of a hard failure, since the operator can still reach
+	// the dashboard via cloud-firewall rules or by switching modes later.
+	iptablesPath, _ := exec.LookPath("iptables")
 
 	fmt.Println("Installing Gopher service...")
 
 	if err := ensureSystemUser(cfg.user, cfg.installDir); err != nil {
 		return err
+	}
+
+	// Create the jumpbox user. Idempotent — pre-existing installs that
+	// re-run install pick this up automatically. The user is created with
+	// no shell so even if its authorized_keys lines somehow lacked the
+	// `restrict` option, the keys still couldn't open a shell.
+	if err := ensureSystemUser(defaultJumpboxUser, defaultJumpboxHomeDir); err != nil {
+		return fmt.Errorf("create jumpbox user: %w", err)
+	}
+	// Ensure ~gopher-jump/.ssh exists with correct perms so the runtime
+	// reconcile can write authorized_keys there without race-creating it.
+	jumpboxSSHDir := filepath.Join(defaultJumpboxHomeDir, ".ssh")
+	if err := os.MkdirAll(jumpboxSSHDir, 0700); err != nil {
+		return fmt.Errorf("create %s: %w", jumpboxSSHDir, err)
+	}
+	if err := chownRecursive(defaultJumpboxUser, jumpboxSSHDir); err != nil {
+		return fmt.Errorf("chown %s: %w", jumpboxSSHDir, err)
 	}
 
 	if err := os.MkdirAll(cfg.installDir, 0755); err != nil {
@@ -137,12 +182,85 @@ func runInstall(args []string) error {
 		return err
 	}
 
+	if iptablesPath != "" {
+		if err := ensureDashboardPortOpen(iptablesPath, defaultDashboardPort); err != nil {
+			fmt.Printf("Warning: could not open dashboard port %d in iptables: %v\n", defaultDashboardPort, err)
+			fmt.Printf("         Open it manually: sudo iptables -I INPUT -p tcp --dport %d -j ACCEPT\n", defaultDashboardPort)
+		}
+	} else {
+		fmt.Printf("Note: iptables not found; ensure your firewall allows tcp/%d to reach the dashboard.\n", defaultDashboardPort)
+	}
+
+	fmt.Println()
 	fmt.Println("Installation complete.")
-	fmt.Printf("Service: %s\n", cfg.serviceName)
-	fmt.Printf("Binary: %s\n", targetBinary)
-	fmt.Printf("Data: %s\n", cfg.dataDir)
-	fmt.Printf("Manage with: systemctl status %s\n", cfg.serviceName)
+	fmt.Printf("  Service: %s\n", cfg.serviceName)
+	fmt.Printf("  Binary:  %s\n", targetBinary)
+	fmt.Printf("  Data:    %s\n", cfg.dataDir)
+	fmt.Printf("  Manage:  systemctl status %s\n", cfg.serviceName)
+	fmt.Println()
+
+	ips := detectPublicIPs()
+	fmt.Println("Next step — finish setup in your browser:")
+	if len(ips) == 0 {
+		fmt.Printf("  http://<server-ip>:%d\n", defaultDashboardPort)
+	} else {
+		for _, ip := range ips {
+			fmt.Printf("  http://%s:%d\n", ip, defaultDashboardPort)
+		}
+	}
+	fmt.Println()
+	fmt.Println("If your VPS sits behind a cloud firewall (AWS SG, GCP, etc.),")
+	fmt.Printf("  also allow inbound tcp/%d there before opening the URL.\n", defaultDashboardPort)
 	return nil
+}
+
+// ensureDashboardPortOpen idempotently inserts an INPUT ACCEPT rule for the
+// dashboard port. iptables -C exits non-zero if the rule is missing, so we
+// only insert when -C reports absent.
+func ensureDashboardPortOpen(iptablesPath string, port int) error {
+	portStr := fmt.Sprintf("%d", port)
+	check := exec.Command(iptablesPath, "-C", "INPUT", "-p", "tcp", "--dport", portStr, "-j", "ACCEPT")
+	if err := check.Run(); err == nil {
+		return nil // rule already present
+	}
+	insert := exec.Command(iptablesPath, "-I", "INPUT", "-p", "tcp", "--dport", portStr, "-j", "ACCEPT")
+	if out, err := insert.CombinedOutput(); err != nil {
+		return fmt.Errorf("%w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// detectPublicIPs returns non-loopback IPv4 addresses from local interfaces.
+// This is a best-effort hint for the operator — on cloud VMs the public IP
+// is usually NAT'd outside the box, but the private one we surface is still
+// useful for confirming "yes the service is bound" before they SSH into it.
+func detectPublicIPs() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var ips []string
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipNet.IP.To4()
+			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+				continue
+			}
+			ips = append(ips, ip.String())
+		}
+	}
+	return ips
 }
 
 func ensureSystemUser(username, homeDir string) error {
@@ -176,22 +294,41 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return os.Chmod(dst, mode)
 	}
 
+	// Write to a sibling temp file then atomic-rename over dst. open(O_TRUNC)
+	// on a running ELF binary fails with ETXTBSY ("text file busy"), so we
+	// can't truncate-and-write the destination directly when the gopher
+	// service is currently executing /opt/gopher/gopher. rename(2) is a
+	// directory-entry swap; the running process keeps its old inode open
+	// until it exits, and the next systemctl restart picks up the new file.
+	// This is what makes `gopher install` safe to re-run as an upgrade
+	// path without first stopping the service.
 	s, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
 
-	t, err := os.Create(dst)
+	tmp := dst + ".new"
+	t, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
 		return err
 	}
-	defer t.Close()
-
 	if _, err := io.Copy(t, s); err != nil {
+		_ = t.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := t.Chmod(mode); err != nil {
+		_ = t.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := t.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	return nil
@@ -284,6 +421,12 @@ func buildSudoers(user, systemctlPath, teePath, mkdirPath, pkillPath string) str
 
 	// Fail2ban management.
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/fail2ban-client, /usr/local/bin/fail2ban-client", user))
+
+	// Required for EnsureJumpboxUser self-heal at startup. Without this,
+	// upgraded installs where the gopher-jump user wasn't created via
+	// `gopher install` would silently fall back to writing keys into the
+	// dashboard user's authorized_keys.
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/sbin/useradd, /usr/bin/useradd", user))
 
 	return strings.Join(lines, "\n") + "\n"
 }

@@ -34,6 +34,15 @@ jobs:
         run: npm run build
         working-directory: frontend
 
+      - name: Build gopher-agent (linux/amd64 + linux/arm64)
+        # Embedded into the server via //go:embed all:agents — without this
+        # step the CI artifact 404s on /static/agents/<arch> like the broken
+        # release builds did before this fix.
+        run: |
+          mkdir -p cmd/server/agents
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o cmd/server/agents/gopher-agent-linux-amd64 ./cmd/agent/
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o cmd/server/agents/gopher-agent-linux-arm64 ./cmd/agent/
+
       - name: Build Go binary
         run: go build -o gopher ./cmd/server/...
 

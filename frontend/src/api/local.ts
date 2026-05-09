@@ -17,8 +17,13 @@ export interface LocalServiceStatus {
   dashboard_private: boolean
   /** the port the Gopher HTTP server listens on */
   dashboard_port: number
-  /** OS username Gopher runs as (e.g. "ubuntu") — used to pre-fill VPS jump-host user */
+  /** OS username Gopher runs as (e.g. "gopher"). Used for ownership / fallback only. */
   os_user: string
+  /** Dedicated, privilege-free user whose authorized_keys holds Gopher-managed
+   *  keys. This is the username SSH jumpbox commands should target. Empty
+   *  string means the user hasn't been created yet (legacy install needs
+   *  `gopher install` re-run); commands fall back to os_user with a warning. */
+  jumpbox_user: string
   /** true once fail2ban has been installed and configured by Gopher */
   fail2ban_setup_done: boolean
   /** IP address Gopher binds public listeners to. Empty string = 0.0.0.0 (all interfaces). */
@@ -102,10 +107,20 @@ export const localApi = {
     client.get<{ data: ActivityEvent[] }>('/local/activity').then(r => r.data.data),
 }
 
+export type EventSeverity = 'info' | 'warn' | 'error' | 'critical'
+export type EventSource = 'auth' | 'machine' | 'tunnel' | 'health' | 'firewall' | 'system'
+
 export interface ActivityEvent {
   id: string
-  kind: 'machine_registered' | 'machine_deleted' | 'tunnel_created' | 'tunnel_deleted'
-  resource_id: string
-  name: string
   created_at: string
+  severity: EventSeverity
+  source: EventSource
+  kind: string
+  actor?: string
+  resource_type?: string
+  resource_id?: string
+  resource_name?: string
+  ip?: string
+  message: string
+  metadata?: string
 }

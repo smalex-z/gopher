@@ -22,8 +22,14 @@ func NewTunnelService(local localOps) *TunnelService {
 }
 
 const (
-	machineSSHTunnelPrefix = "machine-"
-	machineSSHTunnelSuffix = "-ssh"
+	machineSSHTunnelPrefix   = "machine-"
+	machineSSHTunnelSuffix   = "-ssh"
+	machineAgentTunnelSuffix = "-agent"
+
+	// Agent is considered "active" if its last successful health poll
+	// landed within this window. Health service polls every 60s, so 2
+	// minutes is two missed polls' worth of grace.
+	agentActiveWindow = 2 * time.Minute
 )
 
 func machineSSHTunnelID(machineID string) string {
@@ -39,6 +45,24 @@ func parseMachineSSHTunnelID(id string) (string, bool) {
 		return "", false
 	}
 	return machineID, true
+}
+
+func machineAgentTunnelID(machineID string) string {
+	return machineSSHTunnelPrefix + machineID + machineAgentTunnelSuffix
+}
+
+// agentTunnelStatus derives a tunnel-list status from machine.AgentInstalled
+// + AgentLastSeen freshness. "active" once we've had a successful poll
+// recently, "offline" if we have a record but it's stale, "pending" before
+// the first poll lands.
+func agentTunnelStatus(m *db.Machine) string {
+	if m.AgentLastSeen != nil && time.Since(*m.AgentLastSeen) <= agentActiveWindow {
+		return "active"
+	}
+	if m.AgentInstalled {
+		return "offline"
+	}
+	return "pending"
 }
 
 func machineTunnelStatus(status string) string {
@@ -76,6 +100,29 @@ func (s *TunnelService) List() ([]db.Tunnel, error) {
 			CreatedAt:   machine.CreatedAt,
 			UpdatedAt:   machine.UpdatedAt,
 		})
+
+		// gopher-agent back-channel — only when the machine has agent
+		// fields allocated (always for new bootstraps; populated on
+		// migration for older ones via AgentInstaller). Always private
+		// (127.0.0.1 on both ends), kind="machine-agent" so the UI can
+		// group/style it as management plumbing rather than a user tunnel.
+		if machine.AgentRemotePort > 0 && machine.AgentLocalPort > 0 {
+			tunnels = append(tunnels, db.Tunnel{
+				ID:          machineAgentTunnelID(machine.ID),
+				MachineID:   machine.ID,
+				Name:        machine.Name + " Agent",
+				Subdomain:   "",
+				LocalPort:   machine.AgentLocalPort,
+				RatholePort: machine.AgentRemotePort,
+				Protocol:    "tcp",
+				Private:     true,
+				Status:      agentTunnelStatus(&machine),
+				Managed:     true,
+				Kind:        "machine-agent",
+				CreatedAt:   machine.CreatedAt,
+				UpdatedAt:   machine.UpdatedAt,
+			})
+		}
 	}
 	return tunnels, nil
 }

@@ -1,8 +1,9 @@
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { LayoutDashboard, Server, Monitor, Network, LogOut, Map, RefreshCw, Key, Shield, ShieldCheck, ChevronDown } from 'lucide-react'
+import { LayoutDashboard, Server, Monitor, Network, LogOut, Map, RefreshCw, Key, Shield, ShieldCheck, ChevronDown, Activity } from 'lucide-react'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import ToastContainer from './components/ToastContainer'
+import AgentMigrationBanner from './components/AgentMigrationBanner'
 import DashboardPage from './pages/DashboardPage'
 import VPSPage from './pages/VPSPage' // repurposed as Server Info page
 import MachinesPage from './pages/MachinesPage'
@@ -12,6 +13,7 @@ import SSHKeysPage from './pages/SSHKeysPage'
 import FirewallPage from './pages/FirewallPage'
 import SecurityPage from './pages/SecurityPage'
 import DocsPage from './pages/DocsPage'
+import LogsPage from './pages/LogsPage'
 import SetupPage from './pages/SetupPage'
 import LoginPage from './pages/LoginPage'
 import { AuthProvider, useAuth } from './lib/auth'
@@ -70,7 +72,7 @@ function NavDropdown({ label, icon: Icon, items }: {
 }
 
 function AppShell() {
-  const { isLoading, isSetup, isAuthenticated, localSetupDone, firewallConfigured, fail2banSetupDone, refetch } = useAuth()
+  const { isLoading, isSetup, isAuthenticated, localSetupDone, firewallConfigured, sshKeyConfigured, fail2banSetupDone, refetch } = useAuth()
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [isUpdating, setIsUpdating] = useState(false)
 
@@ -112,6 +114,7 @@ function AppShell() {
   if (!isAuthenticated) return <LoginPage />
   if (!localSetupDone) return <SetupPage initialStep={2} />
   if (!firewallConfigured) return <SetupPage initialStep={3} />
+  if (!sshKeyConfigured) return <SetupPage initialStep={4} />
   if (!fail2banSetupDone) return <SetupPage initialStep={5} />
 
   const handleLogout = async () => {
@@ -144,6 +147,7 @@ function AppShell() {
                   items={[
                     { to: '/firewall', icon: Shield, label: 'Firewall' },
                     { to: '/security', icon: ShieldCheck, label: 'Access Control' },
+                    { to: '/logs', icon: Activity, label: 'Logs' },
                   ]}
                 />
                 <NavLink to="/network" className={navClass}><Map size={16} /> Network Map</NavLink>
@@ -173,6 +177,7 @@ function AppShell() {
         </div>
       </nav>
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <AgentMigrationBanner />
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/vps" element={<VPSPage />} />
@@ -183,6 +188,7 @@ function AppShell() {
           <Route path="/firewall" element={<FirewallPage />} />
           <Route path="/security" element={<SecurityPage />} />
           <Route path="/docs" element={<DocsPage />} />
+          <Route path="/logs" element={<LogsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

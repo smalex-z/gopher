@@ -300,14 +300,16 @@ func installFail2ban(logWriter io.Writer) error {
 	}
 
 	sudo := privilegedCmdPrefix()
-	enableCmd := append(sudo, "systemctl", "enable", "--now", "fail2ban")
+	enableCmd := append(sudo, "systemctl", "enable", "fail2ban")
 	if err := runLocalCmd(logWriter, enableCmd[0], enableCmd[1:]...); err != nil {
 		return err
 	}
-	reloadCmd := append(sudo, "fail2ban-client", "reload")
-	if err := runLocalCmd(logWriter, reloadCmd[0], reloadCmd[1:]...); err != nil {
-		// Reload failure is non-fatal — service may need a moment to start.
-		fmt.Fprintf(logWriter, "  WARN: fail2ban reload failed (may start correctly on its own): %v\n", err)
+	// reload-or-restart: starts the daemon fresh if not running (loads our config from
+	// disk on startup), or reloads it if already running. Avoids the race where
+	// `fail2ban-client reload` runs before the freshly-started daemon's socket is up.
+	restartCmd := append(sudo, "systemctl", "reload-or-restart", "fail2ban")
+	if err := runLocalCmd(logWriter, restartCmd[0], restartCmd[1:]...); err != nil {
+		return err
 	}
 	fmt.Fprintln(logWriter, "  fail2ban configured ✓")
 	return nil

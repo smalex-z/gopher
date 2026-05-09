@@ -6,6 +6,7 @@ import { tunnelsApi } from '../api/tunnels'
 import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
 import StatusBadge from '../components/StatusBadge'
+import TunnelHealthCell from '../components/TunnelHealthCell'
 import { toast } from '../lib/toast'
 import type { Tunnel } from '../types'
 
@@ -81,8 +82,11 @@ export default function TunnelsPage() {
     setModal({ isOpen: true, editTunnel: t })
   }
 
-  const { data: tunnelsData, isLoading } = useQuery({ queryKey: ['tunnels'], queryFn: () => tunnelsApi.list() })
-  const { data: machinesData } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list() })
+  // 15s refresh: tunnel.Status updates from monitor.go's 30s TCP probes
+  // and machine.Status from the health service (60s) reach the UI inside
+  // a single backend cycle without hammering it.
+  const { data: tunnelsData, isLoading } = useQuery({ queryKey: ['tunnels'], queryFn: () => tunnelsApi.list(), refetchInterval: 15000 })
+  const { data: machinesData } = useQuery({ queryKey: ['machines'], queryFn: () => machinesApi.list(), refetchInterval: 15000 })
   const { data: localStatus } = useQuery({ queryKey: ['local-status'], queryFn: () => localApi.status() })
 
   // Stable references so the grouping memo doesn't re-run on every render
@@ -111,12 +115,29 @@ export default function TunnelsPage() {
     ? (domainIP && routerIP && domainIP === routerIP ? domain : `router.${domain}`)
     : undefined
 
+  // Deep-link entry from MachinesPage ("/tunnels?machine=..."). Mirrors
+  // openAddModal's nextPort() prefetch so the rathole-port input lands
+  // pre-populated instead of empty (without this the operator has to
+  // type-and-cycle to find the first available port).
   useEffect(() => {
     const machineId = searchParams.get('machine')
-    if (machineId) {
-      setForm(f => ({ ...f, machine_id: machineId }))
-      setModal({ isOpen: true })
-    }
+    if (!machineId) return
+    let cancelled = false
+    setNextPortLoading(true)
+    tunnelsApi.nextPort()
+      .then(port => {
+        if (cancelled) return
+        setForm({ ...defaultForm, rathole_port: port, machine_id: machineId })
+      })
+      .catch(() => {
+        if (cancelled) return
+        setForm({ ...defaultForm, machine_id: machineId })
+      })
+      .finally(() => {
+        if (!cancelled) setNextPortLoading(false)
+      })
+    setModal({ isOpen: true })
+    return () => { cancelled = true }
   }, [searchParams])
 
   const createMutation = useMutation({
@@ -148,13 +169,18 @@ export default function TunnelsPage() {
     updateMutation.mutate({ id: t.id, data: { name: t.name, local_port: t.local_port, subdomain: t.subdomain, private: !t.private } })
   }
 
-  // VPS config for jumpbox commands
+  // VPS config for jumpbox commands. The localStatus query above carries
+  // jumpbox_user — the dedicated, restricted system user we want operators
+  // to SSH into, not the dashboard's service user. Falls back to
+  // vps.username on legacy installs that haven't created the jumpbox user
+  // yet (re-running `gopher install` creates it and migrates the keys).
   const { data: vpsData } = useQuery({ queryKey: ['vps'], queryFn: () => import('../api/vps').then(m => m.vpsApi.get()) })
   const vps = vpsData?.data
 
   const jumpboxCmd = (t: Tunnel) => {
     if (!vps) return ''
-    const vpsAddr = `${vps.username}@${vps.host}`
+    const sshUser = localStatus?.jumpbox_user || vps.username
+    const vpsAddr = `${sshUser}@${vps.host}`
     return `ssh -L ${t.local_port}:localhost:${t.rathole_port} ${vpsAddr} -N`
   }
 
@@ -209,10 +235,18 @@ export default function TunnelsPage() {
     }
 
     const out = Array.from(byMachine.entries()).map(([machineId, items]) => {
+      // Management tunnels (SSH back-channel + agent control plane) pin to
+      // the top of each machine's group, with SSH before agent for stable
+      // ordering. User tunnels follow alphabetically by name.
+      const mgmtOrder = (kind?: string) => {
+        if (kind === 'machine-ssh') return 0
+        if (kind === 'machine-agent') return 1
+        return 2
+      }
       items.sort((a, b) => {
-        const aSSH = a.kind === 'machine-ssh' ? 0 : 1
-        const bSSH = b.kind === 'machine-ssh' ? 0 : 1
-        if (aSSH !== bSSH) return aSSH - bSSH
+        const aRank = mgmtOrder(a.kind)
+        const bRank = mgmtOrder(b.kind)
+        if (aRank !== bRank) return aRank - bRank
         return a.name.localeCompare(b.name)
       })
       return {
@@ -279,7 +313,7 @@ export default function TunnelsPage() {
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 border-b">
                   <tr>
-                    {['Name', 'Machine', 'Routing', 'Status', 'Actions'].map(h => (
+                    {['Name', 'Machine', 'Routing', 'Status', 'Uptime', 'Actions'].map(h => (
                       <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
                     ))}
                   </tr>
@@ -287,7 +321,7 @@ export default function TunnelsPage() {
                 {groups.map(g => (
                   <tbody key={g.machineId} className="divide-y border-t first:border-t-0">
                     <tr className="bg-gray-50/70">
-                      <td colSpan={5} className="px-4 py-2">
+                      <td colSpan={6} className="px-4 py-2">
                         <div className="flex items-center justify-between gap-3">
                           <div className="flex items-center gap-2 min-w-0">
                             <span className="font-semibold text-gray-700 truncate">{g.machineName}</span>
@@ -364,6 +398,9 @@ export default function TunnelsPage() {
                               </div>
                             </td>
                             <td className="px-4 py-3">
+                              <TunnelHealthCell tunnelId={t.id} />
+                            </td>
+                            <td className="px-4 py-3">
                               <div className="flex items-center gap-1">
                                 <button
                                   onClick={() => togglePrivate(t)}
@@ -387,7 +424,7 @@ export default function TunnelsPage() {
                           </tr>
                           {t.private && jumpboxCmd(t) && (
                             <tr className="bg-slate-50 border-t-0">
-                              <td colSpan={5} className="px-4 pb-2 pt-0">
+                              <td colSpan={6} className="px-4 pb-2 pt-0">
                                 <div className="flex items-center gap-2 text-xs text-slate-600">
                                   <Terminal size={11} className="shrink-0" />
                                   <span className="font-medium">Jumpbox:</span>

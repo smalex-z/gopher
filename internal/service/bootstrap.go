@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -51,7 +52,17 @@ type BootstrapResponse struct {
 	VPSPublicKey  string `json:"vps_ssh_public_key"`
 	RatholeConfig string `json:"rathole_client_config"`
 	VPSHost       string `json:"vps_host"`
+	// gopher-agent install hints (the bootstrap script reads these to set up
+	// the agent alongside rathole-client). All-or-nothing: if any are zero/empty
+	// the script skips the agent install step.
+	AgentToken      string `json:"agent_token,omitempty"`
+	AgentLocalPort  int    `json:"agent_local_port,omitempty"`
+	AgentRemotePort int    `json:"agent_remote_port,omitempty"`
 }
+
+// agentLocalPortDefault is the port the agent binds on each client. Fixed for
+// simplicity — clients only ever run one agent.
+const agentLocalPortDefault = 4322
 
 // Register validates token, provisions a machine, adds the SSH back-tunnel
 // to /etc/rathole/server.toml, and returns the rathole client config.
@@ -105,7 +116,7 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		}
 		tunnelPort = bt.TunnelPort
 	} else {
-		tunnelPort, err = db.NextSSHTunnelPort()
+		tunnelPort, err = db.NextRatholePort()
 		if err != nil {
 			return nil, fmt.Errorf("failed to allocate tunnel port: %w", err)
 		}
@@ -113,17 +124,38 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 
 	ratholeToken := shortToken()
 
+	// Allocate the agent back-channel up front. Pass tunnelPort to exclude
+	// it from consideration: the SSH tunnel port we just picked isn't in
+	// the DB yet (we haven't created the Machine row), so without the
+	// exclude both calls would return the same port and rathole-server
+	// would try to bind two services to the same address.
+	//
+	// Even if the bootstrap script fails to install the agent (older script,
+	// network glitch), we keep the fields populated so the existing-machine
+	// migration tool can complete it.
+	agentRemotePort, err := db.NextRatholePort(tunnelPort)
+	if err != nil {
+		return nil, fmt.Errorf("failed to allocate agent port: %w", err)
+	}
+	agentToken := shortToken()         // bearer token for HTTP auth
+	agentRatholeToken := shortToken()  // rathole-tunnel auth (separate)
+
 	machine := &db.Machine{
-		ID:              shortToken(),
-		Name:            req.Name,
-		Username:        req.Username,
-		TunnelPort:      tunnelPort,
-		RatholeSSHToken: ratholeToken,
-		SSHKeyID:        sshKey.ID,
-		PublicSSH:       bt.PublicSSH,
-		Status:          "pending",
-		CreatedAt:       time.Now(),
-		UpdatedAt:       time.Now(),
+		ID:                shortToken(),
+		Name:              req.Name,
+		Username:          req.Username,
+		TunnelPort:        tunnelPort,
+		RatholeSSHToken:   ratholeToken,
+		SSHKeyID:          sshKey.ID,
+		PublicSSH:         bt.PublicSSH,
+		Status:            "pending",
+		AgentToken:        agentToken,
+		AgentLocalPort:    agentLocalPortDefault,
+		AgentRemotePort:   agentRemotePort,
+		AgentRatholeToken: agentRatholeToken,
+		AgentInstalled:    false,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
 	}
 	if err := db.CreateMachine(machine); err != nil {
 		return nil, fmt.Errorf("failed to create machine: %w", err)
@@ -151,6 +183,11 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 
 	// Async: wait for tunnel then verify SSH connectivity.
 	go s.awaitSSHHealth(machine, sshKey.PrivateKey)
+	// Async: poll the agent's back-channel until it answers, so the bootstrap
+	// modal can flip "machine registered" → "agent ready" within seconds of
+	// the agent service starting on the client (vs. waiting up to a minute
+	// for the next health-poll cycle).
+	go s.awaitAgentReady(machine)
 
 	// If this bootstrap was triggered by the external API, record the machine ID.
 	if em, err := db.GetExternalMachineByTokenID(bt.ID); err == nil {
@@ -161,11 +198,14 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 	}
 
 	return &BootstrapResponse{
-		TunnelPort:    tunnelPort,
-		RatholeToken:  ratholeToken,
-		VPSPublicKey:  sshKey.PublicKey,
-		RatholeConfig: ratholeConfig,
-		VPSHost:       ratholeHost,
+		TunnelPort:      tunnelPort,
+		RatholeToken:    ratholeToken,
+		VPSPublicKey:    sshKey.PublicKey,
+		RatholeConfig:   ratholeConfig,
+		VPSHost:         ratholeHost,
+		AgentToken:      agentToken,
+		AgentLocalPort:  agentLocalPortDefault,
+		AgentRemotePort: agentRemotePort,
 	}, nil
 }
 
@@ -174,6 +214,15 @@ const bootstrapSSHHealthTimeout = 4 * time.Minute
 // awaitSSHHealth polls localhost:tunnelPort for initial bootstrap SSH readiness.
 // Some machines take longer than a minute on first bootstraps (package installs,
 // systemd startup), so timeout keeps status as "pending" instead of hard-failing.
+//
+// Uses SetMachineStatus (column-level UPDATE) rather than UpdateMachine
+// (DB.Save full-row replace) to avoid clobbering AgentInstalled. This
+// goroutine runs concurrently with awaitAgentReady — both hold the same
+// in-memory *db.Machine struct that Register handed them, with its stale
+// AgentInstalled=false. Saving that struct after awaitAgentReady has already
+// flipped agent_installed=true in the DB would race-revert the flag, making
+// the dashboard's agent badge oscillate "Install Agent" → "v0.x" → "Install
+// Agent" until the next health-poll cycle re-promoted it.
 func (s *BootstrapService) awaitSSHHealth(machine *db.Machine, privateKey string) {
 	deadline := time.Now().Add(bootstrapSSHHealthTimeout)
 	for time.Now().Before(deadline) {
@@ -183,16 +232,58 @@ func (s *BootstrapService) awaitSSHHealth(machine *db.Machine, privateKey string
 			continue
 		}
 		c.Close()
-		machine.Status = "connected"
 		now := time.Now()
-		machine.LastSeen = &now
-		_ = db.UpdateMachine(machine)
+		_ = db.SetMachineStatus(machine.ID, "connected", &now)
 		return
 	}
 	// Keep machine in pending state; monitor loop can flip to connected once it
 	// observes successful SSH after slower bootstrap completions.
-	machine.Status = "pending"
-	_ = db.UpdateMachine(machine)
+	_ = db.SetMachineStatus(machine.ID, "pending", nil)
+}
+
+const (
+	bootstrapAgentReadyTimeout = 5 * time.Minute
+	bootstrapAgentReadyPoll    = 3 * time.Second
+)
+
+// awaitAgentReady polls the agent's /status endpoint via the rathole back-channel
+// until it answers, then marks Machine.AgentInstalled=true. The first poll fires
+// 3s after the call so the bootstrap script has a head start.
+//
+// Without this, agent_installed stays false until the next 60s HealthService
+// cycle catches it, which makes the bootstrap UX feel like the agent is
+// hanging when it's actually already up.
+//
+// The probe re-fetches the machine each iteration: the bootstrap script writes
+// a fresh AgentToken via /api/bootstrap before the agent comes online, but the
+// in-memory copy here is from before the script ran — re-reading keeps us in
+// sync if anything else (the migration tool, manual edits) updates the row.
+func (s *BootstrapService) awaitAgentReady(machine *db.Machine) {
+	if machine.AgentRemotePort == 0 || machine.AgentToken == "" {
+		return // older bootstrap path with no agent fields — nothing to wait for
+	}
+	deadline := time.Now().Add(bootstrapAgentReadyTimeout)
+	time.Sleep(bootstrapAgentReadyPoll)
+	for time.Now().Before(deadline) {
+		current, err := db.GetMachine(machine.ID)
+		if err != nil {
+			return // machine deleted (or DB unreachable) — stop polling
+		}
+		if current.AgentInstalled {
+			return // health service or another path already flipped it
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		client := NewAgentClient(current)
+		status, err := client.Status(ctx)
+		cancel()
+		if err == nil {
+			now := time.Now()
+			_ = db.SetMachineAgentSeen(current.ID, status.AgentVersion, now)
+			db.LogEvent("agent_ready", current.ID, current.Name)
+			return
+		}
+		time.Sleep(bootstrapAgentReadyPoll)
+	}
 }
 
 

@@ -22,9 +22,16 @@ var frontendDist embed.FS
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "install":
+		case "install", "upgrade":
+			// `upgrade` is a clarity alias for `install`. install is fully
+			// idempotent (users / sudoers / systemd unit / data dir are all
+			// no-ops on a re-run) and the binary swap is atomic-rename, so
+			// running it on top of a live install hot-swaps the binary +
+			// restarts the service without touching gopher.db. That's the
+			// supported path for "I downloaded a new release, apply it
+			// without redoing the setup wizard."
 			if err := runInstall(os.Args[2:]); err != nil {
-				log.Fatalf("Install failed: %v", err)
+				log.Fatalf("%s failed: %v", os.Args[1], err)
 			}
 			return
 		case "uninstall":
@@ -66,11 +73,20 @@ func runServer(args []string) {
 	updateSvc := service.NewUpdateService()
 	secSvc := service.NewSecurityService()
 	backupSvc := service.NewBackupService(*dbPath)
+	agentInstaller := service.NewAgentInstaller(localSvc)
+	healthSvc := service.NewHealthService(true)
+	healthSvc.Start()
 	go secSvc.SyncFail2banConfig()
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
 	localSvc.ReconcileMainCaddyfile()
 	localSvc.ReconcileRouterCaddyBlock()
+	// Self-heal upgraded installs: when a binary is swapped without re-running
+	// `gopher install` / scripts/reinstall.sh, the gopher-jump system user may
+	// not exist yet on legacy boxes — without it ReconcileAuthorizedKeys falls
+	// back to the dashboard user (the OLD insecure layout). EnsureJumpboxUser
+	// creates it via sudo useradd; the next reconcile picks it up.
+	localSvc.EnsureJumpboxUser()
 	localSvc.ReconcileAuthorizedKeys()
 
 	// Bot-protection middleware — runs inside the existing server, no extra port.
@@ -90,10 +106,14 @@ func runServer(args []string) {
 		}
 	}()
 
-	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc, backupSvc)
+	router := api.NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc, backupSvc, agentInstaller, healthSvc)
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", router)
+	// /static/agents/* serves the gopher-agent binaries; everything else under
+	// /static/ goes through the chi router (bootstrap.sh, etc.). ServeMux uses
+	// longest-prefix match, so the agents handler wins for that subtree.
+	mux.Handle("/static/agents/", http.StripPrefix("/static/agents/", agentsHandler()))
 	mux.Handle("/static/", router)
 	mux.Handle("/bootstrap/", router)
 

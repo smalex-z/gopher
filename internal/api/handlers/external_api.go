@@ -222,7 +222,10 @@ func (h *ExternalAPIHandler) DeleteMachine(w http.ResponseWriter, r *http.Reques
 	}
 
 	if em.MachineID != nil {
-		if delErr := h.machineSvc.Delete(*em.MachineID); delErr != nil {
+		// Discard the per-call DeleteResult — external API callers don't get
+		// to see the client-cleanup-warnings field; the dashboard surfaces
+		// that, the external delete just needs success/failure.
+		if _, delErr := h.machineSvc.Delete(*em.MachineID); delErr != nil {
 			if _, ok := delErr.(*apperrors.NotFoundError); !ok {
 				response.InternalError(w, fmt.Sprintf("failed to delete machine: %v", delErr))
 				return

@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+// randomID returns a 16-character hex string (8 bytes of entropy). Used as the
+// primary key for rows where we don't have a natural ID handy (e.g. HealthCheck).
 func randomID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
@@ -49,9 +51,33 @@ type Machine struct {
 	Status          string     `json:"status"`
 	PublicIP        string     `json:"public_ip"`
 	LastSeen        *time.Time `json:"last_seen"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	Tunnels         []Tunnel   `json:"tunnels,omitempty" gorm:"foreignKey:MachineID"`
+	// gopher-agent fields. AgentInstalled flips true once the machine has the
+	// agent binary running and reachable; AgentLastSeen tracks the last
+	// successful health poll; AgentInstallError stores the last failure reason
+	// for the migration retry UI.
+	AgentToken        string     `json:"-"`                             // bearer token shared with the agent
+	AgentLocalPort    int        `json:"agent_local_port"`              // port the agent listens on (client side, default 4322)
+	AgentRemotePort   int        `json:"agent_remote_port"`             // bind_addr port on the VPS for the agent rathole service
+	AgentRatholeToken string     `json:"-"`                             // rathole token for the agent service
+	AgentInstalled    bool       `json:"agent_installed"`               // true once install succeeded at least once
+	AgentVersion      string     `json:"agent_version,omitempty"`       // version string returned by the agent's /version endpoint
+	AgentLastSeen     *time.Time `json:"agent_last_seen,omitempty"`     // last successful agent poll
+	AgentInstallError string     `json:"agent_install_error,omitempty"` // last install failure (cleared on success)
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	Tunnels           []Tunnel   `json:"tunnels,omitempty" gorm:"foreignKey:MachineID"`
+}
+
+// HealthCheck records the result of a single agent or tunnel probe. Used by
+// the dashboard to surface recent failures and uptime.
+type HealthCheck struct {
+	ID        string    `json:"id" gorm:"primaryKey"`
+	Subject   string    `json:"subject" gorm:"index"` // "machine:<id>" or "tunnel:<id>"
+	CheckedAt time.Time `json:"checked_at" gorm:"index"`
+	OK        bool      `json:"ok"`
+	LatencyMS int       `json:"latency_ms"`
+	ErrorMsg  string    `json:"error_msg,omitempty"`
+	Recovered bool      `json:"recovered,omitempty"` // true when this check followed a successful auto-recovery
 }
 
 type Tunnel struct {
@@ -90,6 +116,20 @@ type BootstrapToken struct {
 	SSHKeyID   string     `json:"ssh_key_id"`
 	PublicSSH  bool       `json:"public_ssh"`
 	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// MigrationToken is the short ephemeral token used by the agent-install
+// dashboard flow. The dashboard creates one when the operator clicks "Install
+// Agent", embeds it in the curl-bash one-liner, and the operator pastes that
+// command on the target machine. The /migrate/{token} endpoint resolves the
+// token to a machine and renders migrate.sh with the per-machine secrets
+// (agent token, port, rathole token) baked in — so secrets stay out of shell
+// history and access logs.
+type MigrationToken struct {
+	Token     string    `gorm:"primaryKey"`
+	MachineID string    `gorm:"index"`
+	ExpiresAt time.Time
+	CreatedAt time.Time
 }
 
 type AppSettings struct {
@@ -177,23 +217,14 @@ type SSHKey struct {
 // the bootstrap script, MachineID is set and the underlying Machine record's
 // Status field reflects connectivity.
 type ExternalMachine struct {
-	ID        string     `json:"id" gorm:"primaryKey"`
-	TokenID   string     `json:"token_id"`  // BootstrapToken.ID
-	MachineID *string    `json:"machine_id"` // set once the VM registers
-	PublicSSH bool       `json:"public_ssh"`
-	SSHKeyID  string     `json:"ssh_key_id"`
-	ErrorMsg  string     `json:"error,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-}
-
-// ActivityEvent records create/delete actions on machines and tunnels.
-type ActivityEvent struct {
-	ID         string    `json:"id" gorm:"primaryKey"`
-	Kind       string    `json:"kind"`        // machine_registered | machine_deleted | tunnel_created | tunnel_deleted
-	ResourceID string    `json:"resource_id"`
-	Name       string    `json:"name"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID        string    `json:"id" gorm:"primaryKey"`
+	TokenID   string    `json:"token_id"`   // BootstrapToken.ID
+	MachineID *string   `json:"machine_id"` // set once the VM registers
+	PublicSSH bool      `json:"public_ssh"`
+	SSHKeyID  string    `json:"ssh_key_id"`
+	ErrorMsg  string    `json:"error,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // ExternalTunnel tracks service tunnels created via the external REST API.
@@ -206,9 +237,74 @@ type ExternalTunnel struct {
 	Subdomain  string    `json:"subdomain"`
 	TargetIP   string    `json:"target_ip"`
 	TargetPort int       `json:"target_port"`
-	Status     string    `json:"status"`     // active | failed
+	Status     string    `json:"status"` // active | failed
 	TunnelURL  string    `json:"tunnel_url"`
 	ErrorMsg   string    `json:"error,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
+
+// Event is the unified record for everything worth surfacing on the dashboard
+// or feeding to the (forthcoming) notifications subsystem: lifecycle changes,
+// auth events, health-check transitions, firewall changes, etc.
+//
+// The dashboard "recent activity" widget and the security audit log both read
+// from this single table — filtered by Source / Severity / time range.
+//
+// Replaces the older single-purpose ActivityEvent struct (kept as an alias
+// below for any external import that hasn't been updated yet).
+type Event struct {
+	ID        string    `json:"id" gorm:"primaryKey"`
+	CreatedAt time.Time `json:"created_at" gorm:"index"`
+
+	// Severity drives notification routing. info = log only; warn / error /
+	// critical are candidates for alerts once the dispatcher exists.
+	Severity string `json:"severity" gorm:"index"` // info | warn | error | critical
+
+	// Source is the subsystem that produced the event. Indexed so the security
+	// page can cheaply scope to source=auth without scanning the whole table.
+	Source string `json:"source" gorm:"index"` // auth | machine | tunnel | health | firewall | system
+
+	// Kind is a free-form dotted/underscored identifier (machine.connected,
+	// auth.login.failed). Stable strings — used as the join key for kind→severity
+	// defaults and eventually for notification filters.
+	Kind string `json:"kind" gorm:"index"`
+
+	// Actor: the user, service, or component that triggered the event.
+	// "system" for background services, "agent" for events derived from agent
+	// reports, an email address for operator-initiated actions.
+	Actor string `json:"actor,omitempty"`
+
+	// Resource fields are optional — present when the event targets a specific
+	// machine, tunnel, ssh key, etc. ResourceName is denormalized so the UI
+	// can render a deleted resource's name without a stale join.
+	ResourceType string `json:"resource_type,omitempty"`
+	ResourceID   string `json:"resource_id,omitempty"`
+	ResourceName string `json:"resource_name,omitempty"`
+
+	// IP is set for events with a remote origin (auth attempts, API calls).
+	IP string `json:"ip,omitempty"`
+
+	// Message is human-readable, rendered as-is in the UI. Producers should
+	// fill this in even when Kind is descriptive — UIs aren't required to know
+	// every Kind value.
+	Message string `json:"message"`
+
+	// Metadata is an opaque JSON blob for producer-specific extra context
+	// (latency_ms, error details, recovery attempt count). Inspect-only —
+	// don't query into this from the UI; promote a field if it matters.
+	Metadata string `json:"metadata,omitempty"`
+}
+
+// TableName pins the table to "events". GORM's pluralizer would otherwise
+// derive "events" from "Event" anyway, but pinning it makes the migration's
+// rename target explicit.
+func (Event) TableName() string { return "events" }
+
+// ActivityEvent is a back-compat alias for the old simpler activity-feed
+// struct. New code should use Event directly. The alias keeps existing
+// AutoMigrate / repository call sites compiling during the unified-events
+// rollout.
+//
+// Deprecated: use Event.
+type ActivityEvent = Event
