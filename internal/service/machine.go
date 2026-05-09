@@ -115,7 +115,11 @@ func (s *MachineService) delete(id string, fromClient bool) (*DeleteResult, erro
 	//
 	// Self-delete: the client is the caller, gopher-uninstall is already
 	// running there. Skip the remote step to avoid the duplicate trigger.
-	if s.local != nil && !fromClient {
+	// Non-bootstrapped machines (created directly via /api/machines/ or the
+	// external API with no tunnel) have no client-side install to clean —
+	// skip the remote teardown entirely instead of reporting it as a
+	// failure. ClientCleanupOK stays true and the handler returns 204.
+	if s.local != nil && !fromClient && machine.TunnelPort > 0 {
 		if machine.AgentInstalled && machine.AgentRemotePort > 0 {
 			result.ClientCleanupPath = "agent"
 		} else {
