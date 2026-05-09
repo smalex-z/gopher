@@ -19,49 +19,17 @@ func TestBuildServiceUnit(t *testing.T) {
 	}
 }
 
+// buildSudoers now grants full passwordless sudo (NOPASSWD: ALL) to match
+// the client-side bootstrap model. Anchor the test to that exact line — it's
+// the entire content surface, so a regression to a partial allowlist would
+// fail loudly here.
 func TestBuildSudoers(t *testing.T) {
-	content := buildSudoers("gopher", "/bin/systemctl", "/usr/bin/tee", "/bin/mkdir", "/usr/bin/pkill")
-
-	required := []string{
-		"gopher ALL=(ALL:ALL) NOPASSWD: /bin/systemctl",
-		"gopher ALL=(ALL:ALL) NOPASSWD: /usr/bin/tee",
-		"gopher ALL=(ALL:ALL) NOPASSWD: /bin/mkdir",
-		"gopher ALL=(ALL:ALL) NOPASSWD: /usr/bin/pkill",
-		"gopher ALL=(ALL:ALL) NOPASSWD: /bin/mv, /usr/bin/mv",
-		"gopher ALL=(ALL:ALL) NOPASSWD: /bin/rm, /usr/bin/rm",
-		"gopher ALL=(ALL:ALL) NOPASSWD: /usr/bin/chown, /bin/chown",
-		"gopher ALL=(ALL:ALL) NOPASSWD: /usr/bin/fail2ban-client, /usr/local/bin/fail2ban-client",
+	content := buildSudoers("gopher")
+	want := "gopher ALL=(ALL) NOPASSWD: ALL"
+	if !strings.Contains(content, want) {
+		t.Fatalf("sudoers missing %q\nfull content:\n%s", want, content)
 	}
-
-	for _, line := range required {
-		if !strings.Contains(content, line) {
-			t.Fatalf("sudoers missing line: %s\nfull content:\n%s", line, content)
-		}
-	}
-
 	if !strings.HasSuffix(content, "\n") {
 		t.Fatalf("sudoers should end with newline")
-	}
-}
-
-func TestBuildSudoersEmpty(t *testing.T) {
-	content := buildSudoers("gopher", "", "", "", "")
-	// Should still have file operation commands even without paths
-	if !strings.Contains(content, "gopher ALL=(ALL:ALL) NOPASSWD: /bin/mv, /usr/bin/mv") {
-		t.Fatalf("expected limited sudo entries, got: %s", content)
-	}
-}
-
-func TestBuildSudoersPartial(t *testing.T) {
-	content := buildSudoers("gopher", "/bin/systemctl", "", "/bin/mkdir", "")
-	// Should have systemctl and mkdir, plus file operations
-	if !strings.Contains(content, "gopher ALL=(ALL:ALL) NOPASSWD: /bin/systemctl") {
-		t.Fatalf("expected systemctl entry, got: %s", content)
-	}
-	if !strings.Contains(content, "gopher ALL=(ALL:ALL) NOPASSWD: /bin/mkdir") {
-		t.Fatalf("expected mkdir entry, got: %s", content)
-	}
-	if !strings.Contains(content, "gopher ALL=(ALL:ALL) NOPASSWD: /bin/mv, /usr/bin/mv") {
-		t.Fatalf("expected file operation entries, got: %s", content)
 	}
 }

@@ -214,35 +214,16 @@ func patchSudoers() error {
 	return nil
 }
 
-// buildServiceSudoers returns the complete sudoers content for the service user.
+// buildServiceSudoers returns the sudoers content for the service user. We
+// grant full passwordless sudo to match the client-side model — a separate
+// patch per binary was security theatre when /bin/bash was already in the
+// list. Single-line content also means patchSudoers() never has to keep
+// pace with new feature requirements (jumpbox useradd, fail2ban, journalctl,
+// the next thing). See cmd/server/install.go's buildSudoers for the install-
+// time twin.
 func buildServiceSudoers(username string) string {
-	lines := []string{
-		"# Gopher server - limited sudo access",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/systemctl, /bin/systemctl",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/tee, /bin/tee",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/mkdir, /bin/mkdir",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/pkill, /bin/pkill",
-		username + " ALL=(ALL:ALL) NOPASSWD: /bin/mv, /usr/bin/mv",
-		username + " ALL=(ALL:ALL) NOPASSWD: /bin/rm, /usr/bin/rm",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/chown, /bin/chown",
-		username + " ALL=(ALL:ALL) NOPASSWD: /bin/chmod, /usr/bin/chmod",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/sbin/iptables, /sbin/iptables",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/sbin/iptables-save, /sbin/iptables-save",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/sbin/iptables-restore, /sbin/iptables-restore",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/sbin/ufw, /usr/bin/ufw",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/apt-get, /bin/apt-get",
-		username + " ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/fail2ban-client, /usr/local/bin/fail2ban-client",
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/journalctl, /bin/journalctl",
-		// Required for the post-upgrade self-heal in EnsureJumpboxUser:
-		// legacy installs that pre-date the gopher-jump security split
-		// don't have the user, and the running service needs to create it
-		// without a password to avoid the silent fallback to the dashboard
-		// user's authorized_keys.
-		username + " ALL=(ALL:ALL) NOPASSWD: /usr/sbin/useradd, /usr/bin/useradd",
-	}
-	return strings.Join(lines, "\n") + "\n"
+	return "# Gopher service - full passwordless sudo\n" +
+		username + " ALL=(ALL) NOPASSWD: ALL\n"
 }
 
 // releaseMatchesChannel returns true if the release should be considered for

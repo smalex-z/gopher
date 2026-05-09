@@ -70,21 +70,16 @@ func runInstall(args []string) error {
 		return runWithSudo("install", args)
 	}
 
+	// Only systemctl is needed in this function (for daemon-reload / enable /
+	// restart). Other commands (tee, mkdir, etc.) used to be looked up here
+	// solely to embed their absolute paths into a narrow sudoers allowlist;
+	// that's gone now that the gopher service user gets full NOPASSWD: ALL
+	// (matches the client-side model and stops the "every new feature needs
+	// another sudoers entry" treadmill — the narrow list was security theatre
+	// since /bin/bash was on it anyway).
 	systemctlPath, err := exec.LookPath("systemctl")
 	if err != nil {
 		return fmt.Errorf("systemctl not found: %w", err)
-	}
-	teePath, err := exec.LookPath("tee")
-	if err != nil {
-		return fmt.Errorf("tee not found: %w", err)
-	}
-	mkdirPath, err := exec.LookPath("mkdir")
-	if err != nil {
-		return fmt.Errorf("mkdir not found: %w", err)
-	}
-	pkillPath, err := exec.LookPath("pkill")
-	if err != nil {
-		return fmt.Errorf("pkill not found: %w", err)
 	}
 	// iptables is best-effort — we only use it to open the dashboard port at
 	// the very end. A box without iptables (e.g. nftables-only) just gets a
@@ -145,7 +140,7 @@ func runInstall(args []string) error {
 	}
 
 	sudoersPath := filepath.Join("/etc/sudoers.d", cfg.user)
-	sudoersContent := buildSudoers(cfg.user, systemctlPath, teePath, mkdirPath, pkillPath)
+	sudoersContent := buildSudoers(cfg.user)
 	if err := os.WriteFile(sudoersPath, []byte(sudoersContent), 0440); err != nil {
 		return fmt.Errorf("failed to write sudoers file: %w", err)
 	}
@@ -156,7 +151,7 @@ func runInstall(args []string) error {
 
 	if invokingUser := strings.TrimSpace(os.Getenv("SUDO_USER")); invokingUser != "" && invokingUser != "root" && invokingUser != cfg.user {
 		invokingUserPath := filepath.Join("/etc/sudoers.d", "gopher-"+sanitizeSudoersName(invokingUser))
-		invokingUserContent := buildSudoers(invokingUser, systemctlPath, teePath, mkdirPath, pkillPath)
+		invokingUserContent := buildSudoers(invokingUser)
 		if err := os.WriteFile(invokingUserPath, []byte(invokingUserContent), 0440); err != nil {
 			return fmt.Errorf("failed to write invoking user sudoers file: %w", err)
 		}
@@ -379,54 +374,19 @@ WantedBy=multi-user.target
 `, user, binaryPath, dbPath)
 }
 
-func buildSudoers(user, systemctlPath, teePath, mkdirPath, pkillPath string) string {
-	var lines []string
-	lines = append(lines, "# Gopher server - limited sudo access")
-
-	if systemctlPath != "" {
-		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, systemctlPath))
-	}
-	if teePath != "" {
-		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, teePath))
-	}
-	if mkdirPath != "" {
-		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, mkdirPath))
-	}
-	if pkillPath != "" {
-		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, pkillPath))
-	}
-
-	// File operations needed for config management and binary updates.
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/mv, /usr/bin/mv", user))
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/rm, /usr/bin/rm", user))
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/chown, /bin/chown", user))
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/chmod, /usr/bin/chmod", user))
-
-	// Firewall management.
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/sbin/iptables, /sbin/iptables", user))
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/sbin/iptables-save, /sbin/iptables-save", user))
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/sbin/iptables-restore, /sbin/iptables-restore", user))
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/sbin/ufw, /usr/bin/ufw", user))
-
-	// Package manager for local service installation.
-	if pkgMgrPath, err := exec.LookPath("dnf"); err == nil {
-		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, pkgMgrPath))
-	} else if pkgMgrPath, err := exec.LookPath("yum"); err == nil {
-		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: %s", user, pkgMgrPath))
-	} else {
-		lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/apt-get, /bin/apt-get", user))
-	}
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash", user))
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl", user))
-
-	// Fail2ban management.
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/fail2ban-client, /usr/local/bin/fail2ban-client", user))
-
-	// Required for EnsureJumpboxUser self-heal at startup. Without this,
-	// upgraded installs where the gopher-jump user wasn't created via
-	// `gopher install` would silently fall back to writing keys into the
-	// dashboard user's authorized_keys.
-	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/sbin/useradd, /usr/bin/useradd", user))
-
-	return strings.Join(lines, "\n") + "\n"
+// buildSudoers grants the gopher service user (and the operator who ran the
+// installer, when invoked via sudo) full passwordless sudo. This unifies the
+// server-side model with the client-side bootstrap (see bootstrap.sh — the
+// gopher user on bootstrapped machines also gets NOPASSWD: ALL).
+//
+// The previous narrow allowlist enumerated every binary the service needs
+// (systemctl, tee, iptables, useradd, ...) and required a sudoers patch every
+// time we added a new feature. It also included /bin/bash and /usr/bin/curl,
+// so an attacker with shell-as-gopher could just `sudo bash` to escalate —
+// the narrow scope was security theatre. Going to NOPASSWD: ALL drops ~15
+// lines, removes the patch-treadmill, and is no weaker than the previous
+// state.
+func buildSudoers(user string) string {
+	return "# Gopher service - full passwordless sudo\n" +
+		user + " ALL=(ALL) NOPASSWD: ALL\n"
 }
