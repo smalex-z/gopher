@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -251,6 +252,42 @@ func (s *LocalSetupService) JumpboxUser() string {
 		return jumpboxUsername
 	}
 	return ""
+}
+
+// jumpboxHomeDir matches the path the install command provisions the user
+// with. Kept in sync with cmd/server/install.go's defaultJumpboxHomeDir.
+const jumpboxHomeDir = "/var/lib/gopher-jump"
+
+// EnsureJumpboxUser self-heals upgrades: when an existing dashboard binary
+// is replaced (via the in-app updater, manual binary swap, or scripts/reinstall
+// where the jumpbox-user step was skipped), the gopher-jump system user may
+// not exist yet. The legacy fallback in ReconcileAuthorizedKeys keeps writing
+// keys to the dashboard's OS user, which silently regresses the security
+// posture and surprises operators ("why does the dashboard show
+// gopher@router.example.com instead of gopher-jump@..."). This creates the
+// user on startup if missing, so the next reconcile cycle picks it up
+// automatically.
+//
+// Best-effort: failures are logged but don't block startup. The most likely
+// failure mode is sudoers not granting useradd — patchSudoers in
+// internal/service/update.go appends that line on every Apply(), so the next
+// in-app update unblocks this path on legacy installs too.
+func (s *LocalSetupService) EnsureJumpboxUser() {
+	if jumpboxUserExists() {
+		return
+	}
+	useraddPath, err := exec.LookPath("useradd")
+	if err != nil {
+		log.Printf("WARN: jumpbox self-heal: useradd not found in PATH; gopher-jump user not created — re-run `gopher install` to migrate")
+		return
+	}
+	args := append(privilegedCmdPrefix(), useraddPath, "--system", "--shell", "/usr/sbin/nologin", "--home-dir", jumpboxHomeDir, "--create-home", jumpboxUsername)
+	out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+	if err != nil {
+		log.Printf("WARN: jumpbox self-heal: could not create %s user via sudo — re-run `gopher install` to migrate (%v: %s)", jumpboxUsername, err, strings.TrimSpace(string(out)))
+		return
+	}
+	log.Printf("Created jumpbox system user %s (home %s) — authorized_keys will reconcile on next sweep", jumpboxUsername, jumpboxHomeDir)
 }
 
 // ReconcileAuthorizedKeys ensures every Gopher-managed key is present in

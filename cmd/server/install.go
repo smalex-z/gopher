@@ -422,5 +422,11 @@ func buildSudoers(user, systemctlPath, teePath, mkdirPath, pkillPath string) str
 	// Fail2ban management.
 	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/fail2ban-client, /usr/local/bin/fail2ban-client", user))
 
+	// Required for EnsureJumpboxUser self-heal at startup. Without this,
+	// upgraded installs where the gopher-jump user wasn't created via
+	// `gopher install` would silently fall back to writing keys into the
+	// dashboard user's authorized_keys.
+	lines = append(lines, fmt.Sprintf("%s ALL=(ALL:ALL) NOPASSWD: /usr/sbin/useradd, /usr/bin/useradd", user))
+
 	return strings.Join(lines, "\n") + "\n"
 }

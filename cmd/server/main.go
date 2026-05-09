@@ -81,6 +81,12 @@ func runServer(args []string) {
 	monitorSvc.Start()
 	localSvc.ReconcileMainCaddyfile()
 	localSvc.ReconcileRouterCaddyBlock()
+	// Self-heal upgraded installs: when a binary is swapped without re-running
+	// `gopher install` / scripts/reinstall.sh, the gopher-jump system user may
+	// not exist yet on legacy boxes — without it ReconcileAuthorizedKeys falls
+	// back to the dashboard user (the OLD insecure layout). EnsureJumpboxUser
+	// creates it via sudo useradd; the next reconcile picks it up.
+	localSvc.EnsureJumpboxUser()
 	localSvc.ReconcileAuthorizedKeys()
 
 	// Bot-protection middleware — runs inside the existing server, no extra port.

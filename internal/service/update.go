@@ -235,6 +235,12 @@ func buildServiceSudoers(username string) string {
 		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl",
 		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/fail2ban-client, /usr/local/bin/fail2ban-client",
 		username + " ALL=(ALL:ALL) NOPASSWD: /usr/bin/journalctl, /bin/journalctl",
+		// Required for the post-upgrade self-heal in EnsureJumpboxUser:
+		// legacy installs that pre-date the gopher-jump security split
+		// don't have the user, and the running service needs to create it
+		// without a password to avoid the silent fallback to the dashboard
+		// user's authorized_keys.
+		username + " ALL=(ALL:ALL) NOPASSWD: /usr/sbin/useradd, /usr/bin/useradd",
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
