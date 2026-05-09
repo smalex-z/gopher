@@ -357,6 +357,13 @@ func (s *LocalSetupService) RemoveMachineClient(machine *db.Machine) error {
 // haven't been migrated to the agent yet. Identical end-state to the agent
 // path — invokes the same on-disk gopher-uninstall script in a detached
 // worker via setsid.
+//
+// We precheck that gopher-uninstall both exists and is allowed under
+// NOPASSWD sudoers BEFORE firing the detached worker. The detached worker
+// runs `sudo -n` (non-interactive); without that sudoers line it silently
+// exits 1, and because the worker is backgrounded we never observe the
+// failure — the box is left dirty and the operator has no signal as to why.
+// The precheck collapses both failure modes into a clear error.
 func (s *LocalSetupService) removeMachineClientViaSSH(machine *db.Machine) error {
 	sshKey, err := db.GetSSHKeyForMachine(machine)
 	if err != nil {
@@ -369,12 +376,22 @@ func (s *LocalSetupService) removeMachineClientViaSSH(machine *db.Machine) error
 	}
 	defer sshClient.Close()
 
-	// gopher-uninstall reads /etc/rathole/vps_key.pub and strips the matching
-	// line from authorized_keys, so we don't need to do that step over SFTP
-	// like the old inline-script path did.
-	//
-	// setsid + nohup gives the script its own session, so the SSH disconnect
-	// + the eventual rathole tunnel collapse don't take it down with them.
+	// Precheck 1: script is on disk + executable. `sh -c` to keep it portable
+	// across the various login shells the bootstrap script may have run as.
+	if out, perr := sshClient.Execute("test -x /usr/local/bin/gopher-uninstall && echo OK"); perr != nil || strings.TrimSpace(out) != "OK" {
+		return fmt.Errorf("gopher-uninstall not found on machine (was bootstrap completed? expected at /usr/local/bin/gopher-uninstall): %v", perr)
+	}
+	// Precheck 2: passwordless sudo for the script. `sudo -nl <cmd>` exits 0
+	// only when the user has a NOPASSWD entry for that exact path; otherwise
+	// it prints "a password is required" or "may not run" to stderr and exits
+	// non-zero. Capture that for the operator-visible error message.
+	if out, perr := sshClient.Execute("sudo -nl /usr/local/bin/gopher-uninstall 2>&1"); perr != nil {
+		return fmt.Errorf("client lacks NOPASSWD sudo for gopher-uninstall (re-run bootstrap to refresh /etc/sudoers.d/gopher; %s): %w", strings.TrimSpace(out), perr)
+	}
+
+	// Fire detached uninstall. setsid + nohup keeps the script alive when
+	// gopher-uninstall stops rathole-client (which kills our SSH session).
+	// Output goes to /tmp/.gopher-uninstall.log on the client for post-mortem.
 	_, err = sshClient.Execute(`setsid nohup sh -c 'sleep 3; sudo -n /usr/local/bin/gopher-uninstall' >/tmp/.gopher-uninstall.log 2>&1 </dev/null &`)
 	if err != nil {
 		return fmt.Errorf("failed to spawn remote uninstall worker: %w", err)
