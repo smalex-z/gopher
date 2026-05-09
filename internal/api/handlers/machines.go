@@ -88,9 +88,17 @@ func (h *MachineHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		response.InternalError(w, err.Error())
 		return
 	}
-	// Use Success (not NoContent) so the caller can read client_cleanup_ok /
-	// client_cleanup_error and surface a "machine deleted but client wasn't
-	// cleaned up" warning when applicable.
+	// Two-shape response: 204 when the delete was fully clean (preserves the
+	// historical caller contract — including tests/critical-path.sh — that
+	// /api/machines/{id} DELETE returns no content on success). 200 with a
+	// DeleteResult body only when client-side cleanup actually failed, so
+	// the dashboard can surface "deleted on server but the box is still
+	// dirty" via toast. The frontend uses optional chaining on resp.data so
+	// the 204 path harmlessly falls into the plain "Machine deleted." toast.
+	if res == nil || res.ClientCleanupOK {
+		response.NoContent(w)
+		return
+	}
 	response.Success(w, res)
 }
 
