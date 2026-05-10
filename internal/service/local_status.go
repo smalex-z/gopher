@@ -800,12 +800,14 @@ func (s *LocalSetupService) SetBindIP(bindIP string) error {
 			return fmt.Errorf("invalid IP address: %q", bindIP)
 		}
 	}
-	settings, err := db.GetSettings()
-	if err != nil {
+	if err := db.MutateSettings(func(s *db.AppSettings) error {
+		s.BindIP = bindIP
+		return nil
+	}); err != nil {
 		return err
 	}
-	settings.BindIP = bindIP
-	if err := db.SaveSettings(settings); err != nil {
+	settings, err := db.GetSettings()
+	if err != nil {
 		return err
 	}
 	_ = s.ReconcileServerConfig()
@@ -850,12 +852,10 @@ func (s *LocalSetupService) reconcileAllTunnelCaddyBlocks(settings *db.AppSettin
 // SetDashboardPrivate persists the dashboard port visibility setting and applies
 // the iptables rule for dashboardPort when in Gopher-managed firewall mode.
 func (s *LocalSetupService) SetDashboardPrivate(private bool) error {
-	settings, err := db.GetSettings()
-	if err != nil {
-		return err
-	}
-	settings.DashboardPrivate = private
-	if err := db.SaveSettings(settings); err != nil {
+	if err := db.MutateSettings(func(s *db.AppSettings) error {
+		s.DashboardPrivate = private
+		return nil
+	}); err != nil {
 		return err
 	}
 	ApplyDashboardPort(private)

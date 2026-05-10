@@ -64,8 +64,16 @@ func privilegedCmdPrefix() []string {
 
 // Install runs the full local setup in a background goroutine, streaming logs
 // to the shared deploy hub so the frontend WebSocket log viewer can follow along.
-func (s *LocalSetupService) Install(domain, serverHost string, skipCaddy bool) {
+//
+// Returns ErrOpInProgress if another long-running op (install, firewall
+// configure, fail2ban setup) is already streaming through the hub. The
+// goroutine releases the op lock when DONE is broadcast.
+func (s *LocalSetupService) Install(domain, serverHost string, skipCaddy bool) error {
+	if !s.hub.TryAcquireOp() {
+		return ErrOpInProgress
+	}
 	go goSafe("localInstall", func() {
+		defer s.hub.ReleaseOp()
 		w := &hubWriter{hub: s.hub}
 		if err := s.doInstall(domain, serverHost, skipCaddy, w); err != nil {
 			fmt.Fprintf(w, "ERROR: %v\n", err)
@@ -74,12 +82,19 @@ func (s *LocalSetupService) Install(domain, serverHost string, skipCaddy bool) {
 		}
 		s.hub.Broadcast("\x00DONE")
 	})
+	return nil
 }
 
 // SetupFail2ban installs and configures fail2ban in a background goroutine,
 // streaming logs to the deploy hub. Marks Fail2banSetupDone in the DB on success.
-func (s *LocalSetupService) SetupFail2ban() {
+//
+// Returns ErrOpInProgress if another op is already streaming.
+func (s *LocalSetupService) SetupFail2ban() error {
+	if !s.hub.TryAcquireOp() {
+		return ErrOpInProgress
+	}
 	go goSafe("setupFail2ban", func() {
+		defer s.hub.ReleaseOp()
 		w := &hubWriter{hub: s.hub}
 		fmt.Fprintln(w, "=== Configuring fail2ban ===")
 		if err := installFail2ban(w); err != nil {
@@ -87,25 +102,23 @@ func (s *LocalSetupService) SetupFail2ban() {
 			s.hub.Broadcast("\x00ERROR")
 			return
 		}
-		settings, err := db.GetSettings()
-		if err == nil {
-			settings.Fail2banSetupDone = true
-			_ = db.SaveSettings(settings)
-		}
+		_ = db.MutateSettings(func(s *db.AppSettings) error {
+			s.Fail2banSetupDone = true
+			return nil
+		})
 		s.hub.Broadcast("\x00DONE")
 	})
+	return nil
 }
 
 func (s *LocalSetupService) Skip(domain string) error {
-	settings, err := db.GetSettings()
-	if err != nil {
-		return err
-	}
-	settings.LocalSetupDone = true
-	if domain != "" {
-		settings.Domain = domain
-	}
-	return db.SaveSettings(settings)
+	return db.MutateSettings(func(settings *db.AppSettings) error {
+		settings.LocalSetupDone = true
+		if domain != "" {
+			settings.Domain = domain
+		}
+		return nil
+	})
 }
 
 func (s *LocalSetupService) doInstall(domain, serverHost string, skipCaddy bool, logWriter io.Writer) error {
@@ -240,26 +253,26 @@ func (s *LocalSetupService) doInstall(domain, serverHost string, skipCaddy bool,
 	}
 
 	// Step 11: Persist settings
-	settings, err := db.GetSettings()
-	if err != nil {
-		return err
-	}
-	if skipCaddy {
-		settings.Domain = ""
-		settings.ServerHost = serverHost
-		settings.DashboardPrivate = false // no Caddy — must keep dashboard port public
-	} else {
-		settings.Domain = domain
-		settings.ServerHost = domain // domain doubles as the rathole host when Caddy is active
-		settings.DashboardPrivate = true // Caddy is set up; restrict dashboard port, use router.domain
-	}
-	settings.LocalSetupDone = true
-	settings.Fail2banSetupDone = fail2banOK
-	if err := db.SaveSettings(settings); err != nil {
+	var dashboardPrivate bool
+	if err := db.MutateSettings(func(settings *db.AppSettings) error {
+		if skipCaddy {
+			settings.Domain = ""
+			settings.ServerHost = serverHost
+			settings.DashboardPrivate = false // no Caddy — must keep dashboard port public
+		} else {
+			settings.Domain = domain
+			settings.ServerHost = domain // domain doubles as the rathole host when Caddy is active
+			settings.DashboardPrivate = true // Caddy is set up; restrict dashboard port, use router.domain
+		}
+		settings.LocalSetupDone = true
+		settings.Fail2banSetupDone = fail2banOK
+		dashboardPrivate = settings.DashboardPrivate
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 	// Apply dashboard port visibility to firewall now that settings are persisted.
-	ApplyDashboardPort(settings.DashboardPrivate)
+	ApplyDashboardPort(dashboardPrivate)
 
 	fmt.Fprintln(logWriter, "=== Local Setup Complete ===")
 	if skipCaddy {

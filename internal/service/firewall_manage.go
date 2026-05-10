@@ -24,8 +24,15 @@ func (s *LocalSetupService) FirewallDetect() *FirewallStatus {
 
 // FirewallConfigure persists the chosen mode and, for "gopher" mode, takes over
 // iptables management asynchronously, streaming progress to the log hub.
-func (s *LocalSetupService) FirewallConfigure(mode string) {
+//
+// Returns ErrOpInProgress if another op is already streaming through the
+// shared LogHub.
+func (s *LocalSetupService) FirewallConfigure(mode string) error {
+	if !s.hub.TryAcquireOp() {
+		return ErrOpInProgress
+	}
 	go goSafe("firewallConfigure", func() {
+		defer s.hub.ReleaseOp()
 		w := &hubWriter{hub: s.hub}
 		if err := doFirewallConfigure(mode, w); err != nil {
 			fmt.Fprintf(w, "ERROR: %v\n", err)
@@ -34,6 +41,7 @@ func (s *LocalSetupService) FirewallConfigure(mode string) {
 		}
 		s.hub.Broadcast("\x00DONE")
 	})
+	return nil
 }
 
 func doFirewallConfigure(mode string, logWriter io.Writer) error {
@@ -45,12 +53,10 @@ func doFirewallConfigure(mode string, logWriter io.Writer) error {
 		}
 	}
 
-	settings, err := db.GetSettings()
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-	settings.FirewallMode = mode
-	if err := db.SaveSettings(settings); err != nil {
+	if err := db.MutateSettings(func(s *db.AppSettings) error {
+		s.FirewallMode = mode
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to save firewall mode: %w", err)
 	}
 

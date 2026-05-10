@@ -319,12 +319,10 @@ func (s *LocalSetupService) GetCustomIPTables() (string, error) {
 
 // SetCustomIPTables saves raw custom iptables text and reloads the chain.
 func (s *LocalSetupService) SetCustomIPTables(text string) error {
-	settings, err := db.GetSettings()
-	if err != nil {
-		return err
-	}
-	settings.CustomIPTables = text
-	if err := db.SaveSettings(settings); err != nil {
+	if err := db.MutateSettings(func(s *db.AppSettings) error {
+		s.CustomIPTables = text
+		return nil
+	}); err != nil {
 		return err
 	}
 	return reloadCustomChain()

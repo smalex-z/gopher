@@ -12,10 +12,16 @@ import (
 
 type MonitorService struct {
 	startOnce sync.Once
+	stopOnce  sync.Once
+	stopCh    chan struct{}
+	doneCh    chan struct{}
 }
 
 func NewMonitorService() *MonitorService {
-	return &MonitorService{}
+	return &MonitorService{
+		stopCh: make(chan struct{}),
+		doneCh: make(chan struct{}),
+	}
 }
 
 // Start launches the polling goroutine. Idempotent — repeat calls are no-ops
@@ -27,13 +33,34 @@ func (s *MonitorService) Start() {
 	})
 }
 
+// Stop signals the polling goroutine to exit and waits up to 5s for it to
+// drain. Idempotent — extra calls return immediately. Wired to the SIGTERM
+// handler in cmd/server/main.go so a `systemctl stop gopher` doesn't kill
+// the goroutine mid-probe and leave a half-written status row.
+func (s *MonitorService) Stop() {
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+	})
+	select {
+	case <-s.doneCh:
+	case <-time.After(5 * time.Second):
+		log.Printf("monitor: stop timeout — goroutine may still be in-flight")
+	}
+}
+
 func (s *MonitorService) run() {
+	defer close(s.doneCh)
 	// Check immediately on start, then every 30 seconds.
 	s.checkAll()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		s.checkAll()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			s.checkAll()
+		}
 	}
 }
 
@@ -138,10 +165,13 @@ func (s *MonitorService) checkTunnel(t db.Tunnel) {
 		return
 	}
 	start := time.Now()
-	t.Status = probeTunnel(t)
+	status := probeTunnel(t)
 	latency := int(time.Since(start) / time.Millisecond)
 
-	if err := db.UpdateTunnel(&t); err != nil {
+	// Partial Update — see SetTunnelStatus godoc. Avoids the race where
+	// the monitor's stale snapshot of the row would otherwise revert a
+	// concurrent operator edit on next save.
+	if err := db.SetTunnelStatus(t.ID, status); err != nil {
 		log.Printf("monitor: failed to update tunnel %s: %v", t.ID, err)
 	}
 
@@ -151,7 +181,7 @@ func (s *MonitorService) checkTunnel(t db.Tunnel) {
 	// service didn't respond, which the operator should still notice.
 	_ = db.RecordHealthCheck(&db.HealthCheck{
 		Subject:   "tunnel:" + t.ID,
-		OK:        t.Status == "active",
+		OK:        status == "active",
 		LatencyMS: latency,
 		ErrorMsg:  "",
 	})

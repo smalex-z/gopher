@@ -101,13 +101,6 @@ func (s *AuthService) IsSetup() (bool, error) {
 }
 
 func (s *AuthService) Setup(password string) error {
-	settings, err := db.GetSettings()
-	if err != nil {
-		return err
-	}
-	if settings.IsSetup {
-		return fmt.Errorf("already configured")
-	}
 	if len(password) < 8 {
 		return fmt.Errorf("password must be at least 8 characters")
 	}
@@ -115,9 +108,14 @@ func (s *AuthService) Setup(password string) error {
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
-	settings.PasswordHash = string(hash)
-	settings.IsSetup = true
-	return db.SaveSettings(settings)
+	return db.MutateSettings(func(settings *db.AppSettings) error {
+		if settings.IsSetup {
+			return fmt.Errorf("already configured")
+		}
+		settings.PasswordHash = string(hash)
+		settings.IsSetup = true
+		return nil
+	})
 }
 
 // Login validates the password. Returns a session token immediately when 2FA is
@@ -209,8 +207,10 @@ func (s *AuthService) LoginTOTP(pendingToken, code, ip string) (string, error) {
 		return "", fmt.Errorf("backup code check failed: %w", err)
 	}
 	if matched {
-		settings.TOTPBackupCodes = updatedCodes
-		if saveErr := db.SaveSettings(settings); saveErr != nil {
+		if saveErr := db.MutateSettings(func(s *db.AppSettings) error {
+			s.TOTPBackupCodes = updatedCodes
+			return nil
+		}); saveErr != nil {
 			log.Printf("WARN: failed to save consumed backup code: %v", saveErr)
 		}
 		token, err := s.createSession()
@@ -268,8 +268,10 @@ func (s *AuthService) VerifySensitiveOp(req SensitiveOpChallenge, ip string) err
 			return fmt.Errorf("invalid code")
 		}
 		if updatedBackup != settings.TOTPBackupCodes {
-			settings.TOTPBackupCodes = updatedBackup
-			if err := db.SaveSettings(settings); err != nil {
+			if err := db.MutateSettings(func(s *db.AppSettings) error {
+				s.TOTPBackupCodes = updatedBackup
+				return nil
+			}); err != nil {
 				log.Printf("WARN: persist consumed backup code (sensitive op): %v", err)
 			}
 		}
@@ -387,10 +389,6 @@ func (s *AuthService) TOTPStatus() (enabled bool, devices []TOTPDeviceInfo, back
 // in AppSettings.TOTPSecret as the pending enrollment slot. The secret moves
 // into the totp_devices table on Confirm.
 func (s *AuthService) TOTPEnroll() (secret, qrDataURL string, err error) {
-	settings, err := db.GetSettings()
-	if err != nil {
-		return "", "", err
-	}
 	count, err := db.CountTOTPDevices()
 	if err != nil {
 		return "", "", err
@@ -405,8 +403,10 @@ func (s *AuthService) TOTPEnroll() (secret, qrDataURL string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	settings.TOTPSecret = secret
-	if err := db.SaveSettings(settings); err != nil {
+	if err := db.MutateSettings(func(settings *db.AppSettings) error {
+		settings.TOTPSecret = secret
+		return nil
+	}); err != nil {
 		return "", "", fmt.Errorf("failed to save pending TOTP secret: %w", err)
 	}
 	return secret, qrDataURL, nil
@@ -417,17 +417,6 @@ func (s *AuthService) TOTPEnroll() (secret, qrDataURL string, err error) {
 // slot, and (only if this is the first device) generates backup codes.
 // Returns plaintext backup codes only on first enrollment; nil otherwise.
 func (s *AuthService) TOTPConfirm(code, name string) ([]string, error) {
-	settings, err := db.GetSettings()
-	if err != nil {
-		return nil, err
-	}
-	if settings.TOTPSecret == "" {
-		return nil, fmt.Errorf("no enrollment in progress; call enroll first")
-	}
-	if !verifyTOTP(settings.TOTPSecret, code) {
-		return nil, fmt.Errorf("invalid code")
-	}
-
 	deviceName := strings.TrimSpace(name)
 	if deviceName == "" {
 		deviceName = "Authenticator"
@@ -436,42 +425,51 @@ func (s *AuthService) TOTPConfirm(code, name string) ([]string, error) {
 		deviceName = deviceName[:64]
 	}
 
-	device := &db.TOTPDevice{
-		ID:        randomDeviceID(),
-		Name:      deviceName,
-		Secret:    settings.TOTPSecret,
-		CreatedAt: time.Now(),
-	}
-	if err := db.CreateTOTPDevice(device); err != nil {
-		return nil, fmt.Errorf("failed to save device: %w", err)
-	}
-
-	// Clear the pending slot.
-	settings.TOTPSecret = ""
-
-	// Generate backup codes only if this is the first device. Otherwise keep
-	// the existing set; backup codes are shared across devices.
 	var plain []string
-	count, err := db.CountTOTPDevices()
-	if err != nil {
-		return nil, err
-	}
-	if count == 1 || settings.TOTPBackupCodes == "" {
-		var hashed []string
-		plain, hashed, err = generateBackupCodes()
-		if err != nil {
-			return nil, err
+	if err := db.MutateSettings(func(settings *db.AppSettings) error {
+		if settings.TOTPSecret == "" {
+			return fmt.Errorf("no enrollment in progress; call enroll first")
 		}
-		codesJSON, err := marshalBackupCodes(hashed)
-		if err != nil {
-			return nil, err
+		if !verifyTOTP(settings.TOTPSecret, code) {
+			return fmt.Errorf("invalid code")
 		}
-		settings.TOTPBackupCodes = codesJSON
-	}
+		device := &db.TOTPDevice{
+			ID:        randomDeviceID(),
+			Name:      deviceName,
+			Secret:    settings.TOTPSecret,
+			CreatedAt: time.Now(),
+		}
+		if err := db.CreateTOTPDevice(device); err != nil {
+			return fmt.Errorf("failed to save device: %w", err)
+		}
 
-	settings.TOTPEnabled = true
-	if err := db.SaveSettings(settings); err != nil {
-		return nil, fmt.Errorf("failed to persist enrollment: %w", err)
+		// Clear the pending slot.
+		settings.TOTPSecret = ""
+
+		// Generate backup codes only if this is the first device. Otherwise keep
+		// the existing set; backup codes are shared across devices.
+		count, err := db.CountTOTPDevices()
+		if err != nil {
+			return err
+		}
+		if count == 1 || settings.TOTPBackupCodes == "" {
+			var hashed []string
+			generated, h, err := generateBackupCodes()
+			if err != nil {
+				return err
+			}
+			plain = generated
+			hashed = h
+			codesJSON, err := marshalBackupCodes(hashed)
+			if err != nil {
+				return err
+			}
+			settings.TOTPBackupCodes = codesJSON
+		}
+		settings.TOTPEnabled = true
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return plain, nil
 }
@@ -479,24 +477,22 @@ func (s *AuthService) TOTPConfirm(code, name string) ([]string, error) {
 // TOTPDisable removes ALL devices and clears backup codes. Requires a valid
 // code from any device or a backup code.
 func (s *AuthService) TOTPDisable(code string) error {
-	settings, err := db.GetSettings()
-	if err != nil {
-		return err
-	}
-	if !settings.TOTPEnabled {
-		return fmt.Errorf("2FA is not enabled")
-	}
-	_, _, ok := verifyTOTPOrBackup(code, settings.TOTPBackupCodes)
-	if !ok {
-		return fmt.Errorf("invalid code")
-	}
-	if err := db.DeleteAllTOTPDevices(); err != nil {
-		return fmt.Errorf("failed to delete devices: %w", err)
-	}
-	settings.TOTPEnabled = false
-	settings.TOTPSecret = ""
-	settings.TOTPBackupCodes = ""
-	return db.SaveSettings(settings)
+	return db.MutateSettings(func(settings *db.AppSettings) error {
+		if !settings.TOTPEnabled {
+			return fmt.Errorf("2FA is not enabled")
+		}
+		_, _, ok := verifyTOTPOrBackup(code, settings.TOTPBackupCodes)
+		if !ok {
+			return fmt.Errorf("invalid code")
+		}
+		if err := db.DeleteAllTOTPDevices(); err != nil {
+			return fmt.Errorf("failed to delete devices: %w", err)
+		}
+		settings.TOTPEnabled = false
+		settings.TOTPSecret = ""
+		settings.TOTPBackupCodes = ""
+		return nil
+	})
 }
 
 // TOTPRemoveDevice removes a single device. Requires a valid code from any
@@ -504,51 +500,36 @@ func (s *AuthService) TOTPDisable(code string) error {
 // the action, not the device) or a backup code. If this leaves zero devices,
 // 2FA is disabled and backup codes are cleared.
 func (s *AuthService) TOTPRemoveDevice(deviceID, code string) error {
-	settings, err := db.GetSettings()
-	if err != nil {
-		return err
-	}
-	if !settings.TOTPEnabled {
-		return fmt.Errorf("2FA is not enabled")
-	}
-	if _, err := db.GetTOTPDevice(deviceID); err != nil {
-		return err
-	}
-
-	_, updatedBackup, ok := verifyTOTPOrBackup(code, settings.TOTPBackupCodes)
-	if !ok {
-		return fmt.Errorf("invalid code")
-	}
-	settings.TOTPBackupCodes = updatedBackup
-
-	if err := db.DeleteTOTPDevice(deviceID); err != nil {
-		return fmt.Errorf("failed to delete device: %w", err)
-	}
-
-	count, err := db.CountTOTPDevices()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		// Last device removed — disable 2FA entirely.
-		settings.TOTPEnabled = false
-		settings.TOTPSecret = ""
-		settings.TOTPBackupCodes = ""
-	}
-	return db.SaveSettings(settings)
+	return db.MutateSettings(func(settings *db.AppSettings) error {
+		if !settings.TOTPEnabled {
+			return fmt.Errorf("2FA is not enabled")
+		}
+		if _, err := db.GetTOTPDevice(deviceID); err != nil {
+			return err
+		}
+		_, updatedBackup, ok := verifyTOTPOrBackup(code, settings.TOTPBackupCodes)
+		if !ok {
+			return fmt.Errorf("invalid code")
+		}
+		settings.TOTPBackupCodes = updatedBackup
+		if err := db.DeleteTOTPDevice(deviceID); err != nil {
+			return fmt.Errorf("failed to delete device: %w", err)
+		}
+		count, err := db.CountTOTPDevices()
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			// Last device removed — disable 2FA entirely.
+			settings.TOTPEnabled = false
+			settings.TOTPSecret = ""
+			settings.TOTPBackupCodes = ""
+		}
+		return nil
+	})
 }
 
 func (s *AuthService) TOTPRegenerateBackupCodes(code string) ([]string, error) {
-	settings, err := db.GetSettings()
-	if err != nil {
-		return nil, err
-	}
-	if !settings.TOTPEnabled {
-		return nil, fmt.Errorf("2FA is not enabled")
-	}
-	if _, ok := verifyTOTPAcrossDevices(code); !ok {
-		return nil, fmt.Errorf("invalid code")
-	}
 	plain, hashed, err := generateBackupCodes()
 	if err != nil {
 		return nil, err
@@ -557,8 +538,19 @@ func (s *AuthService) TOTPRegenerateBackupCodes(code string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	settings.TOTPBackupCodes = codesJSON
-	return plain, db.SaveSettings(settings)
+	if err := db.MutateSettings(func(settings *db.AppSettings) error {
+		if !settings.TOTPEnabled {
+			return fmt.Errorf("2FA is not enabled")
+		}
+		if _, ok := verifyTOTPAcrossDevices(code); !ok {
+			return fmt.Errorf("invalid code")
+		}
+		settings.TOTPBackupCodes = codesJSON
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return plain, nil
 }
 
 // randomDeviceID returns 16 hex chars — same scheme as other Gopher IDs.

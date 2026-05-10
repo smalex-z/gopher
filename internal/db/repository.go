@@ -171,6 +171,18 @@ func UpdateTunnel(tunnel *Tunnel) error {
 	return DB.Save(tunnel).Error
 }
 
+// SetTunnelStatus updates only the Status / UpdatedAt columns. Used by the
+// monitor's per-tunnel probe so a concurrent operator edit (rename, port
+// change, subdomain) on the same row can't be clobbered by the monitor's
+// stale full-record DB.Save 30 seconds later. Same pattern as
+// SetMachineStatus / SetMachineAgentSeen.
+func SetTunnelStatus(id, status string) error {
+	return DB.Model(&Tunnel{}).Where("id = ?", id).Updates(map[string]any{
+		"status":     status,
+		"updated_at": time.Now(),
+	}).Error
+}
+
 func DeleteTunnel(id string) error {
 	return DB.Delete(&Tunnel{}, "id = ?", id).Error
 }
@@ -451,6 +463,38 @@ func GetSettings() (*AppSettings, error) {
 func SaveSettings(s *AppSettings) error {
 	s.ID = "singleton"
 	return DB.Save(s).Error
+}
+
+// MutateSettings runs fn against a freshly-loaded AppSettings inside a single
+// SQLite transaction, then saves the (possibly-mutated) row. SQLite's
+// BEGIN IMMEDIATE semantics serialize writers, so two concurrent callers
+// can't both load v1, mutate disjoint fields, and stomp on each other's
+// changes — the second caller waits, sees v1+A, applies its own change,
+// and writes v1+A+B.
+//
+// Replaces the bare GetSettings → mutate → SaveSettings pattern that was
+// used in 19 production sites and was racy whenever a background goroutine
+// (Install, FirewallConfigure, SetupFail2ban) wrote a flag while an
+// operator request edited a different field.
+//
+// fn must not call MutateSettings recursively (deadlock); pass everything
+// it needs in via captured variables.
+func MutateSettings(fn func(*AppSettings) error) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var s AppSettings
+		if err := tx.First(&s, "id = 'singleton'").Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				s = AppSettings{ID: "singleton"}
+			} else {
+				return err
+			}
+		}
+		s.ID = "singleton"
+		if err := fn(&s); err != nil {
+			return err
+		}
+		return tx.Save(&s).Error
+	})
 }
 
 // Firewall Rules Repository

@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -88,13 +89,27 @@ func (h *LocalHandler) Install(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "server_host is required when skipping Caddy")
 		return
 	}
-	h.svc.Install(body.Domain, body.ServerHost, body.SkipCaddy)
+	if err := h.svc.Install(body.Domain, body.ServerHost, body.SkipCaddy); err != nil {
+		if errors.Is(err, service.ErrOpInProgress) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
 	response.Success(w, map[string]string{"message": "install started"})
 }
 
 // POST /api/local/setup-fail2ban
 func (h *LocalHandler) SetupFail2ban(w http.ResponseWriter, r *http.Request) {
-	h.svc.SetupFail2ban()
+	if err := h.svc.SetupFail2ban(); err != nil {
+		if errors.Is(err, service.ErrOpInProgress) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
 	response.Success(w, map[string]string{"message": "fail2ban setup started"})
 }
 
@@ -382,7 +397,14 @@ func (h *LocalHandler) ConfigureFirewall(w http.ResponseWriter, r *http.Request)
 		response.BadRequest(w, "mode must be one of: gopher, manual, none")
 		return
 	}
-	h.svc.FirewallConfigure(body.Mode)
+	if err := h.svc.FirewallConfigure(body.Mode); err != nil {
+		if errors.Is(err, service.ErrOpInProgress) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
 	response.Success(w, map[string]string{"message": "firewall configuration started"})
 }
 

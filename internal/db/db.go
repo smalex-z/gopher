@@ -263,15 +263,27 @@ func runMigrations() error {
 			return err
 		}
 		log.Printf("Running migration: %s", name)
-		if err := DB.Exec(string(content)).Error; err != nil {
-			if isDuplicateColumnErr(err) {
-				// AutoMigrate already added the column from the model struct;
-				// the SQL ALTER TABLE in the migration is now redundant.
-				// Record as applied so we don't keep retrying every boot.
-				log.Printf("Migration %s: column already added by AutoMigrate, marking as applied", name)
-			} else {
-				return fmt.Errorf("migration %s failed: %w", name, err)
+		// Wrap every migration in a transaction so a multi-statement file
+		// either lands entirely or rolls back. Without this, statement N
+		// committing and statement N+1 erroring leaves the schema in a
+		// half-migrated state — and on the next boot statement N's effect
+		// (e.g. ADD COLUMN) bites the retry path with "column already
+		// exists" against migrations the runner can't safely skip.
+		txErr := DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec(string(content)).Error; err != nil {
+				if isDuplicateColumnErr(err) {
+					// AutoMigrate already added the column from the model
+					// struct; the SQL ALTER TABLE is now redundant. Record
+					// as applied so we don't keep retrying every boot.
+					log.Printf("Migration %s: column already added by AutoMigrate, marking as applied", name)
+					return nil
+				}
+				return err
 			}
+			return nil
+		})
+		if txErr != nil {
+			return fmt.Errorf("migration %s failed: %w", name, txErr)
 		}
 		if err := DB.Exec("INSERT INTO schema_migrations (name) VALUES (?)", name).Error; err != nil {
 			return fmt.Errorf("failed to record migration %s: %w", name, err)

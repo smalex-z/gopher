@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -29,12 +30,32 @@ const sentinelDeliveryTimeout = 3 * time.Second
 type LogHub struct {
 	mu          sync.RWMutex
 	subscribers map[chan string]struct{}
+	// opMu serializes long-running ops that all share this hub. The hub is
+	// a single bus and the dashboard's WS subscriber doesn't distinguish
+	// op IDs, so two concurrent ops would interleave their log lines and
+	// the first \x00DONE would close the WS while the other op is still
+	// mid-step. Each op TryAcquireOp's before broadcasting and Release's
+	// after DONE; double-fired ops get back ErrOpInProgress instead of a
+	// corrupted log stream.
+	opMu sync.Mutex
 }
 
 func NewLogHub() *LogHub {
 	return &LogHub{
 		subscribers: make(map[chan string]struct{}),
 	}
+}
+
+// TryAcquireOp attempts to claim the op lock for this hub. Returns true if
+// claimed (caller must defer ReleaseOp). Returns false if another op is
+// already streaming through this hub.
+func (h *LogHub) TryAcquireOp() bool {
+	return h.opMu.TryLock()
+}
+
+// ReleaseOp releases the op lock. Pair with a successful TryAcquireOp.
+func (h *LogHub) ReleaseOp() {
+	h.opMu.Unlock()
 }
 
 func (h *LogHub) Subscribe() chan string {
@@ -116,6 +137,10 @@ func (w *hubWriter) Write(p []byte) (n int, err error) {
 type DeployService struct {
 	Hub *LogHub
 }
+
+// ErrOpInProgress is returned when a caller tries to start a long-running
+// op (install, firewall configure, etc.) while another is already running.
+var ErrOpInProgress = errors.New("another long-running operation is in progress")
 
 func NewDeployService() *DeployService {
 	return &DeployService{
