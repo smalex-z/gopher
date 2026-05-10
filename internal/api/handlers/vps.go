@@ -88,14 +88,6 @@ func (h *VPSHandler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, map[string]string{"status": "bootstrap started"})
 }
 
-func (h *VPSHandler) Deploy(w http.ResponseWriter, r *http.Request) {
-	if err := h.svc.Deploy(); err != nil {
-		response.InternalError(w, err.Error())
-		return
-	}
-	response.Success(w, map[string]string{"status": "deploy started"})
-}
-
 func (h *VPSHandler) Status(w http.ResponseWriter, r *http.Request) {
 	status, err := h.svc.Status()
 	if err != nil {

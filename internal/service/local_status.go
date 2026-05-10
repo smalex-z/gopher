@@ -600,17 +600,87 @@ func skipOptionsList(line string) string {
 	return ""
 }
 
-// writeLocalFile writes content to path. If the direct write fails due to
-// permissions, it falls back to `sudo tee` so the app can write to system
-// directories without running as root itself.
+// writeLocalFile atomically writes content to path. Writes to a sibling
+// `<path>.tmp.<nano>` first, then renames into place — readers (Caddy reload,
+// fail2ban-client reload) only ever see a fully-written file. A power loss
+// or kill mid-write leaves the temp file behind for the next run to
+// clobber, never a truncated config that fails to parse.
+//
+// IMPORTANT: do NOT use this for files watched by an inotify-based hot
+// reloader (rathole's notify watcher in particular). The rename(2) replaces
+// the target's inode, which silently invalidates the watcher's IN_MODIFY
+// subscription. Use writeLocalFileInPlace for those — see the rathole
+// server.toml call site in local_rathole.go.
+//
+// Two backends: direct os.WriteFile + os.Rename when the process owns the
+// directory, sudo-tee + sudo-mv when it doesn't.
 func writeLocalFile(path, content string) error {
-	// Try direct write first (works when running as root or owning the dir).
+	// Try direct atomic write first.
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err == nil {
-		if err2 := os.WriteFile(path, []byte(content), 0644); err2 == nil {
-			return nil
+		tmp := fmt.Sprintf("%s.tmp.%d", path, time.Now().UnixNano())
+		if err2 := os.WriteFile(tmp, []byte(content), 0644); err2 == nil {
+			if rerr := os.Rename(tmp, path); rerr == nil {
+				return nil
+			}
+			// Rename can fail across filesystems or when the dest exists
+			// with different ownership. Clean up the temp before falling
+			// through to sudo so we don't leak it.
+			_ = os.Remove(tmp)
 		}
 	}
-	// Fall back to sudo: ensure directory exists, then write with tee.
+	// Fall back to sudo. tee writes to a temp path we own, mv installs
+	// atomically. mv inside the same directory is rename(2) on Linux.
+	dir := filepath.Dir(path)
+	if err := exec.Command("sudo", "mkdir", "-p", dir).Run(); err != nil { // #nosec G204
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+	tmp := fmt.Sprintf("%s.tmp.%d", path, time.Now().UnixNano())
+	cmd := exec.Command("sudo", "tee", tmp) // #nosec G204
+	cmd.Stdin = strings.NewReader(content)
+	cmd.Stdout = io.Discard
+	var errBuf strings.Builder
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(errBuf.String()))
+	}
+	if err := exec.Command("sudo", "mv", tmp, path).Run(); err != nil { // #nosec G204
+		_ = exec.Command("sudo", "rm", "-f", tmp).Run() // #nosec G204
+		return fmt.Errorf("atomic install of %s failed: %w", path, err)
+	}
+	return nil
+}
+
+// writeLocalFileInPlace truncates and rewrites path, preserving the inode.
+// Use for files watched by inotify hot-reloaders (rathole 0.5's notify
+// watcher) — `writeLocalFile`'s rename(2) silently invalidates the
+// watcher's subscription, so a reload via systemctl is the only way the
+// new config takes effect, and that drops every active rathole tunnel.
+//
+// The trade-off is a narrow torn-write window: a kill between truncate
+// and the final fsync leaves a partial file. For rathole's small server
+// config (a few KB) this is sub-millisecond and the pre-migrate DB
+// backup gives a recovery path; for client.toml on remote machines the
+// agent / SSH push lands the full content in a single write syscall.
+//
+// `tee /path` (without redirect to a temp) opens with O_TRUNC|O_WRONLY|
+// O_CREATE which is exactly what we want: same inode, new content,
+// inotify fires IN_MODIFY, rathole hot-reloads without dropping clients.
+func writeLocalFileInPlace(path, content string) error {
+	// Direct write first (process owns the file).
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err == nil {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err == nil {
+			if _, werr := f.WriteString(content); werr == nil {
+				if serr := f.Sync(); serr == nil {
+					_ = f.Close()
+					return nil
+				}
+			}
+			_ = f.Close()
+		}
+	}
+	// Sudo fallback. `sudo tee <path>` truncates and writes in place,
+	// preserving the inode. Discard stdout (tee echoes the input).
 	dir := filepath.Dir(path)
 	if err := exec.Command("sudo", "mkdir", "-p", dir).Run(); err != nil { // #nosec G204
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
@@ -782,12 +852,14 @@ func (s *LocalSetupService) SetBindIP(bindIP string) error {
 			return fmt.Errorf("invalid IP address: %q", bindIP)
 		}
 	}
-	settings, err := db.GetSettings()
-	if err != nil {
+	if err := db.MutateSettings(func(s *db.AppSettings) error {
+		s.BindIP = bindIP
+		return nil
+	}); err != nil {
 		return err
 	}
-	settings.BindIP = bindIP
-	if err := db.SaveSettings(settings); err != nil {
+	settings, err := db.GetSettings()
+	if err != nil {
 		return err
 	}
 	_ = s.ReconcileServerConfig()
@@ -824,20 +896,36 @@ func (s *LocalSetupService) reconcileAllTunnelCaddyBlocks(settings *db.AppSettin
 		reloaded = true
 	}
 	if reloaded {
-		_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
+		if err := systemctlReload("caddy"); err != nil {
+			log.Printf("reconcile all tunnel caddy: caddy reload failed: %v", err)
+		}
 	}
 	return nil
+}
+
+// ReconcileAllTunnelCaddyBlocks is the public entry point used by startup
+// and by /api/local/reconcile. Regenerates every tunnel's Caddy file from
+// the DB so missing files (deleted out-of-band, or wrongly cleaned up by
+// the orphan sweep on a previous boot) get recreated. Idempotent: writes
+// are no-ops when the on-disk content already matches.
+//
+// Returns nil silently when there's no Domain configured (skipCaddy
+// installs) — there's nothing to reconcile in that case.
+func (s *LocalSetupService) ReconcileAllTunnelCaddyBlocks() error {
+	settings, err := db.GetSettings()
+	if err != nil {
+		return err
+	}
+	return s.reconcileAllTunnelCaddyBlocks(settings)
 }
 
 // SetDashboardPrivate persists the dashboard port visibility setting and applies
 // the iptables rule for dashboardPort when in Gopher-managed firewall mode.
 func (s *LocalSetupService) SetDashboardPrivate(private bool) error {
-	settings, err := db.GetSettings()
-	if err != nil {
-		return err
-	}
-	settings.DashboardPrivate = private
-	if err := db.SaveSettings(settings); err != nil {
+	if err := db.MutateSettings(func(s *db.AppSettings) error {
+		s.DashboardPrivate = private
+		return nil
+	}); err != nil {
 		return err
 	}
 	ApplyDashboardPort(private)

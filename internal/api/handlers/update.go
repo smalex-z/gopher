@@ -54,13 +54,10 @@ func (h *UpdateHandler) SetChannel(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "channel must be one of: stable, beta, alpha")
 		return
 	}
-	settings, err := db.GetSettings()
-	if err != nil {
-		response.InternalError(w, err.Error())
-		return
-	}
-	settings.UpdateChannel = body.Channel
-	if err := db.SaveSettings(settings); err != nil {
+	if err := db.MutateSettings(func(s *db.AppSettings) error {
+		s.UpdateChannel = body.Channel
+		return nil
+	}); err != nil {
 		response.InternalError(w, err.Error())
 		return
 	}

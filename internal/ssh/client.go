@@ -15,6 +15,16 @@ type SSHClient struct {
 	client *ssh.Client
 }
 
+// NewClient dials an SSH endpoint with the supplied private key. Host-key
+// verification is intentionally disabled because every caller dials a
+// rathole-tunnel localhost port (or a bind_ip on the VPS itself) — there is
+// no public network leg to MITM. An attacker positioned to hijack
+// localhost/VPS-bound traffic already has the root-equivalent access that
+// host-key pinning would normally protect against, so verification adds no
+// real defense in our deployment shape (single-tenant VPS).
+//
+// On a multi-tenant or shared host this would no longer hold; tracked
+// against #9 in the pre-stable audit.
 func NewClient(host string, port int, username, privateKey string) (*SSHClient, error) {
 	signer, err := ssh.ParsePrivateKey([]byte(privateKey))
 	if err != nil {
@@ -26,7 +36,7 @@ func NewClient(host string, port int, username, privateKey string) (*SSHClient, 
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signer),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // see godoc — only safe because every dial is localhost/VPS-bound
 		Timeout:         30 * time.Second,
 	}
 
@@ -111,6 +121,12 @@ func (c *SSHClient) UploadFile(content []byte, remotePath string) error {
 // write (succeeds when the SSH user owns the file/directory). If that is denied,
 // it uploads to a temp path the user can always write and uses "sudo mv" to
 // install it. Pass owner="" to skip the chown step after the move.
+//
+// IMPORTANT: this REPLACES the destination's inode (rename via mv). For files
+// watched by an inotify-based hot reloader (rathole client.toml in
+// particular), use UploadFileSudoInPlace instead — otherwise the watcher
+// loses its subscription on first push and never sees subsequent changes
+// without a process restart, which drops every connected tunnel.
 func (c *SSHClient) UploadFileSudo(content []byte, remotePath, owner string) error {
 	if err := c.UploadFile(content, remotePath); err == nil {
 		return nil
@@ -126,6 +142,43 @@ func (c *SSHClient) UploadFileSudo(content []byte, remotePath, owner string) err
 	if _, err := c.Execute(cmd); err != nil {
 		_, _ = c.Execute(fmt.Sprintf("rm -f %q", tmpPath))
 		return fmt.Errorf("permission denied writing %s; sudo fallback also failed: %w", remotePath, err)
+	}
+	return nil
+}
+
+// UploadFileSudoInPlace uploads content and writes it to remotePath while
+// preserving the file's inode. Used for rathole client.toml: rathole 0.5's
+// notify watcher subscribes to the inode, and rename(2)-based replacement
+// silently breaks the subscription so subsequent config pushes never get
+// hot-reloaded.
+//
+// The strategy is the same two-step (SFTP to tmp, then privilege-escalate to
+// install) as UploadFileSudo, but the second step uses `cat tmp > target`
+// via `sudo tee` instead of `mv`. tee opens with O_TRUNC|O_WRONLY|O_CREATE,
+// which keeps the inode and fires IN_MODIFY for the watcher.
+//
+// If the SSH user already owns the destination, falls through to the
+// direct SFTP path: sftpClient.Create truncates by default and preserves
+// the inode.
+func (c *SSHClient) UploadFileSudoInPlace(content []byte, remotePath, owner string) error {
+	if err := c.UploadFile(content, remotePath); err == nil {
+		return nil
+	}
+	tmpPath := fmt.Sprintf("/tmp/.gopher-%d", time.Now().UnixNano())
+	if err := c.UploadFile(content, tmpPath); err != nil {
+		return fmt.Errorf("failed to upload temporary file for sudo install: %w", err)
+	}
+	// `sudo tee` truncates+rewrites in place — same inode as before, which
+	// keeps rathole's notify watcher subscribed. Discard tee's stdout so
+	// it doesn't echo the file content back over the SSH session.
+	cmd := fmt.Sprintf("sudo tee %q < %q > /dev/null", remotePath, tmpPath)
+	if owner != "" {
+		cmd += fmt.Sprintf(" && sudo chown %q %q", owner, remotePath)
+	}
+	cmd += fmt.Sprintf(" ; rm -f %q", tmpPath)
+	if _, err := c.Execute(cmd); err != nil {
+		_, _ = c.Execute(fmt.Sprintf("rm -f %q", tmpPath))
+		return fmt.Errorf("in-place install of %s failed: %w", remotePath, err)
 	}
 	return nil
 }
@@ -158,53 +211,3 @@ func dirName(path string) string {
 	return "."
 }
 
-// NewClientViaJump creates an SSH client to a machine by jumping through the VPS.
-// It connects to VPS first, then dials the machine's tunnel port on VPS localhost,
-// and authenticates using the VPS-generated SSH keypair installed on the machine.
-func NewClientViaJump(vpsHost string, vpsPort int, vpsUsername, vpsPrivateKey string,
-	machineUsername, machineSSHPrivateKey string, tunnelPort int) (*SSHClient, error) {
-
-	vpsSigner, err := ssh.ParsePrivateKey([]byte(vpsPrivateKey))
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse VPS private key: %w", err)
-	}
-	vpsConfig := &ssh.ClientConfig{
-		User:            vpsUsername,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(vpsSigner)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         30 * time.Second,
-	}
-	vpsAddr := net.JoinHostPort(vpsHost, fmt.Sprintf("%d", vpsPort))
-	vpsClient, err := ssh.Dial("tcp", vpsAddr, vpsConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to dial VPS: %w", err)
-	}
-
-	tunnelAddr := fmt.Sprintf("localhost:%d", tunnelPort)
-	tunnelConn, err := vpsClient.Dial("tcp", tunnelAddr)
-	if err != nil {
-		vpsClient.Close()
-		return nil, fmt.Errorf("failed to dial machine tunnel on VPS: %w", err)
-	}
-
-	machineSigner, err := ssh.ParsePrivateKey([]byte(machineSSHPrivateKey))
-	if err != nil {
-		tunnelConn.Close()
-		vpsClient.Close()
-		return nil, fmt.Errorf("failed to parse machine SSH private key: %w", err)
-	}
-	machineConfig := &ssh.ClientConfig{
-		User:            machineUsername,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(machineSigner)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         30 * time.Second,
-	}
-	ncc, chans, reqs, err := ssh.NewClientConn(tunnelConn, tunnelAddr, machineConfig)
-	if err != nil {
-		tunnelConn.Close()
-		vpsClient.Close()
-		return nil, fmt.Errorf("failed to create SSH conn through tunnel: %w", err)
-	}
-
-	return &SSHClient{client: ssh.NewClient(ncc, chans, reqs)}, nil
-}

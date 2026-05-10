@@ -32,7 +32,7 @@ func TestGenerateRatholeServerConfig(t *testing.T) {
 		},
 	}
 
-	cfg := config.GenerateRatholeServerConfig(machines, tunnels)
+	cfg := config.GenerateRatholeServerConfig(machines, tunnels, "")
 
 	// Verify markers are present
 	if !strings.Contains(cfg, "# gopher-machine-start: test-mac") {
@@ -144,7 +144,7 @@ func TestValidateValid(t *testing.T) {
 		UpdatedAt:    time.Now(),
 	}
 
-	cfg := config.GenerateRatholeServerConfig([]db.Machine{}, []db.Tunnel{tunnel})
+	cfg := config.GenerateRatholeServerConfig([]db.Machine{}, []db.Tunnel{tunnel}, "")
 
 	result := config.ValidateRatholeConfig(cfg, []db.Machine{}, []db.Tunnel{tunnel})
 
@@ -194,7 +194,7 @@ func TestGenerateSkipsIncomplete(t *testing.T) {
 		{ID: "no-port", RatholePort: 0, RatholeToken: "token"}, // Missing port
 	}
 
-	cfg := config.GenerateRatholeServerConfig(machines, tunnels)
+	cfg := config.GenerateRatholeServerConfig(machines, tunnels, "")
 
 	if !strings.Contains(cfg, "# gopher-machine-start: complete") {
 		t.Error("Should include complete machine")
@@ -348,7 +348,7 @@ func TestGenerateMultipleMachinesNoDuplicates(t *testing.T) {
 		{ID: "mac3", TunnelPort: 10002, RatholeSSHToken: "tok3", PublicSSH: true, CreatedAt: time.Now(), UpdatedAt: time.Now()},
 	}
 
-	cfg := config.GenerateRatholeServerConfig(machines, []db.Tunnel{})
+	cfg := config.GenerateRatholeServerConfig(machines, []db.Tunnel{}, "")
 
 	// Count start markers
 	mac1Count := strings.Count(cfg, "# gopher-machine-start: mac1")
@@ -411,7 +411,7 @@ func TestGenerateMachinesBeforeTunnels(t *testing.T) {
 		{ID: "tun1", RatholePort: 20000, RatholeToken: "tok1", CreatedAt: time.Now(), UpdatedAt: time.Now()},
 	}
 
-	cfg := config.GenerateRatholeServerConfig(machines, tunnels)
+	cfg := config.GenerateRatholeServerConfig(machines, tunnels, "")
 
 	machineStartIdx := strings.Index(cfg, "# gopher-machine-start: mac1")
 	tunnelStartIdx := strings.Index(cfg, "# gopher-tunnel-start: tun1")
@@ -440,7 +440,7 @@ func TestConfigLifecycleCycle(t *testing.T) {
 	}
 
 	// Step 2: Generate config
-	cfg := config.GenerateRatholeServerConfig([]db.Machine{}, []db.Tunnel{tunnel1})
+	cfg := config.GenerateRatholeServerConfig([]db.Machine{}, []db.Tunnel{tunnel1}, "")
 
 	// Step 3: Validate - should pass
 	result := config.ValidateRatholeConfig(cfg, []db.Machine{}, []db.Tunnel{tunnel1})
@@ -467,7 +467,7 @@ func TestConfigLifecycleCycle(t *testing.T) {
 	}
 
 	// Step 6: Regenerate config from updated DB
-	cfgUpdated := config.GenerateRatholeServerConfig([]db.Machine{}, []db.Tunnel{tunnel1, tunnel2})
+	cfgUpdated := config.GenerateRatholeServerConfig([]db.Machine{}, []db.Tunnel{tunnel1, tunnel2}, "")
 
 	// Step 7: Validate new config against new DB - should pass
 	result = config.ValidateRatholeConfig(cfgUpdated, []db.Machine{}, []db.Tunnel{tunnel1, tunnel2})
@@ -495,7 +495,7 @@ func TestConfigDriftDetection(t *testing.T) {
 		UpdatedAt:    time.Now(),
 	}
 
-	cfg := config.GenerateRatholeServerConfig([]db.Machine{}, []db.Tunnel{tunnel})
+	cfg := config.GenerateRatholeServerConfig([]db.Machine{}, []db.Tunnel{tunnel}, "")
 
 	// Corrupt the config: change token manually
 	corruptedCfg := strings.ReplaceAll(cfg, "my-token", "hacked-token")
@@ -521,7 +521,7 @@ func TestConfigDriftDetection(t *testing.T) {
 
 // Test empty database generates valid structure
 func TestGenerateEmptyDatabaseValidStructure(t *testing.T) {
-	cfg := config.GenerateRatholeServerConfig([]db.Machine{}, []db.Tunnel{})
+	cfg := config.GenerateRatholeServerConfig([]db.Machine{}, []db.Tunnel{}, "")
 
 	// Should have server section
 	if !strings.Contains(cfg, "[server]") {
@@ -554,7 +554,7 @@ func TestGenerateAddsPlaceholderWhenAllEntriesIncomplete(t *testing.T) {
 		{ID: "no-port", RatholePort: 0, RatholeToken: "tok"},
 	}
 
-	cfg := config.GenerateRatholeServerConfig(machines, tunnels)
+	cfg := config.GenerateRatholeServerConfig(machines, tunnels, "")
 
 	if !strings.Contains(cfg, "[server.services.placeholder]") {
 		t.Error("Should include placeholder when all entries are skipped")

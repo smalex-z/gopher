@@ -171,6 +171,18 @@ func UpdateTunnel(tunnel *Tunnel) error {
 	return DB.Save(tunnel).Error
 }
 
+// SetTunnelStatus updates only the Status / UpdatedAt columns. Used by the
+// monitor's per-tunnel probe so a concurrent operator edit (rename, port
+// change, subdomain) on the same row can't be clobbered by the monitor's
+// stale full-record DB.Save 30 seconds later. Same pattern as
+// SetMachineStatus / SetMachineAgentSeen.
+func SetTunnelStatus(id, status string) error {
+	return DB.Model(&Tunnel{}).Where("id = ?", id).Updates(map[string]any{
+		"status":     status,
+		"updated_at": time.Now(),
+	}).Error
+}
+
 func DeleteTunnel(id string) error {
 	return DB.Delete(&Tunnel{}, "id = ?", id).Error
 }
@@ -352,6 +364,9 @@ func GetBootstrapToken(token string) (*BootstrapToken, error) {
 	return &bt, nil
 }
 
+// GetBootstrapTokenByID looks up a token row by its primary key. Used by the
+// external_api flow which references tokens by ID rather than the random
+// token string.
 func GetBootstrapTokenByID(id string) (*BootstrapToken, error) {
 	var bt BootstrapToken
 	if err := DB.First(&bt, "id = ?", id).Error; err != nil {
@@ -363,11 +378,46 @@ func GetBootstrapTokenByID(id string) (*BootstrapToken, error) {
 	return &bt, nil
 }
 
-func MarkTokenUsed(tokenID, machineID string) error {
-	return DB.Model(&BootstrapToken{}).Where("id = ?", tokenID).Updates(map[string]interface{}{
-		"used_at":    DB.NowFunc(),
-		"machine_id": machineID,
-	}).Error
+// ClaimBootstrapToken atomically marks the token used and returns the row
+// for the caller to read TunnelPort / SSHKeyID / PublicSSH from. The single
+// conditional UPDATE collapses the prior read-then-mark sequence so two
+// parallel Register requests with the same token can't both pass validation
+// before either consumes the token — only the request whose UPDATE actually
+// changes the row continues; the other gets NotFoundError.
+//
+// `expires_at > now` is part of the predicate so a token expiring between
+// generation and use is rejected without a separate timestamp check.
+func ClaimBootstrapToken(token string) (*BootstrapToken, error) {
+	now := time.Now()
+	res := DB.Model(&BootstrapToken{}).
+		Where("token = ? AND used_at IS NULL AND expires_at > ?", token, now).
+		Update("used_at", now)
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return nil, &apperrors.NotFoundError{Resource: "bootstrap_token", ID: token}
+	}
+	var bt BootstrapToken
+	if err := DB.Where("token = ?", token).First(&bt).Error; err != nil {
+		return nil, err
+	}
+	return &bt, nil
+}
+
+// BindBootstrapTokenToMachine fills in the machine_id on a token whose
+// used_at was already set by ClaimBootstrapToken. Split from the claim so
+// the claim is atomic without needing the machine row to exist yet.
+func BindBootstrapTokenToMachine(tokenID, machineID string) error {
+	return DB.Model(&BootstrapToken{}).Where("id = ?", tokenID).
+		Update("machine_id", machineID).Error
+}
+
+// PurgeExpiredBootstrapTokens deletes rows whose ExpiresAt is in the past.
+// Mirrors PurgeExpiredMigrationTokens so the table doesn't grow forever.
+func PurgeExpiredBootstrapTokens() (int64, error) {
+	res := DB.Where("expires_at < ?", time.Now()).Delete(&BootstrapToken{})
+	return res.RowsAffected, res.Error
 }
 
 // CreateMigrationToken stores a new ephemeral token for an agent-install
@@ -427,6 +477,38 @@ func GetSettings() (*AppSettings, error) {
 func SaveSettings(s *AppSettings) error {
 	s.ID = "singleton"
 	return DB.Save(s).Error
+}
+
+// MutateSettings runs fn against a freshly-loaded AppSettings inside a single
+// SQLite transaction, then saves the (possibly-mutated) row. SQLite's
+// BEGIN IMMEDIATE semantics serialize writers, so two concurrent callers
+// can't both load v1, mutate disjoint fields, and stomp on each other's
+// changes — the second caller waits, sees v1+A, applies its own change,
+// and writes v1+A+B.
+//
+// Replaces the bare GetSettings → mutate → SaveSettings pattern that was
+// used in 19 production sites and was racy whenever a background goroutine
+// (Install, FirewallConfigure, SetupFail2ban) wrote a flag while an
+// operator request edited a different field.
+//
+// fn must not call MutateSettings recursively (deadlock); pass everything
+// it needs in via captured variables.
+func MutateSettings(fn func(*AppSettings) error) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var s AppSettings
+		if err := tx.First(&s, "id = 'singleton'").Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				s = AppSettings{ID: "singleton"}
+			} else {
+				return err
+			}
+		}
+		s.ID = "singleton"
+		if err := fn(&s); err != nil {
+			return err
+		}
+		return tx.Save(&s).Error
+	})
 }
 
 // Firewall Rules Repository

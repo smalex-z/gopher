@@ -95,19 +95,17 @@ func (s *SecurityService) GetFail2banConfig() (*Fail2banConfig, error) {
 
 // SaveFail2banConfig persists the config and rewrites the jail file.
 func (s *SecurityService) SaveFail2banConfig(cfg *Fail2banConfig) error {
-	settings, err := db.GetSettings()
-	if err != nil {
-		return err
-	}
-	settings.Fail2banMaxRetry = cfg.MaxRetry
-	settings.Fail2banFindTime = cfg.FindTime
-	settings.Fail2banBanTime = cfg.BanTime
 	ipsJSON, err := json.Marshal(cfg.IgnoreIPs)
 	if err != nil {
 		return err
 	}
-	settings.Fail2banIgnoreIPs = string(ipsJSON)
-	if err := db.SaveSettings(settings); err != nil {
+	if err := db.MutateSettings(func(settings *db.AppSettings) error {
+		settings.Fail2banMaxRetry = cfg.MaxRetry
+		settings.Fail2banFindTime = cfg.FindTime
+		settings.Fail2banBanTime = cfg.BanTime
+		settings.Fail2banIgnoreIPs = string(ipsJSON)
+		return nil
+	}); err != nil {
 		return err
 	}
 	return s.rewriteJailConfig(cfg)

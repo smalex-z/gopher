@@ -1,16 +1,21 @@
 package main
 
 import (
+	"context"
 	"embed"
+	"errors"
 	"flag"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/smalex-z/gopher/internal/api"
+	"github.com/smalex-z/gopher/internal/api/handlers"
 	"github.com/smalex-z/gopher/internal/db"
 	"github.com/smalex-z/gopher/internal/proxy"
 	"github.com/smalex-z/gopher/internal/service"
@@ -79,6 +84,19 @@ func runServer(args []string) {
 	go secSvc.SyncFail2banConfig()
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
+	// Drop conf.d/gopher-tunnel-*.caddy orphans BEFORE the first Caddy
+	// reload — otherwise ReconcileMainCaddyfile's reload still sees the
+	// stale files and fails with "ambiguous site definition" when two
+	// orphan files claim the same subdomain.
+	localSvc.ReconcileTunnelCaddyFiles()
+	// Regenerate every tunnel's Caddy file from DB. Self-heals the case
+	// where a previous deploy or manual edit removed a live tunnel's
+	// Caddy file — without this, the dashboard says "tunnel online" but
+	// the subdomain returns SSL errors because Caddy has no upstream
+	// route. Idempotent: matches existing content do nothing.
+	if err := localSvc.ReconcileAllTunnelCaddyBlocks(); err != nil {
+		log.Printf("startup: reconcile tunnel caddy blocks: %v", err)
+	}
 	localSvc.ReconcileMainCaddyfile()
 	localSvc.ReconcileRouterCaddyBlock()
 	// Self-heal upgraded installs: when a binary is swapped without re-running
@@ -88,6 +106,14 @@ func runServer(args []string) {
 	// creates it via sudo useradd; the next reconcile picks it up.
 	localSvc.EnsureJumpboxUser()
 	localSvc.ReconcileAuthorizedKeys()
+	// Re-derive /etc/rathole/server.toml from the DB on every boot. Catches
+	// drift introduced by DB restore from backup, partial writes, or a crash
+	// between a tunnel/machine row delete and the disk reconcile that would
+	// otherwise have followed it. Idempotent — no-op when on-disk already
+	// matches the DB.
+	if err := localSvc.ReconcileServerConfig(); err != nil {
+		log.Printf("startup: failed to reconcile rathole server config: %v", err)
+	}
 
 	// Bot-protection middleware — runs inside the existing server, no extra port.
 	botMiddleware, botErr := proxy.NewMiddleware()
@@ -95,13 +121,28 @@ func runServer(args []string) {
 		log.Fatalf("Failed to create bot-protection middleware: %v", botErr)
 	}
 
-	// Purge expired bot sessions hourly.
+	// Hourly housekeeping: drop expired bot sessions, bootstrap tokens, and
+	// migration tokens. None of these are load-bearing once expired, but
+	// without a sweep the tables grow forever. Stops on shutdown so the
+	// goroutine doesn't get killed mid-DELETE.
+	purgeStop := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
-			if err := db.PurgeBotSessions(); err != nil {
-				log.Printf("bot session purge: %v", err)
+		for {
+			select {
+			case <-purgeStop:
+				return
+			case <-ticker.C:
+				if err := db.PurgeBotSessions(); err != nil {
+					log.Printf("bot session purge: %v", err)
+				}
+				if _, err := db.PurgeExpiredBootstrapTokens(); err != nil {
+					log.Printf("bootstrap token purge: %v", err)
+				}
+				if _, err := db.PurgeExpiredMigrationTokens(); err != nil {
+					log.Printf("migration token purge: %v", err)
+				}
 			}
 		}
 	}()
@@ -116,6 +157,11 @@ func runServer(args []string) {
 	mux.Handle("/static/agents/", http.StripPrefix("/static/agents/", agentsHandler()))
 	mux.Handle("/static/", router)
 	mux.Handle("/bootstrap/", router)
+	// Top-level liveness probe. Lives outside the chi /api group so external
+	// monitors can hit a stable canonical path without auth. ServeMux's
+	// "/healthz" pattern matches the exact path and beats the catch-all "/"
+	// SPA handler below.
+	mux.HandleFunc("/healthz", handlers.HealthzHandler)
 
 	distFS, err := fs.Sub(frontendDist, "frontend/dist")
 	if err != nil {
@@ -130,10 +176,60 @@ func runServer(args []string) {
 		// Caddy still proxies to localhost:port so this is transparent to users.
 		listenAddr = "127.0.0.1:" + *port
 	}
-	log.Printf("Server starting on %s", listenAddr)
-	if err := http.ListenAndServe(listenAddr, botMiddleware.Wrap(mux)); err != nil {
-		log.Fatalf("Server failed: %v", err)
+
+	// Configure the HTTP server with explicit timeouts. ReadHeaderTimeout
+	// defends against slow-loris connections without affecting WebSocket
+	// upgrades (the deadline only applies to the initial header read).
+	// We deliberately do NOT set ReadTimeout / WriteTimeout — those would
+	// tear down the long-lived WebSocket connections that stream install /
+	// firewall logs to the dashboard. IdleTimeout is safe to bound; closes
+	// keep-alive connections that go idle.
+	srv := &http.Server{
+		Addr:              listenAddr,
+		Handler:           botMiddleware.Wrap(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
+
+	// Run the server in a goroutine so the main thread can wait on signals
+	// and trigger a graceful drain. Without this, SIGTERM (sent by
+	// `systemctl stop gopher` and the upgrade flow) would kill in-flight
+	// HTTP requests, install/firewall goroutines mid-step, and any DB
+	// writes mid-transaction.
+	serverErr := make(chan error, 1)
+	go func() {
+		log.Printf("Server starting on %s", listenAddr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-serverErr:
+		log.Fatalf("Server failed: %v", err)
+	case sig := <-sigCh:
+		log.Printf("received %s, draining...", sig)
+	}
+
+	// Give in-flight HTTP requests up to 25s to drain (systemd's default
+	// SIGTERM grace is 90s, so we have headroom). After that, in-flight
+	// requests are dropped and the listener closes.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("graceful shutdown failed: %v", err)
+	}
+
+	// Stop background services so their goroutines exit before the process
+	// does. Each Stop() is idempotent and bounded — they won't block past
+	// their own internal timeout even if a worker is wedged.
+	close(purgeStop)
+	monitorSvc.Stop()
+	healthSvc.Stop()
+	log.Printf("shutdown complete")
 }
 
 // spaHandler serves static files and falls back to index.html for unknown paths,

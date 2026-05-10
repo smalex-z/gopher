@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -87,17 +86,23 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	customBlock += endMarker + "\n"
 	newContent := strings.TrimRight(managedConfig, "\n") + "\n\n" + customBlock
 
-	if err := writeLocalFile(configPath, newContent); err != nil {
+	// In-place write (truncate + rewrite, preserving the inode). Critical:
+	// rathole 0.5's notify watcher loses its IN_MODIFY subscription if the
+	// inode is replaced via rename(2) — and a `systemctl reload` would
+	// drop every active tunnel as the listeners restart. With the inode
+	// preserved, inotify fires, rathole's notify watcher hot-reloads the
+	// new config, and existing connections are kept untouched.
+	if err := writeLocalFileInPlace(configPath, newContent); err != nil {
 		return fmt.Errorf("failed to write %s: %w", configPath, err)
 	}
 
-	// rathole's notify watcher picks up the config change via inotify — no
-	// signal or restart needed when it's already running. Sending an extra
-	// SIGHUP causes a second reload ~1s after notify's, which churns every
-	// listener (including the dashboard's own tunnel) twice per machine-add.
-	// systemctl start is a no-op on an active unit; covers the "not running"
-	// case without forcing a restart on healthy ones.
-	_ = exec.Command("sudo", "systemctl", "start", "rathole-server").Run() // #nosec G204
+	// systemctl start is a no-op on an active unit; covers the "not
+	// running" case without forcing a restart on healthy ones. Logged
+	// (not propagated) because the on-disk config IS updated — only the
+	// runtime kick failed, and the next reconcile cycle picks it up.
+	if err := systemctlStart("rathole-server"); err != nil {
+		log.Printf("rathole-server start (post-reconcile) failed: %v", err)
+	}
 	return nil
 }
 
@@ -132,18 +137,41 @@ func stripGopherServiceSections(content string) string {
 // /etc/rathole/server.toml and pushes the regenerated client.toml to the
 // machine. The agent back-channel is preferred; SSH/SFTP is the fallback
 // for machines that don't yet have the agent installed.
+//
+// Order of operations is client → server → caddy. Pushing client.toml first
+// is the cheapest step to fail (network issue, agent down, missing SSH key)
+// and failing early means we don't leave an orphan rathole listener bound
+// on the VPS waiting for a client that never connects. Each later step's
+// failure is also recoverable: the next reconcile rebuilds server.toml from
+// the DB, and Caddy reload is idempotent.
 func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Machine) error {
 	settings, err := db.GetSettings()
 	if err != nil {
 		return err
 	}
 
-	// --- 1. Update server.toml (full reconcile ensures consistency) ---
+	// --- 1. Push client.toml first ---
+	// Cheapest step to fail. If the agent is unreachable / SSH key is missing
+	// / the machine is offline, we want that error before the VPS is told to
+	// listen on a fresh port that nothing will ever connect to.
+	machineTunnels, err := db.GetTunnelsByMachine(machine.ID)
+	if err != nil {
+		return fmt.Errorf("failed to load machine tunnels: %w", err)
+	}
+	ratholeHost := ratholeHostFromSettings(settings)
+	transformer := func(existing string) (string, error) {
+		return mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost)
+	}
+	if err := s.updateClientToml(machine, transformer); err != nil {
+		return fmt.Errorf("failed to write client.toml on machine: %w", err)
+	}
+
+	// --- 2. Update server.toml (full reconcile ensures consistency) ---
 	if err := s.ReconcileServerConfig(); err != nil {
 		return fmt.Errorf("failed to update server.toml: %w", err)
 	}
 
-	// --- 2. Update managed Caddy entry if subdomain is set (TCP only; UDP/private have no HTTP routing) ---
+	// --- 3. Update managed Caddy entry if subdomain is set (TCP only; UDP/private have no HTTP routing) ---
 	if tunnel.Subdomain != "" && settings.Domain != "" && tunnel.Transport != "udp" && !tunnel.Private {
 		if err := ensureManagedCaddyLayout(); err != nil {
 			return fmt.Errorf("failed to prepare Caddy managed layout: %w", err)
@@ -156,23 +184,13 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		if err := writeLocalFile(managedPath, block); err != nil {
 			return fmt.Errorf("failed to write tunnel Caddy file %s: %w", managedPath, err)
 		}
-		_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
-	}
-
-	// --- 3. Push the regenerated client.toml ---
-	machineTunnels, err := db.GetTunnelsByMachine(machine.ID)
-	if err != nil {
-		return fmt.Errorf("failed to load machine tunnels: %w", err)
-	}
-	ratholeHost := settings.ServerHost
-	if ratholeHost == "" {
-		ratholeHost = settings.Domain
-	}
-	transformer := func(existing string) (string, error) {
-		return mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost)
-	}
-	if err := s.updateClientToml(machine, transformer); err != nil {
-		return fmt.Errorf("failed to write client.toml on machine: %w", err)
+		// Caddy reload is the user-visible step: a syntax error in the
+		// custom-config block fails here and the new tunnel never routes.
+		// Propagate so the API returns the failure rather than reporting
+		// success while the subdomain 502s.
+		if err := systemctlReload("caddy"); err != nil {
+			return fmt.Errorf("caddy reload failed: %w", err)
+		}
 	}
 	return nil
 }
@@ -280,13 +298,18 @@ func (s *LocalSetupService) updateClientTomlViaSSH(machine *db.Machine, transfor
 		_, _ = sshClient.Execute("mkdir -p " + homeDir + "/.config/rathole")
 	}
 
-	if err := sshClient.UploadFileSudo([]byte(updated), configPath, machine.Username); err != nil {
+	// In-place write: rathole's notify watcher subscribes to the inode of
+	// client.toml, so a rename-based install (UploadFileSudo) silently
+	// breaks the subscription and forces a full systemctl restart on
+	// every push — which drops every connected tunnel. UploadFileSudoInPlace
+	// uses `sudo tee` to truncate-and-rewrite, preserving the inode so
+	// rathole hot-reloads the new config without flapping listeners.
+	if err := sshClient.UploadFileSudoInPlace([]byte(updated), configPath, machine.Username); err != nil {
 		return fmt.Errorf("failed to write client.toml on machine: %w", err)
 	}
 
-	// rathole's notify watcher reloads on file change; systemctl start is a
-	// no-op on a healthy unit and covers the "stopped" case without flapping
-	// existing tunnels.
+	// systemctl start is a no-op on a healthy unit and covers the "stopped"
+	// case without flapping existing tunnels.
 	_, _ = sshClient.Execute(`{ [ "$(id -u)" -eq 0 ] && systemctl start rathole-client || sudo -n systemctl start rathole-client; } 2>/dev/null; systemctl --user start rathole-client 2>/dev/null; true`)
 	return nil
 }
@@ -303,9 +326,16 @@ func (s *LocalSetupService) RemoveServiceTunnelCaddy(tunnel *db.Tunnel) error {
 
 	managedPath := managedTunnelCaddyPath(tunnel.ID)
 	if removeErr := os.Remove(managedPath); removeErr != nil && !os.IsNotExist(removeErr) {
-		_ = exec.Command("sudo", "rm", "-f", managedPath).Run() // #nosec G204
+		// File owned by caddy / root — fall back to sudo rm. We log the
+		// fallback path's failure but don't propagate: the next reconcile
+		// will retry, and the tunnel row is gone from DB either way.
+		if err := runSudoCommand("rm", "-f", managedPath); err != nil {
+			log.Printf("sudo rm of caddy file %s failed: %v", managedPath, err)
+		}
 	}
-	_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
+	if err := systemctlReload("caddy"); err != nil {
+		log.Printf("caddy reload (post tunnel-remove) failed: %v", err)
+	}
 	return nil
 }
 
@@ -461,8 +491,18 @@ local_addr = "0.0.0.0:22"
 // the local gopher-agent (127.0.0.1:AgentLocalPort) to the VPS-side bind so
 // the control plane can reach the agent. Empty when the machine doesn't have
 // agent fields populated — legacy machines without the agent fall through.
+//
+// Gates on the same predicate as the server-side emitter (see
+// config.GenerateRatholeServerConfig) so the two sides can never disagree
+// about whether to write the entry. Without this symmetry, a row mid-
+// allocation could end up with the client config writing the agent
+// service while the server hasn't bound the matching port — rathole-client
+// then loops "service not found" until the next reconcile fills in the gap.
 func buildClientMachineAgentSection(machine *db.Machine) string {
-	if machine == nil || machine.ID == "" || machine.AgentRatholeToken == "" || machine.AgentLocalPort == 0 {
+	if machine == nil || machine.ID == "" {
+		return ""
+	}
+	if machine.AgentRatholeToken == "" || machine.AgentLocalPort == 0 || machine.AgentRemotePort == 0 {
 		return ""
 	}
 	return fmt.Sprintf(`# gopher-machine-agent-start: %s

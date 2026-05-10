@@ -159,6 +159,15 @@ func buildAgentDownloadBaseURL(settings *db.AppSettings) (string, error) {
 		}
 		return "https://" + host, nil
 	}
+	// Pre-Caddy / skipCaddy install path: the URL has to land on the
+	// dashboard's HTTP listener directly. main.go binds the listener to
+	// 127.0.0.1 whenever BindIP is set (treating BindIP as "the dashboard
+	// is private, Caddy will reverse-proxy to it"), so a pre-Caddy fetch
+	// to http://<bindIP>:<port> would 502. Refuse with a clear error
+	// instead of returning a URL that silently fails on the client.
+	if settings.BindIP != "" && !settings.LocalSetupDone {
+		return "", fmt.Errorf("agent install over plain HTTP isn't supported when bind_ip is set and Caddy isn't running yet — finish the local install or expose the dashboard on a public address first")
+	}
 	return fmt.Sprintf("http://%s:%d", host, dashboardPort), nil
 }
 

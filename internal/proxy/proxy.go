@@ -316,7 +316,9 @@ func ttlForTunnel(t *db.Tunnel) time.Duration {
 
 func randomHex(n int) string {
 	b := make([]byte, n)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand failure in randomHex: %v", err))
+	}
 	return hex.EncodeToString(b)
 }
 

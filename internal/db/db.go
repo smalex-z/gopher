@@ -3,7 +3,11 @@ package db
 import (
 	"embed"
 	"fmt"
+	"io"
 	"log"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,24 +21,85 @@ var migrations embed.FS
 
 var DB *gorm.DB
 
+// applyPragmas appends per-connection pragmas to the DSN. Foreign-key
+// enforcement is OFF in the DSN: AutoMigrate sometimes rebuilds a table by
+// CREATE-temp / copy / DROP / RENAME, and the DROP fails with
+// SQLITE_CONSTRAINT_FOREIGNKEY (787) when other tables still reference it.
+// We enable FKs on the single pooled connection AFTER migrations complete —
+// see the PRAGMA toggle in Initialize.
+func applyPragmas(dsn string) string {
+	const params = "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	if strings.Contains(dsn, "?") {
+		return dsn + "&" + params
+	}
+	return dsn + "?" + params
+}
+
 func Initialize(dsn string) error {
+	// Snapshot the DB file before AutoMigrate / SQL migrations touch it.
+	// This is the safety net for an upgrade with a buggy migration —
+	// operators can swap the .bak.<ts> file back into place via the
+	// existing BackupService.Restore upload endpoint.
+	if err := backupBeforeMigrate(dsn); err != nil {
+		log.Printf("WARN: pre-migrate backup failed: %v (continuing — migration may still succeed)", err)
+	}
+
 	var err error
-	DB, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{
+	DB, err = gorm.Open(sqlite.Open(applyPragmas(dsn)), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Warn),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Enable foreign key enforcement (SQLite disables it by default).
-	if err := DB.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
-		return fmt.Errorf("failed to enable foreign keys: %w", err)
+	// SQLite is single-writer and PRAGMAs are connection-scoped. Pinning
+	// the pool to a single connection lets us turn `foreign_keys` ON
+	// after migrations and have the setting stick for every subsequent
+	// query — without this, queries borrowed from a different pooled
+	// connection would silently lose FK enforcement and ON DELETE CASCADE
+	// on tunnels / the bootstrap_tokens.machine_id reference would not
+	// fire. For Gopher's dashboard-scale workload, serializing on one
+	// connection is invisible.
+	sqlDB, err := DB.DB()
+	if err != nil {
+		return fmt.Errorf("failed to access underlying *sql.DB: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+
+	// FKs OFF during AutoMigrate — see applyPragmas comment.
+	if err := DB.Exec("PRAGMA foreign_keys = OFF").Error; err != nil {
+		return fmt.Errorf("failed to disable foreign_keys for migration: %w", err)
 	}
 
 	// ActivityEvent is now an alias for Event; we only need to register the
 	// underlying type once.
 	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &MigrationToken{}, &AppSettings{}, &SSHKey{}, &FirewallRule{}, &BotSession{}, &TOTPDevice{}, &ExternalMachine{}, &ExternalTunnel{}, &HealthCheck{}, &Event{}); err != nil {
 		return fmt.Errorf("failed to auto-migrate: %w", err)
+	}
+
+	// Partial unique indexes for port columns. AutoMigrate's `gorm:"uniqueIndex"`
+	// tag would treat the zero-value (unallocated) as a real value and reject
+	// every machine after the first one — so we hand-roll partial indexes
+	// scoped to non-zero ports. Together with the retry loop in
+	// bootstrap.Register, this turns the concurrent-allocation race into a
+	// constraint failure the caller can simply re-pick from.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_machines_tunnel_port_unique ON machines(tunnel_port) WHERE tunnel_port > 0`).Error; err != nil {
+		return fmt.Errorf("failed to create tunnel_port unique index: %w", err)
+	}
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_machines_agent_remote_port_unique ON machines(agent_remote_port) WHERE agent_remote_port > 0`).Error; err != nil {
+		return fmt.Errorf("failed to create agent_remote_port unique index: %w", err)
+	}
+	// Same shape for tunnels.subdomain and tunnels.rathole_port. AutoMigrate
+	// runs before the SQL migration that originally declared these columns
+	// UNIQUE, so the SQL CREATE TABLE is a no-op (table already exists from
+	// the struct) and the constraint never lands on fresh installs. Empty
+	// subdomain is legal — multiple tunnels can route by raw port without a
+	// subdomain — so the partial-index `WHERE` clause is critical.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tunnels_subdomain_unique ON tunnels(subdomain) WHERE subdomain <> ''`).Error; err != nil {
+		return fmt.Errorf("failed to create tunnels.subdomain unique index: %w", err)
+	}
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tunnels_rathole_port_unique ON tunnels(rathole_port) WHERE rathole_port > 0`).Error; err != nil {
+		return fmt.Errorf("failed to create tunnels.rathole_port unique index: %w", err)
 	}
 
 	if err := runMigrations(); err != nil {
@@ -47,6 +112,20 @@ func Initialize(dsn string) error {
 
 	if err := migrateTOTPSecretToDevice(); err != nil {
 		log.Printf("WARN: TOTP device migration: %v", err)
+	}
+
+	// Migrations done — turn FK enforcement ON for the rest of the process.
+	// Because SetMaxOpenConns(1) above pins the pool to a single connection,
+	// this PRAGMA persists for every subsequent query.
+	if err := DB.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
+		return fmt.Errorf("failed to enable foreign_keys: %w", err)
+	}
+	var fk int
+	if err := DB.Raw("PRAGMA foreign_keys").Scan(&fk).Error; err != nil {
+		return fmt.Errorf("failed to verify foreign_keys pragma: %w", err)
+	}
+	if fk != 1 {
+		return fmt.Errorf("foreign_keys pragma did not stick (got %d, want 1)", fk)
 	}
 
 	return nil
@@ -148,6 +227,24 @@ func migrateSSHKeysFromSettings() error {
 	return nil
 }
 
+// runMigrations executes every numbered .sql migration in lexical order,
+// recording each as applied in schema_migrations.
+//
+// Every migration must be idempotent — re-running on an already-converged
+// schema must succeed. CREATE TABLE / CREATE INDEX statements use
+// `IF NOT EXISTS`; UPDATE backfills include WHERE clauses that filter out
+// already-converged rows; data INSERTs use `INSERT OR IGNORE`. ALTER TABLE
+// ADD COLUMN can't currently express IF NOT EXISTS, so isDuplicateColumnErr
+// catches the column-already-added case (which legitimately happens on
+// fresh installs where AutoMigrate has already provisioned the column from
+// the model struct).
+//
+// The previous implementation tried to short-circuit re-runs by detecting
+// "the schema looks like it's at 002+ level, mark everything applied." That
+// heuristic fired on every fresh install because AutoMigrate added the
+// detected column from the VPSConfig struct, silently skipping data
+// migrations like 012_unified_events.sql for any operator upgrading an old
+// AutoMigrate-only DB. Idempotent re-runs are simpler and safer.
 func runMigrations() error {
 	if err := DB.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		name TEXT PRIMARY KEY,
@@ -159,32 +256,6 @@ func runMigrations() error {
 	entries, err := migrations.ReadDir("migrations")
 	if err != nil {
 		return err
-	}
-
-	// Bootstrap tracking for existing databases: if no migrations are recorded yet
-	// but the schema already contains columns introduced by migration 002, the DB
-	// was set up by a previous run (via GORM AutoMigrate + untracked SQL migrations).
-	// Mark all known migrations as applied so they don't run again.
-	var tracked int64
-	if err := DB.Raw("SELECT COUNT(*) FROM schema_migrations").Scan(&tracked).Error; err != nil {
-		return fmt.Errorf("failed to count tracked migrations: %w", err)
-	}
-	if tracked == 0 {
-		type colInfo struct{ Name string }
-		var cols []colInfo
-		DB.Raw("PRAGMA table_info(vps_configs)").Scan(&cols)
-		for _, col := range cols {
-			if col.Name == "ssh_public_key" {
-				// Schema is already at 002+ level; record all existing files as applied.
-				for _, entry := range entries {
-					if entry.IsDir() {
-						continue
-					}
-					DB.Exec("INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)", entry.Name())
-				}
-				return nil
-			}
-		}
 	}
 
 	for _, entry := range entries {
@@ -206,16 +277,169 @@ func runMigrations() error {
 			return err
 		}
 		log.Printf("Running migration: %s", name)
-		if err := DB.Exec(string(content)).Error; err != nil {
-			if strings.Contains(err.Error(), "duplicate column name") {
-				log.Printf("Migration %s: column already exists, marking as applied", name)
-			} else {
-				return fmt.Errorf("migration %s failed: %w", name, err)
+		// Wrap every migration in a transaction so a multi-statement file
+		// either lands entirely or rolls back. Without this, statement N
+		// committing and statement N+1 erroring leaves the schema in a
+		// half-migrated state — and on the next boot statement N's effect
+		// (e.g. ADD COLUMN) bites the retry path with "column already
+		// exists" against migrations the runner can't safely skip.
+		txErr := DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec(string(content)).Error; err != nil {
+				if isDuplicateColumnErr(err) {
+					// AutoMigrate already added the column from the model
+					// struct; the SQL ALTER TABLE is now redundant. Record
+					// as applied so we don't keep retrying every boot.
+					log.Printf("Migration %s: column already added by AutoMigrate, marking as applied", name)
+					return nil
+				}
+				return err
 			}
+			return nil
+		})
+		if txErr != nil {
+			return fmt.Errorf("migration %s failed: %w", name, txErr)
 		}
 		if err := DB.Exec("INSERT INTO schema_migrations (name) VALUES (?)", name).Error; err != nil {
 			return fmt.Errorf("failed to record migration %s: %w", name, err)
 		}
+	}
+	return nil
+}
+
+// isDuplicateColumnErr matches SQLite's error string for ALTER TABLE ADD
+// COLUMN against an already-existing column. Drivers wrap the SQLite error
+// differently — modernc-go reports
+// `SQL logic error: duplicate column name: foo (1)` — so we match on the
+// distinctive `duplicate column name:` substring (with the trailing colon
+// to guard against unrelated errors that happen to mention the bare
+// phrase).
+func isDuplicateColumnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "duplicate column name:")
+}
+
+// dbBackupRetention is how many pre-migrate snapshots we keep. Older ones
+// are pruned at the end of backupBeforeMigrate so the DB directory doesn't
+// grow without bound — N is small because each backup is a copy of the
+// whole DB and Gopher's DB is typically <100 KiB but can grow with
+// per-tunnel health-check rows.
+const dbBackupRetention = 5
+
+// backupBeforeMigrate copies the on-disk SQLite file to
+// `<dsn>.bak.<UTC timestamp>` before AutoMigrate or SQL migrations get a
+// chance to mutate it. Skips silently when:
+//   - the dsn isn't a regular file path (e.g., `:memory:` / `file:?mode=memory`
+//     used by tests)
+//   - the file doesn't exist yet (fresh install — nothing to back up)
+//
+// Errors are returned to the caller, which logs+continues — a failed
+// backup is not a reason to refuse to start the daemon, but it IS a reason
+// to surface a warning so the operator notices.
+func backupBeforeMigrate(dsn string) error {
+	src := dsnFilePath(dsn)
+	if src == "" {
+		return nil
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat db: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+
+	ts := time.Now().UTC().Format("20060102-150405")
+	dst := fmt.Sprintf("%s.bak.%s", src, ts)
+	if err := copyFile(src, dst); err != nil {
+		return fmt.Errorf("copy %s → %s: %w", src, dst, err)
+	}
+	log.Printf("pre-migrate backup written: %s (%d bytes)", dst, info.Size())
+
+	// Prune older backups so the directory doesn't accumulate forever.
+	if err := pruneOldBackups(src, dbBackupRetention); err != nil {
+		log.Printf("WARN: backup retention prune failed: %v", err)
+	}
+	return nil
+}
+
+// dsnFilePath strips DSN query parameters and returns the path part — but
+// only when it looks like a real file. Returns "" for in-memory DBs or
+// SQLite URI forms we can't safely copy as a flat file.
+func dsnFilePath(dsn string) string {
+	// Strip query string.
+	path := dsn
+	if i := strings.Index(path, "?"); i >= 0 {
+		path = path[:i]
+	}
+	// SQLite supports a `file:` URI prefix; strip it for a regular path.
+	path = strings.TrimPrefix(path, "file:")
+	if path == "" || path == ":memory:" {
+		return ""
+	}
+	// Heuristic: an in-memory shared cache DSN looks like `Test:foo` after
+	// stripping query, with no path separator. Skip anything that doesn't
+	// look like a real filesystem path.
+	if !strings.ContainsAny(path, "/.") {
+		return ""
+	}
+	return path
+}
+
+// copyFile is a stream copy with sync — flushes to disk before returning so
+// the backup is durable even if the caller crashes immediately after.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	return out.Close()
+}
+
+// pruneOldBackups keeps the keep most-recent `<base>.bak.*` files in the
+// same directory and deletes the rest. Newest-first ordering is by
+// filename — the timestamp suffix sorts lexicographically.
+func pruneOldBackups(base string, keep int) error {
+	dir := filepath.Dir(base)
+	prefix := filepath.Base(base) + ".bak."
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), prefix) {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) <= keep {
+		return nil
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	for _, n := range names[keep:] {
+		_ = os.Remove(filepath.Join(dir, n))
 	}
 	return nil
 }

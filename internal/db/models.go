@@ -149,9 +149,13 @@ type AppSettings struct {
 	// DashboardPrivate restricts the dashboard port to localhost (VPS-only) when true.
 	// Zero value (false) keeps it publicly reachable — safe migration default.
 	DashboardPrivate  bool      `json:"dashboard_private"`
-	// BindIP is the IP address all public listeners bind to (rathole ports, Caddy, HTTP server).
-	// Empty means 0.0.0.0 (all interfaces). Set this on multi-homed hosts to restrict
-	// Gopher to a single IP so other services can share the same ports on other IPs.
+	// BindIP restricts the IP that public-facing rathole ports and Caddy listen
+	// on. The dashboard's own HTTP listener is treated specially: when BindIP
+	// is non-empty, the dashboard binds to 127.0.0.1 only and Caddy proxies
+	// to it (see cmd/server/main.go) — the assumption is that operators who
+	// set BindIP also use Caddy for TLS termination and don't want the
+	// dashboard reachable on the public IP directly. Empty means 0.0.0.0
+	// (all interfaces) for everything.
 	BindIP            string    `json:"bind_ip" gorm:"default:''"`
 	// CustomIPTables holds raw iptables rule specs (one per line, everything after
 	// "iptables ") that are applied to the GOPHER_CUSTOM chain. Flushed and

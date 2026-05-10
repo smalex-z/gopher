@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -40,8 +41,40 @@ func (h *LocalHandler) Status(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, status)
 }
 
+// guardSetupOnly rejects the request with 403 when setup has already
+// progressed past the point where the endpoint makes sense. Used to lock
+// down the public first-run wizard endpoints once the operator has finished
+// them — otherwise anyone on the network could re-trigger the install or
+// flip firewall mode after setup completes.
+//
+// step is one of: "install" (blocks once LocalSetupDone is true) or
+// "firewall" (blocks once FirewallMode is non-empty).
+func guardSetupOnly(w http.ResponseWriter, step string) bool {
+	settings, err := db.GetSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load settings")
+		return false
+	}
+	switch step {
+	case "install":
+		if settings.LocalSetupDone {
+			response.Error(w, http.StatusForbidden, "setup already complete")
+			return false
+		}
+	case "firewall":
+		if settings.FirewallMode != "" {
+			response.Error(w, http.StatusForbidden, "firewall already configured")
+			return false
+		}
+	}
+	return true
+}
+
 // POST /api/local/install
 func (h *LocalHandler) Install(w http.ResponseWriter, r *http.Request) {
+	if !guardSetupOnly(w, "install") {
+		return
+	}
 	var body struct {
 		Domain     string `json:"domain"`
 		ServerHost string `json:"server_host"`
@@ -59,18 +92,35 @@ func (h *LocalHandler) Install(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "server_host is required when skipping Caddy")
 		return
 	}
-	h.svc.Install(body.Domain, body.ServerHost, body.SkipCaddy)
+	if err := h.svc.Install(body.Domain, body.ServerHost, body.SkipCaddy); err != nil {
+		if errors.Is(err, service.ErrOpInProgress) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
 	response.Success(w, map[string]string{"message": "install started"})
 }
 
 // POST /api/local/setup-fail2ban
 func (h *LocalHandler) SetupFail2ban(w http.ResponseWriter, r *http.Request) {
-	h.svc.SetupFail2ban()
+	if err := h.svc.SetupFail2ban(); err != nil {
+		if errors.Is(err, service.ErrOpInProgress) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
 	response.Success(w, map[string]string{"message": "fail2ban setup started"})
 }
 
 // POST /api/local/skip
 func (h *LocalHandler) Skip(w http.ResponseWriter, r *http.Request) {
+	if !guardSetupOnly(w, "install") {
+		return
+	}
 	var body struct {
 		Domain string `json:"domain"`
 	}
@@ -83,13 +133,21 @@ func (h *LocalHandler) Skip(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, map[string]string{"message": "skipped"})
 }
 
-// POST /api/local/reconcile — rebuild server.toml from DB
+// POST /api/local/reconcile — rebuild server.toml AND every tunnel's
+// Caddy file from DB. The latter recovers from any state where a tunnel
+// row in the DB has no matching Caddy file on disk (e.g. file was deleted
+// out-of-band, or by a buggy orphan sweep on a previous boot).
 func (h *LocalHandler) Reconcile(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.ReconcileServerConfig(); err != nil {
 		response.InternalError(w, err.Error())
 		return
 	}
-	response.Success(w, map[string]string{"message": "server config reconciled"})
+	h.svc.ReconcileTunnelCaddyFiles()
+	if err := h.svc.ReconcileAllTunnelCaddyBlocks(); err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"message": "server config + caddy blocks reconciled"})
 }
 
 type sshKeyWithStats struct {
@@ -333,6 +391,9 @@ func (h *LocalHandler) DetectFirewall(w http.ResponseWriter, r *http.Request) {
 // For "gopher" mode the takeover is async and streams logs to the log WebSocket.
 // For "manual" and "none" the mode is saved synchronously.
 func (h *LocalHandler) ConfigureFirewall(w http.ResponseWriter, r *http.Request) {
+	if !guardSetupOnly(w, "firewall") {
+		return
+	}
 	var body struct {
 		Mode string `json:"mode"`
 	}
@@ -347,7 +408,14 @@ func (h *LocalHandler) ConfigureFirewall(w http.ResponseWriter, r *http.Request)
 		response.BadRequest(w, "mode must be one of: gopher, manual, none")
 		return
 	}
-	h.svc.FirewallConfigure(body.Mode)
+	if err := h.svc.FirewallConfigure(body.Mode); err != nil {
+		if errors.Is(err, service.ErrOpInProgress) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
 	response.Success(w, map[string]string{"message": "firewall configuration started"})
 }
 
