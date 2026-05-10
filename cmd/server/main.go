@@ -51,14 +51,27 @@ func main() {
 }
 
 func runServer(args []string) {
-	if err := ensurePasswordlessSudoForCurrentUser(); err != nil {
-		log.Printf("Warning: could not configure passwordless sudo automatically: %v", err)
-	}
-
 	flags := flag.NewFlagSet("gopher", flag.ExitOnError)
 	port := flags.String("port", "4321", "server port")
 	dbPath := flags.String("db", "./gopher.db", "database path")
+	// --dev runs gopher against an isolated DB without touching any
+	// system-managed file: /etc/rathole/server.toml, /etc/caddy/conf.d/*,
+	// /etc/sudoers.d/gopher, ~/.ssh/authorized_keys. Used by scripts/dev.sh
+	// for frontend work on a host that already has a production install.
+	// Without this, a dev process running from a repo with a stale
+	// ./gopher.db will reconcile production's rathole config to the dev
+	// DB's contents on startup and silently kill every live tunnel.
+	devMode := flags.Bool("dev", false, "developer mode: skip every system-state write (rathole config, Caddy, sudoers, authorized_keys)")
 	_ = flags.Parse(args)
+
+	if *devMode {
+		service.SetDevMode(true)
+		log.Printf("dev mode active: system writes (rathole config, Caddy, sudoers, authorized_keys) are no-ops")
+	} else {
+		if err := ensurePasswordlessSudoForCurrentUser(); err != nil {
+			log.Printf("Warning: could not configure passwordless sudo automatically: %v", err)
+		}
+	}
 
 	if p, err := strconv.Atoi(*port); err == nil {
 		service.SetDashboardPort(p)
@@ -84,35 +97,39 @@ func runServer(args []string) {
 	go secSvc.SyncFail2banConfig()
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
-	// Drop conf.d/gopher-tunnel-*.caddy orphans BEFORE the first Caddy
-	// reload — otherwise ReconcileMainCaddyfile's reload still sees the
-	// stale files and fails with "ambiguous site definition" when two
-	// orphan files claim the same subdomain.
-	localSvc.ReconcileTunnelCaddyFiles()
-	// Regenerate every tunnel's Caddy file from DB. Self-heals the case
-	// where a previous deploy or manual edit removed a live tunnel's
-	// Caddy file — without this, the dashboard says "tunnel online" but
-	// the subdomain returns SSL errors because Caddy has no upstream
-	// route. Idempotent: matches existing content do nothing.
-	if err := localSvc.ReconcileAllTunnelCaddyBlocks(); err != nil {
-		log.Printf("startup: reconcile tunnel caddy blocks: %v", err)
-	}
-	localSvc.ReconcileMainCaddyfile()
-	localSvc.ReconcileRouterCaddyBlock()
-	// Self-heal upgraded installs: when a binary is swapped without re-running
-	// `gopher install` / scripts/reinstall.sh, the gopher-jump system user may
-	// not exist yet on legacy boxes — without it ReconcileAuthorizedKeys falls
-	// back to the dashboard user (the OLD insecure layout). EnsureJumpboxUser
-	// creates it via sudo useradd; the next reconcile picks it up.
-	localSvc.EnsureJumpboxUser()
-	localSvc.ReconcileAuthorizedKeys()
-	// Re-derive /etc/rathole/server.toml from the DB on every boot. Catches
-	// drift introduced by DB restore from backup, partial writes, or a crash
-	// between a tunnel/machine row delete and the disk reconcile that would
-	// otherwise have followed it. Idempotent — no-op when on-disk already
-	// matches the DB.
-	if err := localSvc.ReconcileServerConfig(); err != nil {
-		log.Printf("startup: failed to reconcile rathole server config: %v", err)
+	if !*devMode {
+		// Drop conf.d/gopher-tunnel-*.caddy orphans BEFORE the first Caddy
+		// reload — otherwise ReconcileMainCaddyfile's reload still sees the
+		// stale files and fails with "ambiguous site definition" when two
+		// orphan files claim the same subdomain.
+		localSvc.ReconcileTunnelCaddyFiles()
+		// Regenerate every tunnel's Caddy file from DB. Self-heals the case
+		// where a previous deploy or manual edit removed a live tunnel's
+		// Caddy file — without this, the dashboard says "tunnel online" but
+		// the subdomain returns SSL errors because Caddy has no upstream
+		// route. Idempotent: matches existing content do nothing.
+		if err := localSvc.ReconcileAllTunnelCaddyBlocks(); err != nil {
+			log.Printf("startup: reconcile tunnel caddy blocks: %v", err)
+		}
+		localSvc.ReconcileMainCaddyfile()
+		localSvc.ReconcileRouterCaddyBlock()
+		// Self-heal upgraded installs: when a binary is swapped without re-running
+		// `gopher install` / scripts/reinstall.sh, the gopher-jump system user may
+		// not exist yet on legacy boxes — without it ReconcileAuthorizedKeys falls
+		// back to the dashboard user (the OLD insecure layout). EnsureJumpboxUser
+		// creates it via sudo useradd; the next reconcile picks it up.
+		localSvc.EnsureJumpboxUser()
+		localSvc.ReconcileAuthorizedKeys()
+		// Re-derive /etc/rathole/server.toml from the DB on every boot. Catches
+		// drift introduced by DB restore from backup, partial writes, or a crash
+		// between a tunnel/machine row delete and the disk reconcile that would
+		// otherwise have followed it. Idempotent — no-op when on-disk already
+		// matches the DB.
+		if err := localSvc.ReconcileServerConfig(); err != nil {
+			log.Printf("startup: failed to reconcile rathole server config: %v", err)
+		}
+	} else {
+		log.Printf("dev mode: skipping rathole/Caddy/sudoers/authorized_keys reconciles")
 	}
 
 	// Bot-protection middleware — runs inside the existing server, no extra port.

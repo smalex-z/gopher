@@ -26,6 +26,23 @@ func SetDashboardPort(port int) {
 	dashboardPort = port
 }
 
+// devMode, when true, makes every system-state mutation in this package a no-op.
+// Set once at startup via SetDevMode when gopher is launched with --dev so a
+// dev process running from a repo with a stale ./gopher.db can't reconcile
+// production's /etc/rathole/server.toml or /etc/caddy/conf.d/* on tunnel
+// create/delete and silently kill every live tunnel.
+var devMode bool
+
+// SetDevMode toggles dev mode for the service package. Idempotent.
+func SetDevMode(on bool) {
+	devMode = on
+}
+
+// DevMode reports whether the service package is running in dev mode.
+func DevMode() bool {
+	return devMode
+}
+
 // TunnelDialHost returns the host Gopher should dial to reach a machine's
 // rathole tunnel port. Private SSH tunnels always bind to 127.0.0.1 so
 // "localhost" is always correct. Public SSH tunnels bind to bind_ip (when set),
@@ -615,6 +632,10 @@ func skipOptionsList(line string) string {
 // Two backends: direct os.WriteFile + os.Rename when the process owns the
 // directory, sudo-tee + sudo-mv when it doesn't.
 func writeLocalFile(path, content string) error {
+	if devMode {
+		log.Printf("dev mode: refusing to write %s (%d bytes)", path, len(content))
+		return nil
+	}
 	// Try direct atomic write first.
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err == nil {
 		tmp := fmt.Sprintf("%s.tmp.%d", path, time.Now().UnixNano())
@@ -666,6 +687,10 @@ func writeLocalFile(path, content string) error {
 // O_CREATE which is exactly what we want: same inode, new content,
 // inotify fires IN_MODIFY, rathole hot-reloads without dropping clients.
 func writeLocalFileInPlace(path, content string) error {
+	if devMode {
+		log.Printf("dev mode: refusing to write %s in place (%d bytes)", path, len(content))
+		return nil
+	}
 	// Direct write first (process owns the file).
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err == nil {
 		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
