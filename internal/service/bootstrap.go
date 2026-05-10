@@ -16,10 +16,23 @@ import (
 
 type BootstrapService struct {
 	local *LocalSetupService
+	// rl throttles the public Register / Migrate endpoints by source IP.
+	// Same shape as the auth login limiter — 10 attempts per 5 minutes
+	// per IP. Random tokens have 64-bit entropy so brute-force is
+	// already impractical, but this caps the rate at which an attacker
+	// can trigger DB-touching codepaths from an unauthenticated endpoint.
+	rl *loginRateLimiter
 }
 
 func NewBootstrapService(local *LocalSetupService) *BootstrapService {
-	return &BootstrapService{local: local}
+	return &BootstrapService{local: local, rl: newLoginRateLimiter()}
+}
+
+// AllowAttempt records a hit from ip and returns false when the rate
+// limiter has tripped. Called from the bootstrap handler before any DB
+// work — short-circuits at the cost of one map lookup.
+func (s *BootstrapService) AllowAttempt(ip string) bool {
+	return s.rl.record(ip)
 }
 
 // GenerateToken creates a one-time bootstrap token valid for 1 hour.

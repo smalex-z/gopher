@@ -79,6 +79,11 @@ func (h *BootstrapHandler) GenerateToken(w http.ResponseWriter, r *http.Request)
 
 // POST /api/bootstrap - called by machines during self-registration
 func (h *BootstrapHandler) Register(w http.ResponseWriter, r *http.Request) {
+	if !h.svc.AllowAttempt(service.ClientIP(r)) {
+		response.Error(w, http.StatusTooManyRequests, "too many bootstrap attempts; try again later")
+		return
+	}
+
 	var req service.BootstrapRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.BadRequest(w, "invalid request body")
@@ -151,6 +156,11 @@ func (h *BootstrapHandler) ServeMigrateScript(w http.ResponseWriter, r *http.Req
 //
 // Symmetric with POST /api/bootstrap, which is called by bootstrap.sh.
 func (h *BootstrapHandler) Migrate(w http.ResponseWriter, r *http.Request) {
+	if !h.svc.AllowAttempt(service.ClientIP(r)) {
+		response.Error(w, http.StatusTooManyRequests, "too many migrate attempts; try again later")
+		return
+	}
+
 	var req struct {
 		Token string `json:"token"`
 	}

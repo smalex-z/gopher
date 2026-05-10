@@ -86,20 +86,20 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	customBlock += endMarker + "\n"
 	newContent := strings.TrimRight(managedConfig, "\n") + "\n\n" + customBlock
 
-	if err := writeLocalFile(configPath, newContent); err != nil {
+	// In-place write (truncate + rewrite, preserving the inode). Critical:
+	// rathole 0.5's notify watcher loses its IN_MODIFY subscription if the
+	// inode is replaced via rename(2) — and a `systemctl reload` would
+	// drop every active tunnel as the listeners restart. With the inode
+	// preserved, inotify fires, rathole's notify watcher hot-reloads the
+	// new config, and existing connections are kept untouched.
+	if err := writeLocalFileInPlace(configPath, newContent); err != nil {
 		return fmt.Errorf("failed to write %s: %w", configPath, err)
 	}
 
-	// rathole's notify watcher picks up the config change via inotify — no
-	// signal or restart needed when it's already running. Sending an extra
-	// SIGHUP causes a second reload ~1s after notify's, which churns every
-	// listener (including the dashboard's own tunnel) twice per machine-add.
-	// systemctl start is a no-op on an active unit; covers the "not running"
-	// case without forcing a restart on healthy ones. The error is logged
-	// rather than propagated because the on-disk config IS already updated
-	// — the caller's intent (DB→disk) succeeded; only the runtime kick
-	// failed, and the next reconcile cycle (or a manual systemctl start)
-	// will pick it up.
+	// systemctl start is a no-op on an active unit; covers the "not
+	// running" case without forcing a restart on healthy ones. Logged
+	// (not propagated) because the on-disk config IS updated — only the
+	// runtime kick failed, and the next reconcile cycle picks it up.
 	if err := systemctlStart("rathole-server"); err != nil {
 		log.Printf("rathole-server start (post-reconcile) failed: %v", err)
 	}
@@ -298,13 +298,18 @@ func (s *LocalSetupService) updateClientTomlViaSSH(machine *db.Machine, transfor
 		_, _ = sshClient.Execute("mkdir -p " + homeDir + "/.config/rathole")
 	}
 
-	if err := sshClient.UploadFileSudo([]byte(updated), configPath, machine.Username); err != nil {
+	// In-place write: rathole's notify watcher subscribes to the inode of
+	// client.toml, so a rename-based install (UploadFileSudo) silently
+	// breaks the subscription and forces a full systemctl restart on
+	// every push — which drops every connected tunnel. UploadFileSudoInPlace
+	// uses `sudo tee` to truncate-and-rewrite, preserving the inode so
+	// rathole hot-reloads the new config without flapping listeners.
+	if err := sshClient.UploadFileSudoInPlace([]byte(updated), configPath, machine.Username); err != nil {
 		return fmt.Errorf("failed to write client.toml on machine: %w", err)
 	}
 
-	// rathole's notify watcher reloads on file change; systemctl start is a
-	// no-op on a healthy unit and covers the "stopped" case without flapping
-	// existing tunnels.
+	// systemctl start is a no-op on a healthy unit and covers the "stopped"
+	// case without flapping existing tunnels.
 	_, _ = sshClient.Execute(`{ [ "$(id -u)" -eq 0 ] && systemctl start rathole-client || sudo -n systemctl start rathole-client; } 2>/dev/null; systemctl --user start rathole-client 2>/dev/null; true`)
 	return nil
 }

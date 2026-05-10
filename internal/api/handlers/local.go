@@ -130,13 +130,21 @@ func (h *LocalHandler) Skip(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, map[string]string{"message": "skipped"})
 }
 
-// POST /api/local/reconcile — rebuild server.toml from DB
+// POST /api/local/reconcile — rebuild server.toml AND every tunnel's
+// Caddy file from DB. The latter recovers from any state where a tunnel
+// row in the DB has no matching Caddy file on disk (e.g. file was deleted
+// out-of-band, or by a buggy orphan sweep on a previous boot).
 func (h *LocalHandler) Reconcile(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.ReconcileServerConfig(); err != nil {
 		response.InternalError(w, err.Error())
 		return
 	}
-	response.Success(w, map[string]string{"message": "server config reconciled"})
+	h.svc.ReconcileTunnelCaddyFiles()
+	if err := h.svc.ReconcileAllTunnelCaddyBlocks(); err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"message": "server config + caddy blocks reconciled"})
 }
 
 type sshKeyWithStats struct {

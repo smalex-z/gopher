@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	osuser "os/user"
+	"path"
 	"runtime"
 	"strings"
 	"time"
@@ -112,6 +115,18 @@ func (s *UpdateService) Apply() error {
 		return fmt.Errorf("no compatible binary found for linux/%s in release %s", runtime.GOARCH, release.TagName)
 	}
 
+	// Locate the SHA256SUMS asset in the same release. We refuse to apply an
+	// update without one — the previous "trust GitHub HTTPS" stance lets a
+	// compromised release process push a malicious binary that every
+	// dashboard auto-installs on next Apply(). The sums asset must be
+	// generated and uploaded by the release pipeline alongside the binary.
+	sumsURL := findChecksumsURL(release)
+	if sumsURL == "" {
+		return fmt.Errorf("release %s has no SHA256SUMS asset; refusing to update without a verifiable checksum (publish a SHA256SUMS file alongside the binary)", release.TagName)
+	}
+
+	httpClient := &http.Client{Timeout: 5 * time.Minute}
+
 	// Download to a temp file
 	tmpFile, err := os.CreateTemp("", "gopher-update-*")
 	if err != nil {
@@ -119,7 +134,6 @@ func (s *UpdateService) Apply() error {
 	}
 	tmpPath := tmpFile.Name()
 
-	httpClient := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := httpClient.Get(downloadURL)
 	if err != nil {
 		tmpFile.Close()
@@ -134,12 +148,26 @@ func (s *UpdateService) Apply() error {
 		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
 
-	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+	// Stream into the temp file while computing SHA256 in parallel.
+	hasher := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmpFile, hasher), resp.Body); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("failed to write update: %w", err)
 	}
 	tmpFile.Close()
+	gotHash := hex.EncodeToString(hasher.Sum(nil))
+
+	// Verify against the published checksums file.
+	wantHash, err := fetchExpectedChecksum(httpClient, sumsURL, downloadURL)
+	if err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("checksum lookup failed: %w", err)
+	}
+	if !strings.EqualFold(gotHash, wantHash) {
+		os.Remove(tmpPath)
+		return fmt.Errorf("checksum mismatch — got %s, want %s — refusing to install", gotHash, wantHash)
+	}
 
 	if err := os.Chmod(tmpPath, 0755); err != nil {
 		os.Remove(tmpPath)
@@ -313,6 +341,60 @@ func fetchLatestReleaseForChannel(channel string) (*githubRelease, error) {
 		return nil, fmt.Errorf("no releases found for channel %q", channel)
 	}
 	return best, nil
+}
+
+// findChecksumsURL looks for a SHA256SUMS-style asset in the release. We
+// accept several common filenames so the release pipeline isn't pinned to
+// one convention.
+func findChecksumsURL(release *githubRelease) string {
+	want := []string{"sha256sums", "sha256sums.txt", "checksums.txt", "checksums.sha256"}
+	for _, asset := range release.Assets {
+		lower := strings.ToLower(asset.Name)
+		for _, w := range want {
+			if lower == w {
+				return asset.BrowserDownloadURL
+			}
+		}
+	}
+	return ""
+}
+
+// fetchExpectedChecksum downloads the SHA256SUMS file and returns the hash
+// for the asset referenced by binaryURL. The sums file is the standard
+// `<hex-sha256>  <filename>` format, two columns separated by whitespace.
+// Lines starting with "#" are skipped. We match by the basename of the
+// binary's URL — release tooling that includes path components would need
+// adjustment.
+func fetchExpectedChecksum(httpClient *http.Client, sumsURL, binaryURL string) (string, error) {
+	resp, err := httpClient.Get(sumsURL)
+	if err != nil {
+		return "", fmt.Errorf("download SHA256SUMS: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("SHA256SUMS HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap on the sums file
+	if err != nil {
+		return "", fmt.Errorf("read SHA256SUMS: %w", err)
+	}
+	target := path.Base(binaryURL)
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		// `sha256sum -b` writes "*<filename>"; strip the leading marker.
+		name := strings.TrimPrefix(fields[1], "*")
+		if name == target || path.Base(name) == target {
+			return fields[0], nil
+		}
+	}
+	return "", fmt.Errorf("no entry for %s in SHA256SUMS", target)
 }
 
 // findAssetURL looks for a Linux binary asset matching the current architecture.

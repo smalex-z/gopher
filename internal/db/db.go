@@ -3,7 +3,11 @@ package db
 import (
 	"embed"
 	"fmt"
+	"io"
 	"log"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,6 +36,14 @@ func applyPragmas(dsn string) string {
 }
 
 func Initialize(dsn string) error {
+	// Snapshot the DB file before AutoMigrate / SQL migrations touch it.
+	// This is the safety net for an upgrade with a buggy migration —
+	// operators can swap the .bak.<ts> file back into place via the
+	// existing BackupService.Restore upload endpoint.
+	if err := backupBeforeMigrate(dsn); err != nil {
+		log.Printf("WARN: pre-migrate backup failed: %v (continuing — migration may still succeed)", err)
+	}
+
 	var err error
 	DB, err = gorm.Open(sqlite.Open(applyPragmas(dsn)), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Warn),
@@ -304,4 +316,128 @@ func isDuplicateColumnErr(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "duplicate column name:")
+}
+
+// dbBackupRetention is how many pre-migrate snapshots we keep. Older ones
+// are pruned at the end of backupBeforeMigrate so the DB directory doesn't
+// grow without bound — N is small because each backup is a copy of the
+// whole DB and Gopher's DB is typically <100 KiB but can grow with
+// per-tunnel health-check rows.
+const dbBackupRetention = 5
+
+// backupBeforeMigrate copies the on-disk SQLite file to
+// `<dsn>.bak.<UTC timestamp>` before AutoMigrate or SQL migrations get a
+// chance to mutate it. Skips silently when:
+//   - the dsn isn't a regular file path (e.g., `:memory:` / `file:?mode=memory`
+//     used by tests)
+//   - the file doesn't exist yet (fresh install — nothing to back up)
+//
+// Errors are returned to the caller, which logs+continues — a failed
+// backup is not a reason to refuse to start the daemon, but it IS a reason
+// to surface a warning so the operator notices.
+func backupBeforeMigrate(dsn string) error {
+	src := dsnFilePath(dsn)
+	if src == "" {
+		return nil
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat db: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+
+	ts := time.Now().UTC().Format("20060102-150405")
+	dst := fmt.Sprintf("%s.bak.%s", src, ts)
+	if err := copyFile(src, dst); err != nil {
+		return fmt.Errorf("copy %s → %s: %w", src, dst, err)
+	}
+	log.Printf("pre-migrate backup written: %s (%d bytes)", dst, info.Size())
+
+	// Prune older backups so the directory doesn't accumulate forever.
+	if err := pruneOldBackups(src, dbBackupRetention); err != nil {
+		log.Printf("WARN: backup retention prune failed: %v", err)
+	}
+	return nil
+}
+
+// dsnFilePath strips DSN query parameters and returns the path part — but
+// only when it looks like a real file. Returns "" for in-memory DBs or
+// SQLite URI forms we can't safely copy as a flat file.
+func dsnFilePath(dsn string) string {
+	// Strip query string.
+	path := dsn
+	if i := strings.Index(path, "?"); i >= 0 {
+		path = path[:i]
+	}
+	// SQLite supports a `file:` URI prefix; strip it for a regular path.
+	path = strings.TrimPrefix(path, "file:")
+	if path == "" || path == ":memory:" {
+		return ""
+	}
+	// Heuristic: an in-memory shared cache DSN looks like `Test:foo` after
+	// stripping query, with no path separator. Skip anything that doesn't
+	// look like a real filesystem path.
+	if !strings.ContainsAny(path, "/.") {
+		return ""
+	}
+	return path
+}
+
+// copyFile is a stream copy with sync — flushes to disk before returning so
+// the backup is durable even if the caller crashes immediately after.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	return out.Close()
+}
+
+// pruneOldBackups keeps the keep most-recent `<base>.bak.*` files in the
+// same directory and deletes the rest. Newest-first ordering is by
+// filename — the timestamp suffix sorts lexicographically.
+func pruneOldBackups(base string, keep int) error {
+	dir := filepath.Dir(base)
+	prefix := filepath.Base(base) + ".bak."
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), prefix) {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) <= keep {
+		return nil
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	for _, n := range names[keep:] {
+		_ = os.Remove(filepath.Join(dir, n))
+	}
+	return nil
 }

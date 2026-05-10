@@ -601,10 +601,16 @@ func skipOptionsList(line string) string {
 }
 
 // writeLocalFile atomically writes content to path. Writes to a sibling
-// `<path>.tmp.<nano>` first, then renames into place — readers (rathole's
-// notify watcher, Caddy reload) only ever see a fully-written file. A
-// power loss or kill mid-write leaves the temp file behind for the next
-// run to clobber, never a truncated config that fails to parse.
+// `<path>.tmp.<nano>` first, then renames into place — readers (Caddy reload,
+// fail2ban-client reload) only ever see a fully-written file. A power loss
+// or kill mid-write leaves the temp file behind for the next run to
+// clobber, never a truncated config that fails to parse.
+//
+// IMPORTANT: do NOT use this for files watched by an inotify-based hot
+// reloader (rathole's notify watcher in particular). The rename(2) replaces
+// the target's inode, which silently invalidates the watcher's IN_MODIFY
+// subscription. Use writeLocalFileInPlace for those — see the rathole
+// server.toml call site in local_rathole.go.
 //
 // Two backends: direct os.WriteFile + os.Rename when the process owns the
 // directory, sudo-tee + sudo-mv when it doesn't.
@@ -640,6 +646,52 @@ func writeLocalFile(path, content string) error {
 	if err := exec.Command("sudo", "mv", tmp, path).Run(); err != nil { // #nosec G204
 		_ = exec.Command("sudo", "rm", "-f", tmp).Run() // #nosec G204
 		return fmt.Errorf("atomic install of %s failed: %w", path, err)
+	}
+	return nil
+}
+
+// writeLocalFileInPlace truncates and rewrites path, preserving the inode.
+// Use for files watched by inotify hot-reloaders (rathole 0.5's notify
+// watcher) — `writeLocalFile`'s rename(2) silently invalidates the
+// watcher's subscription, so a reload via systemctl is the only way the
+// new config takes effect, and that drops every active rathole tunnel.
+//
+// The trade-off is a narrow torn-write window: a kill between truncate
+// and the final fsync leaves a partial file. For rathole's small server
+// config (a few KB) this is sub-millisecond and the pre-migrate DB
+// backup gives a recovery path; for client.toml on remote machines the
+// agent / SSH push lands the full content in a single write syscall.
+//
+// `tee /path` (without redirect to a temp) opens with O_TRUNC|O_WRONLY|
+// O_CREATE which is exactly what we want: same inode, new content,
+// inotify fires IN_MODIFY, rathole hot-reloads without dropping clients.
+func writeLocalFileInPlace(path, content string) error {
+	// Direct write first (process owns the file).
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err == nil {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err == nil {
+			if _, werr := f.WriteString(content); werr == nil {
+				if serr := f.Sync(); serr == nil {
+					_ = f.Close()
+					return nil
+				}
+			}
+			_ = f.Close()
+		}
+	}
+	// Sudo fallback. `sudo tee <path>` truncates and writes in place,
+	// preserving the inode. Discard stdout (tee echoes the input).
+	dir := filepath.Dir(path)
+	if err := exec.Command("sudo", "mkdir", "-p", dir).Run(); err != nil { // #nosec G204
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+	cmd := exec.Command("sudo", "tee", path) // #nosec G204
+	cmd.Stdin = strings.NewReader(content)
+	cmd.Stdout = io.Discard
+	var errBuf strings.Builder
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(errBuf.String()))
 	}
 	return nil
 }
@@ -844,9 +896,27 @@ func (s *LocalSetupService) reconcileAllTunnelCaddyBlocks(settings *db.AppSettin
 		reloaded = true
 	}
 	if reloaded {
-		_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
+		if err := systemctlReload("caddy"); err != nil {
+			log.Printf("reconcile all tunnel caddy: caddy reload failed: %v", err)
+		}
 	}
 	return nil
+}
+
+// ReconcileAllTunnelCaddyBlocks is the public entry point used by startup
+// and by /api/local/reconcile. Regenerates every tunnel's Caddy file from
+// the DB so missing files (deleted out-of-band, or wrongly cleaned up by
+// the orphan sweep on a previous boot) get recreated. Idempotent: writes
+// are no-ops when the on-disk content already matches.
+//
+// Returns nil silently when there's no Domain configured (skipCaddy
+// installs) — there's nothing to reconcile in that case.
+func (s *LocalSetupService) ReconcileAllTunnelCaddyBlocks() error {
+	settings, err := db.GetSettings()
+	if err != nil {
+		return err
+	}
+	return s.reconcileAllTunnelCaddyBlocks(settings)
 }
 
 // SetDashboardPrivate persists the dashboard port visibility setting and applies

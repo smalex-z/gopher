@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/smalex-z/gopher/internal/api"
+	"github.com/smalex-z/gopher/internal/api/handlers"
 	"github.com/smalex-z/gopher/internal/db"
 	"github.com/smalex-z/gopher/internal/proxy"
 	"github.com/smalex-z/gopher/internal/service"
@@ -88,6 +89,14 @@ func runServer(args []string) {
 	// stale files and fails with "ambiguous site definition" when two
 	// orphan files claim the same subdomain.
 	localSvc.ReconcileTunnelCaddyFiles()
+	// Regenerate every tunnel's Caddy file from DB. Self-heals the case
+	// where a previous deploy or manual edit removed a live tunnel's
+	// Caddy file — without this, the dashboard says "tunnel online" but
+	// the subdomain returns SSL errors because Caddy has no upstream
+	// route. Idempotent: matches existing content do nothing.
+	if err := localSvc.ReconcileAllTunnelCaddyBlocks(); err != nil {
+		log.Printf("startup: reconcile tunnel caddy blocks: %v", err)
+	}
 	localSvc.ReconcileMainCaddyfile()
 	localSvc.ReconcileRouterCaddyBlock()
 	// Self-heal upgraded installs: when a binary is swapped without re-running
@@ -147,6 +156,11 @@ func runServer(args []string) {
 	// longest-prefix match, so the agents handler wins for that subtree.
 	mux.Handle("/static/agents/", http.StripPrefix("/static/agents/", agentsHandler()))
 	mux.Handle("/static/", router)
+	// Top-level liveness probe. Lives outside the chi /api group so external
+	// monitors can hit a stable canonical path without auth. ServeMux's
+	// "/healthz" pattern matches the exact path and beats the catch-all "/"
+	// SPA handler below.
+	mux.HandleFunc("/healthz", handlers.HealthzHandler)
 
 	distFS, err := fs.Sub(frontendDist, "frontend/dist")
 	if err != nil {
