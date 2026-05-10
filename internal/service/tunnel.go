@@ -3,7 +3,6 @@ package service
 import (
 	"fmt"
 	"log"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -328,8 +327,8 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 			block := buildTunnelCaddyBlock(tunnel.Subdomain, svcSettings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, svcSettings.BindIP, tunnel.TLSSkipVerify)
 			if writeErr := writeLocalFile(managedPath, block); writeErr != nil {
 				log.Printf("tunnel update: failed to rewrite Caddy block for %s: %v", tunnel.ID, writeErr)
-			} else {
-				_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
+			} else if reloadErr := systemctlReload("caddy"); reloadErr != nil {
+				log.Printf("tunnel update: caddy reload failed for %s: %v", tunnel.ID, reloadErr)
 			}
 		}
 	}

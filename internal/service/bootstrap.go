@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/smalex-z/gopher/internal/config"
@@ -67,8 +68,12 @@ const agentLocalPortDefault = 4322
 // Register validates token, provisions a machine, adds the SSH back-tunnel
 // to /etc/rathole/server.toml, and returns the rathole client config.
 func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*BootstrapResponse, error) {
-	bt, err := db.GetBootstrapToken(req.Token)
-	if err != nil || bt.UsedAt != nil || time.Now().After(bt.ExpiresAt) {
+	// ClaimBootstrapToken atomically marks the token used: two parallel
+	// Register calls with the same token can't both proceed past this point.
+	// The token row's machine_id is populated below once CreateMachine
+	// succeeds (BindBootstrapTokenToMachine).
+	bt, err := db.ClaimBootstrapToken(req.Token)
+	if err != nil {
 		return nil, fmt.Errorf("invalid or expired token")
 	}
 
@@ -105,64 +110,26 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		}
 	}
 
-	var tunnelPort int
-	if bt.TunnelPort != 0 {
-		exists, portErr := db.CheckRatholePortExists(bt.TunnelPort)
-		if portErr != nil {
-			return nil, fmt.Errorf("failed to check port availability: %w", portErr)
-		}
-		if exists {
-			return nil, fmt.Errorf("port %d is already in use by another tunnel", bt.TunnelPort)
-		}
-		tunnelPort = bt.TunnelPort
-	} else {
-		tunnelPort, err = db.NextRatholePort()
-		if err != nil {
-			return nil, fmt.Errorf("failed to allocate tunnel port: %w", err)
-		}
-	}
-
 	ratholeToken := shortToken()
+	agentToken := shortToken()        // bearer token for HTTP auth
+	agentRatholeToken := shortToken() // rathole-tunnel auth (separate)
 
-	// Allocate the agent back-channel up front. Pass tunnelPort to exclude
-	// it from consideration: the SSH tunnel port we just picked isn't in
-	// the DB yet (we haven't created the Machine row), so without the
-	// exclude both calls would return the same port and rathole-server
-	// would try to bind two services to the same address.
-	//
-	// Even if the bootstrap script fails to install the agent (older script,
-	// network glitch), we keep the fields populated so the existing-machine
-	// migration tool can complete it.
-	agentRemotePort, err := db.NextRatholePort(tunnelPort)
+	// Allocate ports + create the machine row inside a retry loop. Two
+	// concurrent bootstrap requests can both pick the same port via
+	// NextRatholePort (which doesn't lock); the partial unique indexes on
+	// machines.tunnel_port and machines.agent_remote_port catch the second
+	// INSERT and we re-pick the next gap.
+	machine, err := allocatePortsAndCreateMachine(req, bt, sshKey, ratholeToken, agentToken, agentRatholeToken)
 	if err != nil {
-		return nil, fmt.Errorf("failed to allocate agent port: %w", err)
-	}
-	agentToken := shortToken()         // bearer token for HTTP auth
-	agentRatholeToken := shortToken()  // rathole-tunnel auth (separate)
-
-	machine := &db.Machine{
-		ID:                shortToken(),
-		Name:              req.Name,
-		Username:          req.Username,
-		TunnelPort:        tunnelPort,
-		RatholeSSHToken:   ratholeToken,
-		SSHKeyID:          sshKey.ID,
-		PublicSSH:         bt.PublicSSH,
-		Status:            "pending",
-		AgentToken:        agentToken,
-		AgentLocalPort:    agentLocalPortDefault,
-		AgentRemotePort:   agentRemotePort,
-		AgentRatholeToken: agentRatholeToken,
-		AgentInstalled:    false,
-		CreatedAt:         time.Now(),
-		UpdatedAt:         time.Now(),
-	}
-	if err := db.CreateMachine(machine); err != nil {
-		return nil, fmt.Errorf("failed to create machine: %w", err)
+		return nil, err
 	}
 	db.LogEvent("machine_registered", machine.ID, machine.Name)
-	if err := db.MarkTokenUsed(bt.ID, machine.ID); err != nil {
-		return nil, fmt.Errorf("failed to mark token used: %w", err)
+	// Token was already marked used atomically by ClaimBootstrapToken; just
+	// fill in machine_id so the FK back-reference is set. A failure here is
+	// non-fatal: the machine exists, the token is unreusable, the only loss
+	// is the token→machine pointer which the dashboard doesn't depend on.
+	if err := db.BindBootstrapTokenToMachine(bt.ID, machine.ID); err != nil {
+		fmt.Printf("WARN: failed to bind bootstrap token %s to machine %s: %v\n", bt.ID, machine.ID, err)
 	}
 
 	// Add rathole service entry so the tunnel port opens immediately.
@@ -182,23 +149,106 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 	ratholeConfig := config.GenerateMachineSSHClientConfig(ratholeHost, machine)
 
 	// Async: wait for tunnel then verify SSH connectivity.
-	go s.awaitSSHHealth(machine, sshKey.PrivateKey)
+	go goSafe("awaitSSHHealth", func() { s.awaitSSHHealth(machine, sshKey.PrivateKey) })
 	// Async: poll the agent's back-channel until it answers, so the bootstrap
 	// modal can flip "machine registered" → "agent ready" within seconds of
 	// the agent service starting on the client (vs. waiting up to a minute
 	// for the next health-poll cycle).
-	go s.awaitAgentReady(machine)
+	go goSafe("awaitAgentReady", func() { s.awaitAgentReady(machine) })
 
 	return &BootstrapResponse{
-		TunnelPort:      tunnelPort,
+		TunnelPort:      machine.TunnelPort,
 		RatholeToken:    ratholeToken,
 		VPSPublicKey:    sshKey.PublicKey,
 		RatholeConfig:   ratholeConfig,
 		VPSHost:         ratholeHost,
 		AgentToken:      agentToken,
 		AgentLocalPort:  agentLocalPortDefault,
-		AgentRemotePort: agentRemotePort,
+		AgentRemotePort: machine.AgentRemotePort,
 	}, nil
+}
+
+// allocatePortsAndCreateMachine performs the port-pick + INSERT under a retry
+// loop bounded by the partial unique indexes on machines.tunnel_port and
+// machines.agent_remote_port. NextRatholePort is a non-locking SELECT, so two
+// concurrent bootstraps can both pick the same gap; the second INSERT trips
+// the unique constraint and we re-scan for a fresh gap. Capped at a few
+// attempts so a runaway scan can't busy-loop the DB.
+func allocatePortsAndCreateMachine(req BootstrapRequest, bt *db.BootstrapToken, sshKey *db.SSHKey, ratholeToken, agentToken, agentRatholeToken string) (*db.Machine, error) {
+	const maxAttempts = 5
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		var tunnelPort int
+		if bt.TunnelPort != 0 {
+			// Token pinned a port. We can't re-pick on conflict — fail
+			// immediately if it's taken (the operator picked a port that's
+			// already in use, that's a config error not a race).
+			exists, portErr := db.CheckRatholePortExists(bt.TunnelPort)
+			if portErr != nil {
+				return nil, fmt.Errorf("failed to check port availability: %w", portErr)
+			}
+			if exists {
+				return nil, fmt.Errorf("port %d is already in use by another tunnel", bt.TunnelPort)
+			}
+			tunnelPort = bt.TunnelPort
+		} else {
+			var err error
+			tunnelPort, err = db.NextRatholePort()
+			if err != nil {
+				return nil, fmt.Errorf("failed to allocate tunnel port: %w", err)
+			}
+		}
+
+		// Pass tunnelPort to exclude it from the agent allocation: the SSH
+		// tunnel port we just picked isn't in the DB yet, so without the
+		// exclude both calls would return the same port and rathole-server
+		// would try to bind two services to the same address.
+		agentRemotePort, err := db.NextRatholePort(tunnelPort)
+		if err != nil {
+			return nil, fmt.Errorf("failed to allocate agent port: %w", err)
+		}
+
+		machine := &db.Machine{
+			ID:                shortToken(),
+			Name:              req.Name,
+			Username:          req.Username,
+			TunnelPort:        tunnelPort,
+			RatholeSSHToken:   ratholeToken,
+			SSHKeyID:          sshKey.ID,
+			PublicSSH:         bt.PublicSSH,
+			Status:            "pending",
+			AgentToken:        agentToken,
+			AgentLocalPort:    agentLocalPortDefault,
+			AgentRemotePort:   agentRemotePort,
+			AgentRatholeToken: agentRatholeToken,
+			AgentInstalled:    false,
+			CreatedAt:         time.Now(),
+			UpdatedAt:         time.Now(),
+		}
+		if err := db.CreateMachine(machine); err != nil {
+			lastErr = err
+			// SQLite reports "UNIQUE constraint failed: machines.tunnel_port"
+			// (or .agent_remote_port) when our partial indexes catch a race.
+			// Retry — NextRatholePort will skip the now-claimed port.
+			if isUniqueConstraintErr(err) {
+				continue
+			}
+			return nil, fmt.Errorf("failed to create machine: %w", err)
+		}
+		return machine, nil
+	}
+	return nil, fmt.Errorf("failed to allocate machine ports after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// isUniqueConstraintErr probes the SQLite error string for the unique-violation
+// signature. We don't have a typed error from the driver here, so we fall back
+// to a stable substring match.
+func isUniqueConstraintErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") || strings.Contains(msg, "constraint failed: unique")
 }
 
 const bootstrapSSHHealthTimeout = 4 * time.Minute

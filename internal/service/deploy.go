@@ -3,12 +3,28 @@ package service
 import (
 	"fmt"
 	"io"
+	"log"
 	"sync"
+	"time"
 
-	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
+
+// Sentinel messages broadcast by LogHub at the end of a streamed operation.
+// The dashboard treats either of these as "log stream complete" and closes
+// the modal; without them the modal hangs. They get blocking delivery
+// semantics in Broadcast (see broadcastSentinel) so a slow subscriber can't
+// silently drop them and leave the dashboard waiting forever.
+const (
+	logSentinelDone  = "\x00DONE"
+	logSentinelError = "\x00ERROR"
+)
+
+// sentinelDeliveryTimeout caps how long we'll wait for a single subscriber
+// to accept a sentinel before giving up on it. Per-subscriber, not global —
+// slow subscribers don't block fast ones.
+const sentinelDeliveryTimeout = 3 * time.Second
 
 type LogHub struct {
 	mu          sync.RWMutex
@@ -36,7 +52,17 @@ func (h *LogHub) Unsubscribe(ch chan string) {
 	close(ch)
 }
 
+// Broadcast delivers msg to every current subscriber. Regular log lines use
+// non-blocking sends so a slow client can't head-of-line-block the broadcast
+// (lost log lines on a 100-buffer overflow are acceptable). Sentinels
+// (\x00DONE / \x00ERROR) are routed through a blocking-with-timeout path
+// because losing them leaves the dashboard modal waiting indefinitely on a
+// stream that has actually finished.
 func (h *LogHub) Broadcast(msg string) {
+	if msg == logSentinelDone || msg == logSentinelError {
+		h.broadcastSentinel(msg)
+		return
+	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for ch := range h.subscribers {
@@ -45,6 +71,37 @@ func (h *LogHub) Broadcast(msg string) {
 		default:
 		}
 	}
+}
+
+// broadcastSentinel delivers msg to every subscriber with a per-subscriber
+// timeout. Subscribers are dispatched in parallel so a single slow one
+// doesn't delay delivery to the rest. After the timeout, the sentinel is
+// dropped for that subscriber and a warning is logged — the WebSocket will
+// eventually be torn down by Unsubscribe when the handler returns, so the
+// damage is bounded to "this one slow client never sees DONE."
+func (h *LogHub) broadcastSentinel(msg string) {
+	h.mu.RLock()
+	subs := make([]chan string, 0, len(h.subscribers))
+	for ch := range h.subscribers {
+		subs = append(subs, ch)
+	}
+	h.mu.RUnlock()
+
+	var wg sync.WaitGroup
+	for _, ch := range subs {
+		wg.Add(1)
+		go func(c chan string) {
+			defer wg.Done()
+			t := time.NewTimer(sentinelDeliveryTimeout)
+			defer t.Stop()
+			select {
+			case c <- msg:
+			case <-t.C:
+				log.Printf("LogHub: dropping sentinel %q for slow subscriber after %s", msg, sentinelDeliveryTimeout)
+			}
+		}(ch)
+	}
+	wg.Wait()
 }
 
 type hubWriter struct {
@@ -81,57 +138,6 @@ func (s *DeployService) Bootstrap(vpsConfig *db.VPSConfig) error {
 	defer client.Close()
 
 	err = sshpkg.BootstrapVPS(client, w)
-	s.Hub.Broadcast("\x00DONE")
-	return err
-}
-
-func (s *DeployService) DeployVPS(vpsConfig *db.VPSConfig) error {
-	w := s.logWriter()
-	tunnels, err := db.GetAllTunnelsForVPS()
-	if err != nil {
-		fmt.Fprintf(w, "ERROR: Failed to get tunnels: %v\n", err)
-		s.Hub.Broadcast("\x00DONE")
-		return err
-	}
-
-	caddyfile, err := config.GenerateCaddyfile(*vpsConfig, tunnels)
-	if err != nil {
-		fmt.Fprintf(w, "ERROR: Failed to generate Caddyfile: %v\n", err)
-		s.Hub.Broadcast("\x00DONE")
-		return err
-	}
-
-	machines, err := db.GetMachines()
-	if err != nil {
-		fmt.Fprintf(w, "ERROR: Failed to get machines: %v\n", err)
-		s.Hub.Broadcast("\x00DONE")
-		return err
-	}
-
-	// Generate config from database (always regenerate from scratch)
-	ratholeConfig := config.GenerateRatholeServerConfig(machines, tunnels)
-
-	// Validate generated config against database state
-	validation := config.ValidateRatholeConfig(ratholeConfig, machines, tunnels)
-	if !validation.Valid {
-		fmt.Fprintf(w, "ERROR: Config validation failed. Not deploying invalid config:\n")
-		for _, vErr := range validation.Errors {
-			fmt.Fprintf(w, "  - %s\n", vErr)
-		}
-		s.Hub.Broadcast("\x00DONE")
-		return fmt.Errorf("config validation failed")
-	}
-
-	// Proceed with deployment
-	client, err := sshpkg.NewClient(vpsConfig.Host, vpsConfig.Port, vpsConfig.Username, vpsConfig.PrivateKey)
-	if err != nil {
-		fmt.Fprintf(w, "ERROR: Failed to connect: %v\n", err)
-		s.Hub.Broadcast("\x00DONE")
-		return err
-	}
-	defer client.Close()
-
-	err = sshpkg.DeployVPS(client, caddyfile, ratholeConfig, w)
 	s.Hub.Broadcast("\x00DONE")
 	return err
 }

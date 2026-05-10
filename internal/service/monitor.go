@@ -4,19 +4,27 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/smalex-z/gopher/internal/db"
 )
 
-type MonitorService struct{}
+type MonitorService struct {
+	startOnce sync.Once
+}
 
 func NewMonitorService() *MonitorService {
 	return &MonitorService{}
 }
 
+// Start launches the polling goroutine. Idempotent — repeat calls are no-ops
+// so a misordered startup sequence can't end up with two monitors writing
+// the same machine status rows in parallel.
 func (s *MonitorService) Start() {
-	go s.run()
+	s.startOnce.Do(func() {
+		go goSafe("monitor.run", s.run)
+	})
 }
 
 func (s *MonitorService) run() {
@@ -41,7 +49,8 @@ func (s *MonitorService) checkMachines() {
 		return
 	}
 	for _, machine := range machines {
-		go s.checkMachine(machine)
+		m := machine
+		go goSafe("monitor.checkMachine", func() { s.checkMachine(m) })
 	}
 }
 
@@ -107,7 +116,8 @@ func (s *MonitorService) checkTunnels() {
 		return
 	}
 	for _, t := range tunnels {
-		go s.checkTunnel(t)
+		tunnel := t
+		go goSafe("monitor.checkTunnel", func() { s.checkTunnel(tunnel) })
 	}
 }
 

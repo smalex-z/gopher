@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/smalex-z/gopher/internal/db"
@@ -44,7 +43,9 @@ func (s *LocalSetupService) ReconcileRouterCaddyBlock() {
 		log.Printf("startup: failed to reconcile router Caddy block: %v", err)
 		return
 	}
-	_ = exec.Command("sudo", "systemctl", "reload-or-restart", "caddy").Run() // #nosec G204
+	if err := systemctlReloadOrRestart("caddy"); err != nil {
+		log.Printf("startup: caddy reload-or-restart failed: %v", err)
+	}
 }
 
 func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool, botProtected bool, bindIP string, tlsSkipVerify bool) string {
@@ -77,6 +78,17 @@ func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool
 	return fmt.Sprintf("%s%s.%s {\n    reverse_proxy %s:%d\n}\n", scheme, subdomain, domain, upstream, upstreamPort)
 }
 
+// caddyCustomHeaderLines are the boilerplate comment lines we emit inside
+// the custom-section markers. Listed here so extractCaddyCustomBody can
+// strip them when re-reading existing files — without that, every rewrite
+// of the Caddyfile would re-add the header lines and never remove the old
+// ones, accumulating dozens of "Everything below this line..." comments
+// over many reconciles.
+var caddyCustomHeaderLines = []string{
+	"# Everything below this line will NOT be overwritten.",
+	"# Add your own Caddy site blocks here.",
+}
+
 func extractCaddyCustomBody(content string) string {
 	bIdx := strings.Index(content, caddyCustomBeginMark)
 	if bIdx == -1 {
@@ -84,15 +96,49 @@ func extractCaddyCustomBody(content string) string {
 	}
 	below := content[bIdx+len(caddyCustomBeginMark):]
 	eIdx := strings.Index(below, caddyCustomEndMark)
+	var inner string
 	if eIdx == -1 {
-		return strings.TrimSpace(below)
+		inner = below
+	} else {
+		inner = below[:eIdx]
 	}
-	return strings.TrimSpace(below[:eIdx])
+	return stripCaddyCustomHeader(inner)
+}
+
+// stripCaddyCustomHeader removes any leading occurrences of the boilerplate
+// comment lines we emit inside the custom-section markers. Tolerates blank
+// lines between repeated header copies (the prior bug accumulated stacks of
+// header lines, and we want to fully clean those up on the next reconcile).
+func stripCaddyCustomHeader(s string) string {
+	lines := strings.Split(s, "\n")
+	i := 0
+	headerSet := make(map[string]struct{}, len(caddyCustomHeaderLines))
+	for _, h := range caddyCustomHeaderLines {
+		headerSet[h] = struct{}{}
+	}
+	for i < len(lines) {
+		t := strings.TrimSpace(lines[i])
+		if t == "" {
+			i++
+			continue
+		}
+		if _, ok := headerSet[t]; ok {
+			i++
+			continue
+		}
+		break
+	}
+	return strings.TrimSpace(strings.Join(lines[i:], "\n"))
 }
 
 func buildManagedCaddyfile(existing, bindIP string) string {
 	customBody := extractCaddyCustomBody(existing)
-	if customBody == "" && strings.TrimSpace(existing) != "" {
+	if customBody == "" && strings.TrimSpace(existing) != "" && !strings.Contains(existing, caddyCustomBeginMark) {
+		// Legacy file with no markers — treat the whole thing as user content.
+		// Don't fall back to whole-file content when markers are present:
+		// extractCaddyCustomBody already returned "" because the section was
+		// genuinely empty, and falling back here would scoop the entire
+		// generated header back into the custom section.
 		customBody = strings.TrimSpace(existing)
 	}
 
@@ -112,8 +158,9 @@ func buildManagedCaddyfile(existing, bindIP string) string {
 	}
 	out.WriteString("import /etc/caddy/conf.d/*.caddy\n\n")
 	out.WriteString(caddyCustomBeginMark + "\n")
-	out.WriteString("# Everything below this line will NOT be overwritten.\n")
-	out.WriteString("# Add your own Caddy site blocks here.\n")
+	for _, h := range caddyCustomHeaderLines {
+		out.WriteString(h + "\n")
+	}
 	if customBody != "" {
 		out.WriteString(customBody + "\n")
 	}
@@ -146,7 +193,70 @@ func (s *LocalSetupService) ReconcileMainCaddyfile() {
 		log.Printf("reconcile main Caddyfile: %v", err)
 		return
 	}
-	_ = exec.Command("sudo", "systemctl", "reload-or-restart", "caddy").Run() // #nosec G204
+	if err := systemctlReloadOrRestart("caddy"); err != nil {
+		log.Printf("reconcile main Caddyfile: caddy reload-or-restart failed: %v", err)
+	}
+}
+
+// ReconcileTunnelCaddyFiles drops conf.d/gopher-tunnel-<id>.caddy files whose
+// tunnel ID is no longer in the DB. Without this sweep, tunnels deleted while
+// the dashboard was offline (or whose RemoveServiceTunnelCaddy call failed
+// silently in older versions) leave their per-subdomain Caddy block on disk
+// forever — and a subsequent tunnel reusing the same subdomain produces the
+// "ambiguous site definition" error that blocks every Caddy reload.
+//
+// Called once at startup. Idempotent — files belonging to live tunnels are
+// untouched, the gopher-router.caddy is preserved (its filename has no tunnel
+// ID), and an empty conf.d directory is a no-op.
+func (s *LocalSetupService) ReconcileTunnelCaddyFiles() {
+	if !isCommandAvailable("caddy") {
+		return
+	}
+	entries, err := os.ReadDir(caddyManagedDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("reconcile tunnel caddy files: read %s: %v", caddyManagedDir, err)
+		}
+		return
+	}
+
+	tunnels, err := db.GetTunnels()
+	if err != nil {
+		log.Printf("reconcile tunnel caddy files: load tunnels: %v", err)
+		return
+	}
+	live := make(map[string]struct{}, len(tunnels))
+	for _, t := range tunnels {
+		live[t.ID] = struct{}{}
+	}
+
+	const prefix = "gopher-tunnel-"
+	const suffix = ".caddy"
+	removed := 0
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		id := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+		if _, ok := live[id]; ok {
+			continue
+		}
+		path := caddyManagedDir + "/" + name
+		if err := os.Remove(path); err != nil {
+			if rerr := runSudoCommand("rm", "-f", path); rerr != nil {
+				log.Printf("reconcile tunnel caddy files: remove %s: %v / sudo: %v", path, err, rerr)
+				continue
+			}
+		}
+		log.Printf("reconcile tunnel caddy files: removed orphan %s", name)
+		removed++
+	}
+	if removed > 0 {
+		if err := systemctlReloadOrRestart("caddy"); err != nil {
+			log.Printf("reconcile tunnel caddy files: caddy reload-or-restart failed: %v", err)
+		}
+	}
 }
 
 // removeCaddyBlock removes a top-level site block that starts with "host {".

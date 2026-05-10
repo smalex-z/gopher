@@ -121,6 +121,16 @@ func (s *BackupService) Restore(r io.Reader) error {
 	// Schedule restart after a short delay so the HTTP response can flush.
 	// gopher.service is configured with Restart=always, so systemd brings us
 	// back up automatically.
+	//
+	// We deliberately use os.Exit(0) on systemctl-restart failure rather
+	// than http.Server.Shutdown(): the DB file has already been swapped on
+	// disk, so the in-memory GORM connection pool now points at a different
+	// file than the one open. Continuing to serve requests against the old
+	// pool would write stale data to the new DB and risk corruption. Hard
+	// exit + systemd restart re-opens the DB cleanly. In-flight HTTP
+	// requests are dropped, which is a UX regression but not a data
+	// regression — every write is committed before this point or rolled
+	// back when the connection dies.
 	go func() {
 		time.Sleep(750 * time.Millisecond)
 		args := append(append([]string{}, privilegedCmdPrefix()...), "systemctl", "restart", "gopher")

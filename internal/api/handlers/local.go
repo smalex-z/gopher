@@ -37,8 +37,40 @@ func (h *LocalHandler) Status(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, status)
 }
 
+// guardSetupOnly rejects the request with 403 when setup has already
+// progressed past the point where the endpoint makes sense. Used to lock
+// down the public first-run wizard endpoints once the operator has finished
+// them — otherwise anyone on the network could re-trigger the install or
+// flip firewall mode after setup completes.
+//
+// step is one of: "install" (blocks once LocalSetupDone is true) or
+// "firewall" (blocks once FirewallMode is non-empty).
+func guardSetupOnly(w http.ResponseWriter, step string) bool {
+	settings, err := db.GetSettings()
+	if err != nil {
+		response.InternalError(w, "failed to load settings")
+		return false
+	}
+	switch step {
+	case "install":
+		if settings.LocalSetupDone {
+			response.Error(w, http.StatusForbidden, "setup already complete")
+			return false
+		}
+	case "firewall":
+		if settings.FirewallMode != "" {
+			response.Error(w, http.StatusForbidden, "firewall already configured")
+			return false
+		}
+	}
+	return true
+}
+
 // POST /api/local/install
 func (h *LocalHandler) Install(w http.ResponseWriter, r *http.Request) {
+	if !guardSetupOnly(w, "install") {
+		return
+	}
 	var body struct {
 		Domain     string `json:"domain"`
 		ServerHost string `json:"server_host"`
@@ -68,6 +100,9 @@ func (h *LocalHandler) SetupFail2ban(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/local/skip
 func (h *LocalHandler) Skip(w http.ResponseWriter, r *http.Request) {
+	if !guardSetupOnly(w, "install") {
+		return
+	}
 	var body struct {
 		Domain string `json:"domain"`
 	}
@@ -330,6 +365,9 @@ func (h *LocalHandler) DetectFirewall(w http.ResponseWriter, r *http.Request) {
 // For "gopher" mode the takeover is async and streams logs to the log WebSocket.
 // For "manual" and "none" the mode is saved synchronously.
 func (h *LocalHandler) ConfigureFirewall(w http.ResponseWriter, r *http.Request) {
+	if !guardSetupOnly(w, "firewall") {
+		return
+	}
 	var body struct {
 		Mode string `json:"mode"`
 	}

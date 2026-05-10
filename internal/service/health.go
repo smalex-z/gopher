@@ -166,7 +166,7 @@ func (s *HealthService) tick() {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			s.checkMachine(&m)
+			goSafe("health.checkMachine", func() { s.checkMachine(&m) })
 		}()
 	}
 	wg.Wait()
@@ -307,7 +307,7 @@ func (s *HealthService) maybeRecover(m *db.Machine, reason string) {
 	s.lastRecovery[m.ID] = time.Now()
 	s.mu.Unlock()
 
-	go func() {
+	go goSafe("health.recoverRathole", func() {
 		log.Printf("health: triggering rathole restart for machine %s (%s): %s", m.ID, m.Name, reason)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -339,7 +339,7 @@ func (s *HealthService) maybeRecover(m *db.Machine, reason string) {
 			OK:        true,
 			Recovered: true,
 		})
-	}()
+	})
 }
 
 // janitorLoop trims old health-check rows so the table doesn't grow forever.

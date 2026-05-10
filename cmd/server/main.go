@@ -79,6 +79,11 @@ func runServer(args []string) {
 	go secSvc.SyncFail2banConfig()
 	monitorSvc := service.NewMonitorService()
 	monitorSvc.Start()
+	// Drop conf.d/gopher-tunnel-*.caddy orphans BEFORE the first Caddy
+	// reload — otherwise ReconcileMainCaddyfile's reload still sees the
+	// stale files and fails with "ambiguous site definition" when two
+	// orphan files claim the same subdomain.
+	localSvc.ReconcileTunnelCaddyFiles()
 	localSvc.ReconcileMainCaddyfile()
 	localSvc.ReconcileRouterCaddyBlock()
 	// Self-heal upgraded installs: when a binary is swapped without re-running
@@ -88,6 +93,14 @@ func runServer(args []string) {
 	// creates it via sudo useradd; the next reconcile picks it up.
 	localSvc.EnsureJumpboxUser()
 	localSvc.ReconcileAuthorizedKeys()
+	// Re-derive /etc/rathole/server.toml from the DB on every boot. Catches
+	// drift introduced by DB restore from backup, partial writes, or a crash
+	// between a tunnel/machine row delete and the disk reconcile that would
+	// otherwise have followed it. Idempotent — no-op when on-disk already
+	// matches the DB.
+	if err := localSvc.ReconcileServerConfig(); err != nil {
+		log.Printf("startup: failed to reconcile rathole server config: %v", err)
+	}
 
 	// Bot-protection middleware — runs inside the existing server, no extra port.
 	botMiddleware, botErr := proxy.NewMiddleware()
@@ -95,13 +108,21 @@ func runServer(args []string) {
 		log.Fatalf("Failed to create bot-protection middleware: %v", botErr)
 	}
 
-	// Purge expired bot sessions hourly.
+	// Hourly housekeeping: drop expired bot sessions, bootstrap tokens, and
+	// migration tokens. None of these are load-bearing once expired, but
+	// without a sweep the tables grow forever.
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
 			if err := db.PurgeBotSessions(); err != nil {
 				log.Printf("bot session purge: %v", err)
+			}
+			if _, err := db.PurgeExpiredBootstrapTokens(); err != nil {
+				log.Printf("bootstrap token purge: %v", err)
+			}
+			if _, err := db.PurgeExpiredMigrationTokens(); err != nil {
+				log.Printf("migration token purge: %v", err)
 			}
 		}
 	}()

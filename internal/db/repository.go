@@ -352,11 +352,46 @@ func GetBootstrapToken(token string) (*BootstrapToken, error) {
 	return &bt, nil
 }
 
-func MarkTokenUsed(tokenID, machineID string) error {
-	return DB.Model(&BootstrapToken{}).Where("id = ?", tokenID).Updates(map[string]interface{}{
-		"used_at":    DB.NowFunc(),
-		"machine_id": machineID,
-	}).Error
+// ClaimBootstrapToken atomically marks the token used and returns the row
+// for the caller to read TunnelPort / SSHKeyID / PublicSSH from. The single
+// conditional UPDATE collapses the prior read-then-mark sequence so two
+// parallel Register requests with the same token can't both pass validation
+// before either consumes the token — only the request whose UPDATE actually
+// changes the row continues; the other gets NotFoundError.
+//
+// `expires_at > now` is part of the predicate so a token expiring between
+// generation and use is rejected without a separate timestamp check.
+func ClaimBootstrapToken(token string) (*BootstrapToken, error) {
+	now := time.Now()
+	res := DB.Model(&BootstrapToken{}).
+		Where("token = ? AND used_at IS NULL AND expires_at > ?", token, now).
+		Update("used_at", now)
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return nil, &apperrors.NotFoundError{Resource: "bootstrap_token", ID: token}
+	}
+	var bt BootstrapToken
+	if err := DB.Where("token = ?", token).First(&bt).Error; err != nil {
+		return nil, err
+	}
+	return &bt, nil
+}
+
+// BindBootstrapTokenToMachine fills in the machine_id on a token whose
+// used_at was already set by ClaimBootstrapToken. Split from the claim so
+// the claim is atomic without needing the machine row to exist yet.
+func BindBootstrapTokenToMachine(tokenID, machineID string) error {
+	return DB.Model(&BootstrapToken{}).Where("id = ?", tokenID).
+		Update("machine_id", machineID).Error
+}
+
+// PurgeExpiredBootstrapTokens deletes rows whose ExpiresAt is in the past.
+// Mirrors PurgeExpiredMigrationTokens so the table doesn't grow forever.
+func PurgeExpiredBootstrapTokens() (int64, error) {
+	res := DB.Where("expires_at < ?", time.Now()).Delete(&BootstrapToken{})
+	return res.RowsAffected, res.Error
 }
 
 // CreateMigrationToken stores a new ephemeral token for an agent-install

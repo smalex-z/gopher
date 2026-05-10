@@ -25,7 +25,7 @@ func (s *LocalSetupService) FirewallDetect() *FirewallStatus {
 // FirewallConfigure persists the chosen mode and, for "gopher" mode, takes over
 // iptables management asynchronously, streaming progress to the log hub.
 func (s *LocalSetupService) FirewallConfigure(mode string) {
-	go func() {
+	go goSafe("firewallConfigure", func() {
 		w := &hubWriter{hub: s.hub}
 		if err := doFirewallConfigure(mode, w); err != nil {
 			fmt.Fprintf(w, "ERROR: %v\n", err)
@@ -33,7 +33,7 @@ func (s *LocalSetupService) FirewallConfigure(mode string) {
 			return
 		}
 		s.hub.Broadcast("\x00DONE")
-	}()
+	})
 }
 
 func doFirewallConfigure(mode string, logWriter io.Writer) error {

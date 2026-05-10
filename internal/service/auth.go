@@ -161,7 +161,18 @@ func (s *AuthService) Login(password, ip string) (LoginResult, error) {
 }
 
 // LoginTOTP completes the 2FA step after a successful password check.
+//
+// Rate-limited per-IP for defense in depth. The pendingToken is already
+// single-use (deleted on first lookup), so the practical brute-force ceiling
+// is bounded by the Login rate limiter alone — but stacking the limiter
+// here too means a TOTP attempt directly debits the IP's bucket instead of
+// only via the upstream Login that minted the pending token.
 func (s *AuthService) LoginTOTP(pendingToken, code, ip string) (string, error) {
+	if !s.rl.record(ip) {
+		s.logEvent("LOGIN_TOTP_RATE_LIMITED", ip)
+		return "", fmt.Errorf("too many attempts")
+	}
+
 	s.mu.Lock()
 	entry, ok := s.pendingTOTP[pendingToken]
 	if ok {

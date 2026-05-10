@@ -77,10 +77,13 @@ func GenerateMachineSSHClientConfig(vpsHost string, machine *db.Machine) string 
 // using Gopher-managed entry markers. Database is the single source of truth.
 // Never appends to existing config; always regenerates completely.
 //
-// An optional bindIP argument (e.g. "203.0.113.10") restricts all public listeners
-// to a specific IP instead of 0.0.0.0. Private tunnels always use 127.0.0.1.
-func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel, bindIP ...string) string {
-	publicHost := resolvePublicHost(bindIP...)
+// bindIP (e.g. "203.0.113.10") restricts public listeners to a specific IP
+// instead of 0.0.0.0. Pass "" for the default. Required (not variadic) so
+// callers can't silently drop it on multi-homed hosts and end up binding to
+// every interface — that mistake bit us on the legacy DeployVPS path.
+// Private tunnels always use 127.0.0.1 regardless.
+func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel, bindIP string) string {
+	publicHost := resolvePublicHost(bindIP)
 
 	var buf strings.Builder
 	managedEntries := 0
@@ -154,10 +157,10 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel, bin
 	return buf.String()
 }
 
-// resolvePublicHost returns bindIP[0] if non-empty, otherwise "0.0.0.0".
-func resolvePublicHost(bindIP ...string) string {
-	if len(bindIP) > 0 && bindIP[0] != "" {
-		return bindIP[0]
+// resolvePublicHost returns bindIP if non-empty, otherwise "0.0.0.0".
+func resolvePublicHost(bindIP string) string {
+	if bindIP != "" {
+		return bindIP
 	}
 	return "0.0.0.0"
 }

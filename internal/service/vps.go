@@ -89,15 +89,6 @@ func (s *VPSService) Bootstrap() error {
 	return nil
 }
 
-func (s *VPSService) Deploy() error {
-	vps, err := db.GetVPS()
-	if err != nil {
-		return err
-	}
-	go s.deploy.DeployVPS(vps) //nolint:errcheck
-	return nil
-}
-
 func (s *VPSService) Status() (map[string]interface{}, error) {
 	vps, err := db.GetVPS()
 	if err != nil {

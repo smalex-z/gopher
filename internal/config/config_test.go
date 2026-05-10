@@ -53,7 +53,7 @@ func TestValidatePort(t *testing.T) {
 // ---- GenerateRatholeServerConfig --------------------------------------------
 
 func TestGenerateRatholeServerConfig_Empty(t *testing.T) {
-	out := GenerateRatholeServerConfig(nil, nil)
+	out := GenerateRatholeServerConfig(nil, nil, "")
 	if !strings.Contains(out, "[server]") {
 		t.Error("missing [server] section")
 	}
@@ -70,7 +70,7 @@ func TestGenerateRatholeServerConfig_WithTunnel(t *testing.T) {
 	tunnels := []db.Tunnel{
 		{ID: "t1", RatholePort: 8080, RatholeToken: "tok1"},
 	}
-	out := GenerateRatholeServerConfig(nil, tunnels)
+	out := GenerateRatholeServerConfig(nil, tunnels, "")
 
 	if !strings.Contains(out, "# gopher-tunnel-start: t1") {
 		t.Error("missing tunnel start marker")
@@ -90,7 +90,7 @@ func TestGenerateRatholeServerConfig_PrivateTunnel(t *testing.T) {
 	tunnels := []db.Tunnel{
 		{ID: "t1", RatholePort: 9000, RatholeToken: "tok", Private: true},
 	}
-	out := GenerateRatholeServerConfig(nil, tunnels)
+	out := GenerateRatholeServerConfig(nil, tunnels, "")
 	if !strings.Contains(out, "bind_addr = \"127.0.0.1:9000\"") {
 		t.Errorf("private tunnel should bind 127.0.0.1, got:\n%s", out)
 	}
@@ -100,7 +100,7 @@ func TestGenerateRatholeServerConfig_UDPTunnel(t *testing.T) {
 	tunnels := []db.Tunnel{
 		{ID: "udp1", RatholePort: 5000, RatholeToken: "tok", Transport: "udp"},
 	}
-	out := GenerateRatholeServerConfig(nil, tunnels)
+	out := GenerateRatholeServerConfig(nil, tunnels, "")
 	if !strings.Contains(out, `type = "udp"`) {
 		t.Error("UDP tunnel should include type = \"udp\"")
 	}
@@ -110,7 +110,7 @@ func TestGenerateRatholeServerConfig_WithMachine(t *testing.T) {
 	machines := []db.Machine{
 		{ID: "m1", TunnelPort: 2222, RatholeSSHToken: "ssh-tok"},
 	}
-	out := GenerateRatholeServerConfig(machines, nil)
+	out := GenerateRatholeServerConfig(machines, nil, "")
 
 	if !strings.Contains(out, "# gopher-machine-start: m1") {
 		t.Error("missing machine start marker")
@@ -127,7 +127,7 @@ func TestGenerateRatholeServerConfig_PublicSSHMachine(t *testing.T) {
 	machines := []db.Machine{
 		{ID: "m1", TunnelPort: 2222, RatholeSSHToken: "ssh-tok", PublicSSH: true},
 	}
-	out := GenerateRatholeServerConfig(machines, nil)
+	out := GenerateRatholeServerConfig(machines, nil, "")
 	if !strings.Contains(out, "bind_addr = \"0.0.0.0:2222\"") {
 		t.Errorf("public SSH machine should bind 0.0.0.0, got:\n%s", out)
 	}
@@ -138,7 +138,7 @@ func TestGenerateRatholeServerConfig_SkipsMachineWithoutToken(t *testing.T) {
 		{ID: "m-no-token", TunnelPort: 2222, RatholeSSHToken: ""},
 		{ID: "m-no-port", TunnelPort: 0, RatholeSSHToken: "tok"},
 	}
-	out := GenerateRatholeServerConfig(machines, nil)
+	out := GenerateRatholeServerConfig(machines, nil, "")
 	if strings.Contains(out, "m-no-token") || strings.Contains(out, "m-no-port") {
 		t.Error("machines without token or port should be skipped")
 	}
@@ -148,7 +148,7 @@ func TestGenerateRatholeServerConfig_TokenFallsBackToID(t *testing.T) {
 	tunnels := []db.Tunnel{
 		{ID: "t-legacy", RatholePort: 7000, RatholeToken: ""},
 	}
-	out := GenerateRatholeServerConfig(nil, tunnels)
+	out := GenerateRatholeServerConfig(nil, tunnels, "")
 	if !strings.Contains(out, `token = "t-legacy"`) {
 		t.Error("tunnel with empty RatholeToken should fall back to ID as token")
 	}
@@ -158,7 +158,7 @@ func TestGenerateRatholeServerConfig_NoPlaceholderWhenHasMachines(t *testing.T) 
 	machines := []db.Machine{
 		{ID: "m1", TunnelPort: 2222, RatholeSSHToken: "tok"},
 	}
-	out := GenerateRatholeServerConfig(machines, nil)
+	out := GenerateRatholeServerConfig(machines, nil, "")
 	if strings.Contains(out, "placeholder") {
 		t.Error("should not include placeholder when machines are present")
 	}
@@ -394,7 +394,7 @@ func TestValidateRatholeConfig_MatchesDB(t *testing.T) {
 	tunnels := []db.Tunnel{
 		{ID: "t1", RatholePort: 8080, RatholeToken: "tok1"},
 	}
-	cfg := GenerateRatholeServerConfig(machines, tunnels)
+	cfg := GenerateRatholeServerConfig(machines, tunnels, "")
 
 	result := ValidateRatholeConfig(cfg, machines, tunnels)
 	if !result.Valid {
@@ -507,7 +507,7 @@ func TestRoundtrip_GenerateAndValidate(t *testing.T) {
 		{ID: "t3", RatholePort: 8003, RatholeToken: "tok-t3", Transport: "udp", CreatedAt: now, UpdatedAt: now},
 	}
 
-	cfg := GenerateRatholeServerConfig(machines, tunnels)
+	cfg := GenerateRatholeServerConfig(machines, tunnels, "")
 	result := ValidateRatholeConfig(cfg, machines, tunnels)
 
 	if !result.Valid {

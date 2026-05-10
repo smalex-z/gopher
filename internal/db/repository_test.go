@@ -424,23 +424,54 @@ func TestBootstrapToken_NotFound(t *testing.T) {
 	}
 }
 
-func TestBootstrapToken_MarkUsed(t *testing.T) {
+func TestBootstrapToken_ClaimAndBind(t *testing.T) {
 	initTestDB(t)
 	_ = CreateBootstrapToken(&BootstrapToken{
 		ID:        "bt1",
 		Token:     "tok",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
+	bt, err := ClaimBootstrapToken("tok")
+	if err != nil {
+		t.Fatalf("ClaimBootstrapToken: %v", err)
+	}
+	if bt.UsedAt == nil {
+		t.Error("UsedAt should be set after claim")
+	}
 	machineID := "m1"
-	if err := MarkTokenUsed("bt1", machineID); err != nil {
-		t.Fatalf("MarkTokenUsed: %v", err)
+	if err := BindBootstrapTokenToMachine("bt1", machineID); err != nil {
+		t.Fatalf("BindBootstrapTokenToMachine: %v", err)
 	}
 	got, _ := GetBootstrapToken("tok")
 	if got.MachineID == nil || *got.MachineID != machineID {
 		t.Errorf("MachineID = %v, want %q", got.MachineID, machineID)
 	}
-	if got.UsedAt == nil {
-		t.Error("UsedAt should be set after marking used")
+}
+
+func TestBootstrapToken_ClaimRejectsReuse(t *testing.T) {
+	initTestDB(t)
+	_ = CreateBootstrapToken(&BootstrapToken{
+		ID:        "bt1",
+		Token:     "tok",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if _, err := ClaimBootstrapToken("tok"); err != nil {
+		t.Fatalf("first claim should succeed: %v", err)
+	}
+	if _, err := ClaimBootstrapToken("tok"); err == nil {
+		t.Fatal("second claim of the same token should fail")
+	}
+}
+
+func TestBootstrapToken_ClaimRejectsExpired(t *testing.T) {
+	initTestDB(t)
+	_ = CreateBootstrapToken(&BootstrapToken{
+		ID:        "bt1",
+		Token:     "tok",
+		ExpiresAt: time.Now().Add(-time.Hour),
+	})
+	if _, err := ClaimBootstrapToken("tok"); err == nil {
+		t.Fatal("claim of expired token should fail")
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -96,8 +95,14 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	// SIGHUP causes a second reload ~1s after notify's, which churns every
 	// listener (including the dashboard's own tunnel) twice per machine-add.
 	// systemctl start is a no-op on an active unit; covers the "not running"
-	// case without forcing a restart on healthy ones.
-	_ = exec.Command("sudo", "systemctl", "start", "rathole-server").Run() // #nosec G204
+	// case without forcing a restart on healthy ones. The error is logged
+	// rather than propagated because the on-disk config IS already updated
+	// — the caller's intent (DB→disk) succeeded; only the runtime kick
+	// failed, and the next reconcile cycle (or a manual systemctl start)
+	// will pick it up.
+	if err := systemctlStart("rathole-server"); err != nil {
+		log.Printf("rathole-server start (post-reconcile) failed: %v", err)
+	}
 	return nil
 }
 
@@ -132,34 +137,23 @@ func stripGopherServiceSections(content string) string {
 // /etc/rathole/server.toml and pushes the regenerated client.toml to the
 // machine. The agent back-channel is preferred; SSH/SFTP is the fallback
 // for machines that don't yet have the agent installed.
+//
+// Order of operations is client → server → caddy. Pushing client.toml first
+// is the cheapest step to fail (network issue, agent down, missing SSH key)
+// and failing early means we don't leave an orphan rathole listener bound
+// on the VPS waiting for a client that never connects. Each later step's
+// failure is also recoverable: the next reconcile rebuilds server.toml from
+// the DB, and Caddy reload is idempotent.
 func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Machine) error {
 	settings, err := db.GetSettings()
 	if err != nil {
 		return err
 	}
 
-	// --- 1. Update server.toml (full reconcile ensures consistency) ---
-	if err := s.ReconcileServerConfig(); err != nil {
-		return fmt.Errorf("failed to update server.toml: %w", err)
-	}
-
-	// --- 2. Update managed Caddy entry if subdomain is set (TCP only; UDP/private have no HTTP routing) ---
-	if tunnel.Subdomain != "" && settings.Domain != "" && tunnel.Transport != "udp" && !tunnel.Private {
-		if err := ensureManagedCaddyLayout(); err != nil {
-			return fmt.Errorf("failed to prepare Caddy managed layout: %w", err)
-		}
-		if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(settings.Domain, settings.BindIP)); err != nil {
-			return fmt.Errorf("failed to write router Caddy file: %w", err)
-		}
-		managedPath := managedTunnelCaddyPath(tunnel.ID)
-		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, settings.BindIP, tunnel.TLSSkipVerify)
-		if err := writeLocalFile(managedPath, block); err != nil {
-			return fmt.Errorf("failed to write tunnel Caddy file %s: %w", managedPath, err)
-		}
-		_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
-	}
-
-	// --- 3. Push the regenerated client.toml ---
+	// --- 1. Push client.toml first ---
+	// Cheapest step to fail. If the agent is unreachable / SSH key is missing
+	// / the machine is offline, we want that error before the VPS is told to
+	// listen on a fresh port that nothing will ever connect to.
 	machineTunnels, err := db.GetTunnelsByMachine(machine.ID)
 	if err != nil {
 		return fmt.Errorf("failed to load machine tunnels: %w", err)
@@ -173,6 +167,33 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	}
 	if err := s.updateClientToml(machine, transformer); err != nil {
 		return fmt.Errorf("failed to write client.toml on machine: %w", err)
+	}
+
+	// --- 2. Update server.toml (full reconcile ensures consistency) ---
+	if err := s.ReconcileServerConfig(); err != nil {
+		return fmt.Errorf("failed to update server.toml: %w", err)
+	}
+
+	// --- 3. Update managed Caddy entry if subdomain is set (TCP only; UDP/private have no HTTP routing) ---
+	if tunnel.Subdomain != "" && settings.Domain != "" && tunnel.Transport != "udp" && !tunnel.Private {
+		if err := ensureManagedCaddyLayout(); err != nil {
+			return fmt.Errorf("failed to prepare Caddy managed layout: %w", err)
+		}
+		if err := writeLocalFile(managedRouterCaddyPath(), buildRouterCaddyBlock(settings.Domain, settings.BindIP)); err != nil {
+			return fmt.Errorf("failed to write router Caddy file: %w", err)
+		}
+		managedPath := managedTunnelCaddyPath(tunnel.ID)
+		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, settings.BindIP, tunnel.TLSSkipVerify)
+		if err := writeLocalFile(managedPath, block); err != nil {
+			return fmt.Errorf("failed to write tunnel Caddy file %s: %w", managedPath, err)
+		}
+		// Caddy reload is the user-visible step: a syntax error in the
+		// custom-config block fails here and the new tunnel never routes.
+		// Propagate so the API returns the failure rather than reporting
+		// success while the subdomain 502s.
+		if err := systemctlReload("caddy"); err != nil {
+			return fmt.Errorf("caddy reload failed: %w", err)
+		}
 	}
 	return nil
 }
@@ -303,9 +324,16 @@ func (s *LocalSetupService) RemoveServiceTunnelCaddy(tunnel *db.Tunnel) error {
 
 	managedPath := managedTunnelCaddyPath(tunnel.ID)
 	if removeErr := os.Remove(managedPath); removeErr != nil && !os.IsNotExist(removeErr) {
-		_ = exec.Command("sudo", "rm", "-f", managedPath).Run() // #nosec G204
+		// File owned by caddy / root — fall back to sudo rm. We log the
+		// fallback path's failure but don't propagate: the next reconcile
+		// will retry, and the tunnel row is gone from DB either way.
+		if err := runSudoCommand("rm", "-f", managedPath); err != nil {
+			log.Printf("sudo rm of caddy file %s failed: %v", managedPath, err)
+		}
 	}
-	_ = exec.Command("sudo", "systemctl", "reload", "caddy").Run() // #nosec G204
+	if err := systemctlReload("caddy"); err != nil {
+		log.Printf("caddy reload (post tunnel-remove) failed: %v", err)
+	}
 	return nil
 }
 

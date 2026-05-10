@@ -65,7 +65,7 @@ func privilegedCmdPrefix() []string {
 // Install runs the full local setup in a background goroutine, streaming logs
 // to the shared deploy hub so the frontend WebSocket log viewer can follow along.
 func (s *LocalSetupService) Install(domain, serverHost string, skipCaddy bool) {
-	go func() {
+	go goSafe("localInstall", func() {
 		w := &hubWriter{hub: s.hub}
 		if err := s.doInstall(domain, serverHost, skipCaddy, w); err != nil {
 			fmt.Fprintf(w, "ERROR: %v\n", err)
@@ -73,13 +73,13 @@ func (s *LocalSetupService) Install(domain, serverHost string, skipCaddy bool) {
 			return
 		}
 		s.hub.Broadcast("\x00DONE")
-	}()
+	})
 }
 
 // SetupFail2ban installs and configures fail2ban in a background goroutine,
 // streaming logs to the deploy hub. Marks Fail2banSetupDone in the DB on success.
 func (s *LocalSetupService) SetupFail2ban() {
-	go func() {
+	go goSafe("setupFail2ban", func() {
 		w := &hubWriter{hub: s.hub}
 		fmt.Fprintln(w, "=== Configuring fail2ban ===")
 		if err := installFail2ban(w); err != nil {
@@ -93,7 +93,7 @@ func (s *LocalSetupService) SetupFail2ban() {
 			_ = db.SaveSettings(settings)
 		}
 		s.hub.Broadcast("\x00DONE")
-	}()
+	})
 }
 
 func (s *LocalSetupService) Skip(domain string) error {

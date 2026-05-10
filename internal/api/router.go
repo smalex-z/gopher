@@ -137,7 +137,6 @@ func NewRouter(
 				r.Put("/", vpsH.Update)
 				r.Delete("/", vpsH.Delete)
 				r.Post("/bootstrap", vpsH.Bootstrap)
-				r.Post("/deploy", vpsH.Deploy)
 				r.Get("/status", vpsH.Status)
 			})
 
