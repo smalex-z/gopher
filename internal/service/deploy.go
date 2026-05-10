@@ -123,6 +123,22 @@ func NewDeployService() *DeployService {
 	}
 }
 
+// ratholeHostFromSettings returns the address that should appear as
+// `remote_addr` in client rathole configs. ServerHost wins when set
+// (covers skipCaddy installs where Domain is empty), then Domain. Returns
+// "" when neither is set; callers should treat that as "we have nothing
+// useful to write into a fresh client.toml" and either fail loudly or
+// preserve the existing value.
+func ratholeHostFromSettings(settings *db.AppSettings) string {
+	if settings == nil {
+		return ""
+	}
+	if settings.ServerHost != "" {
+		return settings.ServerHost
+	}
+	return settings.Domain
+}
+
 func (s *DeployService) logWriter() io.Writer {
 	return &hubWriter{hub: s.Hub}
 }
@@ -161,7 +177,15 @@ func (s *DeployService) DeployClient(machine *db.Machine) error {
 
 	var sshKey *db.SSHKey
 	if machine.TunnelPort > 0 {
-		sshKey, _ = db.GetSSHKeyForMachine(machine)
+		var keyErr error
+		sshKey, keyErr = db.GetSSHKeyForMachine(machine)
+		if keyErr != nil {
+			// Surface the lookup failure rather than silently falling through
+			// to the legacy direct-host path. Without this, the caller sees a
+			// generic "no SSH access" / "SSH dial failed" error and has no
+			// signal that the actual cause is a missing or detached SSH key.
+			fmt.Fprintf(w, "WARN: SSH key lookup for machine %s failed: %v\n", machine.ID, keyErr)
+		}
 	}
 
 	var client *sshpkg.SSHClient
@@ -182,7 +206,7 @@ func (s *DeployService) DeployClient(machine *db.Machine) error {
 	defer client.Close()
 
 	existingConfig, _ := client.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
-	clientConfig, err := mergeClientManagedConfig(existingConfig, machine, tunnels, settings.Domain)
+	clientConfig, err := mergeClientManagedConfig(existingConfig, machine, tunnels, ratholeHostFromSettings(settings))
 	if err != nil {
 		fmt.Fprintf(w, "ERROR: Failed to generate client config: %v\n", err)
 		s.Hub.Broadcast("\x00DONE")

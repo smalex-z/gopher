@@ -157,6 +157,7 @@ local_addr = "127.0.0.1:4322"
 		RatholeSSHToken:   "ssh-token",
 		AgentRatholeToken: "agent-token",
 		AgentLocalPort:    4322,
+		AgentRemotePort:   1027, // required by symmetric gating (#30)
 	}
 	updated, err := mergeClientManagedConfig(existing, machine, nil, "router.example.com")
 	if err != nil {

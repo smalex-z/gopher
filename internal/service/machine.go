@@ -219,8 +219,12 @@ func (s *MachineService) RefreshNetworkInfo(id string) (map[string]interface{}, 
 	}
 
 	var client *sshpkg.SSHClient
+	var sshKeyErr error
 	if machine.TunnelPort > 0 {
-		if key, kerr := db.GetSSHKeyForMachine(machine); kerr == nil {
+		key, kerr := db.GetSSHKeyForMachine(machine)
+		if kerr != nil {
+			sshKeyErr = kerr
+		} else {
 			client, _ = sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, key.PrivateKey)
 		}
 	}
@@ -235,6 +239,12 @@ func (s *MachineService) RefreshNetworkInfo(id string) (map[string]interface{}, 
 		}
 	}
 	if client == nil {
+		// Surface the SSH-key lookup failure when it was the actual reason
+		// the tunnel path didn't take. The previous "no ssh access method"
+		// message was misleading — the machine had a tunnel, just no key.
+		if sshKeyErr != nil {
+			return map[string]interface{}{"id": id, "error": fmt.Sprintf("ssh key lookup failed: %v", sshKeyErr)}, nil
+		}
 		return map[string]interface{}{"id": id, "error": "no ssh access method"}, nil
 	}
 	defer client.Close()

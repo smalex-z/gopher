@@ -43,7 +43,21 @@ func ensureCustomChain() error {
 
 // reloadCustomChain flushes GOPHER_CUSTOM and re-applies all structured rules
 // and raw custom iptables from the DB.
+//
+// Honours FirewallMode: a no-op (returns nil) when the operator chose
+// "manual" or "none". Mirrors ApplyTunnelPort's behaviour — without this
+// guard, every custom-rule write through the dashboard silently mutates
+// iptables on a host whose owner explicitly opted out of Gopher managing
+// the firewall.
 func reloadCustomChain() error {
+	settings, err := db.GetSettings()
+	if err != nil {
+		return fmt.Errorf("load settings: %w", err)
+	}
+	if settings.FirewallMode != "gopher" {
+		return nil
+	}
+
 	sudo := privilegedCmdPrefix()
 
 	if err := ensureCustomChain(); err != nil {
@@ -67,11 +81,7 @@ func reloadCustomChain() error {
 		}
 	}
 
-	// Apply raw custom iptables text from settings.
-	settings, err := db.GetSettings()
-	if err != nil {
-		return fmt.Errorf("load settings: %w", err)
-	}
+	// Apply raw custom iptables text from settings (already loaded above).
 	if err := applyRawCustomRules(settings.CustomIPTables, sudo); err != nil {
 		return err
 	}
@@ -391,6 +401,8 @@ func validateFirewallRule(protocol, portRange, source, action string) error {
 
 func firewallRuleID() string {
 	b := make([]byte, 6)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand failure in firewallRuleID: %v", err))
+	}
 	return "fw-" + hex.EncodeToString(b)
 }

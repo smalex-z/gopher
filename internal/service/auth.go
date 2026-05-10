@@ -562,9 +562,16 @@ func (s *AuthService) TOTPRegenerateBackupCodes(code string) ([]string, error) {
 }
 
 // randomDeviceID returns 16 hex chars — same scheme as other Gopher IDs.
+//
+// Panics on crypto/rand failure rather than silently returning the zero
+// byte slice. On Linux post-boot this never fires; if it does, the system
+// has no entropy and nothing involving TLS / sessions / tokens can be
+// trusted — failing loudly is the only safe response.
 func randomDeviceID() string {
 	b := make([]byte, 8)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand failure in randomDeviceID: %v", err))
+	}
 	return hex.EncodeToString(b)
 }
 

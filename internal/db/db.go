@@ -75,6 +75,18 @@ func Initialize(dsn string) error {
 	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_machines_agent_remote_port_unique ON machines(agent_remote_port) WHERE agent_remote_port > 0`).Error; err != nil {
 		return fmt.Errorf("failed to create agent_remote_port unique index: %w", err)
 	}
+	// Same shape for tunnels.subdomain and tunnels.rathole_port. AutoMigrate
+	// runs before the SQL migration that originally declared these columns
+	// UNIQUE, so the SQL CREATE TABLE is a no-op (table already exists from
+	// the struct) and the constraint never lands on fresh installs. Empty
+	// subdomain is legal — multiple tunnels can route by raw port without a
+	// subdomain — so the partial-index `WHERE` clause is critical.
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tunnels_subdomain_unique ON tunnels(subdomain) WHERE subdomain <> ''`).Error; err != nil {
+		return fmt.Errorf("failed to create tunnels.subdomain unique index: %w", err)
+	}
+	if err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tunnels_rathole_port_unique ON tunnels(rathole_port) WHERE rathole_port > 0`).Error; err != nil {
+		return fmt.Errorf("failed to create tunnels.rathole_port unique index: %w", err)
+	}
 
 	if err := runMigrations(); err != nil {
 		return fmt.Errorf("failed to run migrations: %w", err)

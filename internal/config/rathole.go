@@ -62,7 +62,7 @@ func GenerateMachineSSHClientConfig(vpsHost string, machine *db.Machine) string 
 	fmt.Fprintf(&b, "local_addr = \"0.0.0.0:22\"\n")
 	fmt.Fprintf(&b, "# gopher-machine-end: %s\n", machine.ID)
 
-	if machine.AgentLocalPort > 0 && machine.AgentRatholeToken != "" {
+	if hasAgentFields(machine) {
 		fmt.Fprintf(&b, "\n# gopher-machine-agent-start: %s\n", machine.ID)
 		fmt.Fprintf(&b, "[client.services.machine-%s-agent]\n", machine.ID)
 		fmt.Fprintf(&b, "type = \"tcp\"\n")
@@ -71,6 +71,21 @@ func GenerateMachineSSHClientConfig(vpsHost string, machine *db.Machine) string 
 		fmt.Fprintf(&b, "# gopher-machine-agent-end: %s\n", machine.ID)
 	}
 	return b.String()
+}
+
+// hasAgentFields returns true only when the agent rathole back-channel is
+// fully provisioned: token + both ports. The server-side and client-side
+// config emitters previously gated on different subsets of these fields
+// (server checked AgentRemotePort, client checked AgentLocalPort), so a
+// row mid-allocation could end up with the client writing an entry whose
+// matching server-side bind never materialised — the agent's rathole
+// connection comes up but rathole-client logs "service not found" until
+// the next reconcile fills in the missing field.
+func hasAgentFields(m *db.Machine) bool {
+	if m == nil {
+		return false
+	}
+	return m.AgentRatholeToken != "" && m.AgentLocalPort > 0 && m.AgentRemotePort > 0
 }
 
 // GenerateRatholeServerConfig generates a complete rathole server config from scratch
@@ -111,7 +126,7 @@ func GenerateRatholeServerConfig(machines []db.Machine, tunnels []db.Tunnel, bin
 		// gopher-agent back-channel (only when the machine has been migrated).
 		// Always bound to 127.0.0.1 — the agent is for the VPS to reach the
 		// client, not for public consumption.
-		if m.AgentRemotePort > 0 && m.AgentRatholeToken != "" {
+		if hasAgentFields(&m) {
 			buf.WriteString(fmt.Sprintf("\n# gopher-machine-agent-start: %s\n", m.ID))
 			buf.WriteString(fmt.Sprintf("[server.services.machine-%s-agent]\n", m.ID))
 			buf.WriteString(fmt.Sprintf("token = \"%s\"\n", m.AgentRatholeToken))

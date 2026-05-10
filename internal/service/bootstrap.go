@@ -330,8 +330,15 @@ func (s *BootstrapService) awaitAgentReady(machine *db.Machine) {
 
 // shortToken returns 16 random hex characters (8 bytes of entropy).
 // Shorter and easier to read/copy than a UUID while still being unguessable.
+//
+// Panics on crypto/rand failure — silently returning the zero byte slice
+// would mint deterministic "tokens" that anyone could replay. On Linux
+// post-boot rand.Read essentially never fails; if it does, the system is
+// without entropy and we'd rather crash than issue a fake token.
 func shortToken() string {
 	b := make([]byte, 8)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand failure in shortToken: %v", err))
+	}
 	return hex.EncodeToString(b)
 }

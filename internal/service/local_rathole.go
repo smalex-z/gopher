@@ -158,10 +158,7 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 	if err != nil {
 		return fmt.Errorf("failed to load machine tunnels: %w", err)
 	}
-	ratholeHost := settings.ServerHost
-	if ratholeHost == "" {
-		ratholeHost = settings.Domain
-	}
+	ratholeHost := ratholeHostFromSettings(settings)
 	transformer := func(existing string) (string, error) {
 		return mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost)
 	}
@@ -489,8 +486,18 @@ local_addr = "0.0.0.0:22"
 // the local gopher-agent (127.0.0.1:AgentLocalPort) to the VPS-side bind so
 // the control plane can reach the agent. Empty when the machine doesn't have
 // agent fields populated — legacy machines without the agent fall through.
+//
+// Gates on the same predicate as the server-side emitter (see
+// config.GenerateRatholeServerConfig) so the two sides can never disagree
+// about whether to write the entry. Without this symmetry, a row mid-
+// allocation could end up with the client config writing the agent
+// service while the server hasn't bound the matching port — rathole-client
+// then loops "service not found" until the next reconcile fills in the gap.
 func buildClientMachineAgentSection(machine *db.Machine) string {
-	if machine == nil || machine.ID == "" || machine.AgentRatholeToken == "" || machine.AgentLocalPort == 0 {
+	if machine == nil || machine.ID == "" {
+		return ""
+	}
+	if machine.AgentRatholeToken == "" || machine.AgentLocalPort == 0 || machine.AgentRemotePort == 0 {
 		return ""
 	}
 	return fmt.Sprintf(`# gopher-machine-agent-start: %s

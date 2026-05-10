@@ -293,6 +293,8 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 	oldPrivate := tunnel.Private
 	oldBotProtection := tunnel.BotProtectionEnabled
 	oldTLSSkipVerify := tunnel.TLSSkipVerify
+	oldLocalPort := tunnel.LocalPort
+	oldSubdomain := tunnel.Subdomain
 	tunnel.Name = req.Name
 	tunnel.LocalPort = req.LocalPort
 	tunnel.Private = req.Private
@@ -320,8 +322,49 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 		ApplyTunnelPort(tunnel.RatholePort, tunnel.Transport, tunnel.Private)
 	}
 
-	// If bot protection or TLS skip verify toggled, rewrite the Caddy block.
-	if (oldBotProtection != tunnel.BotProtectionEnabled || oldTLSSkipVerify != tunnel.TLSSkipVerify) && tunnel.Subdomain != "" && s.local != nil {
+	// If LocalPort changed, the client.toml's `local_addr = "localhost:<port>"`
+	// for this tunnel is now stale and the client will silently keep routing
+	// to the old port. Push the regenerated client.toml. Server-side reconcile
+	// is unaffected (rathole-server doesn't see local_addr) so we skip it.
+	if oldLocalPort != tunnel.LocalPort && s.local != nil {
+		machine, machErr := db.GetMachine(tunnel.MachineID)
+		if machErr != nil {
+			log.Printf("tunnel update: load machine for client push failed: %v", machErr)
+		} else if pushErr := s.local.AddServiceTunnel(tunnel, machine); pushErr != nil {
+			log.Printf("tunnel update: client.toml push for %s failed: %v", tunnel.ID, pushErr)
+		}
+	}
+
+	// If subdomain changed, the on-disk Caddy block is stale (managed file
+	// path is keyed by tunnel ID, content holds the old subdomain). Three
+	// transitions to handle:
+	//   "" → "x"        : write new block, reload
+	//   "x" → "y"       : overwrite block, reload
+	//   "x" → ""        : remove block (privacy flipped to private), reload
+	if oldSubdomain != tunnel.Subdomain && s.local != nil {
+		settings, sErr := db.GetSettings()
+		switch {
+		case sErr != nil:
+			log.Printf("tunnel update: load settings for caddy: %v", sErr)
+		case tunnel.Subdomain == "":
+			// Subdomain cleared → drop the Caddy file.
+			if err := s.local.RemoveServiceTunnelCaddy(tunnel); err != nil {
+				log.Printf("tunnel update: remove caddy block for %s: %v", tunnel.ID, err)
+			}
+		case settings.Domain != "" && tunnel.Transport != "udp" && !tunnel.Private:
+			managedPath := managedTunnelCaddyPath(tunnel.ID)
+			block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, settings.BindIP, tunnel.TLSSkipVerify)
+			if writeErr := writeLocalFile(managedPath, block); writeErr != nil {
+				log.Printf("tunnel update: rewrite caddy block for %s: %v", tunnel.ID, writeErr)
+			} else if reloadErr := systemctlReload("caddy"); reloadErr != nil {
+				log.Printf("tunnel update: caddy reload after subdomain change for %s: %v", tunnel.ID, reloadErr)
+			}
+		}
+	}
+
+	// If bot protection or TLS skip verify toggled (and the subdomain branch
+	// above didn't already rewrite), refresh the Caddy block.
+	if oldSubdomain == tunnel.Subdomain && (oldBotProtection != tunnel.BotProtectionEnabled || oldTLSSkipVerify != tunnel.TLSSkipVerify) && tunnel.Subdomain != "" && s.local != nil {
 		if svcSettings, svcErr := db.GetSettings(); svcErr == nil && svcSettings.Domain != "" {
 			managedPath := managedTunnelCaddyPath(tunnel.ID)
 			block := buildTunnelCaddyBlock(tunnel.Subdomain, svcSettings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, svcSettings.BindIP, tunnel.TLSSkipVerify)

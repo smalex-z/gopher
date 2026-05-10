@@ -600,28 +600,46 @@ func skipOptionsList(line string) string {
 	return ""
 }
 
-// writeLocalFile writes content to path. If the direct write fails due to
-// permissions, it falls back to `sudo tee` so the app can write to system
-// directories without running as root itself.
+// writeLocalFile atomically writes content to path. Writes to a sibling
+// `<path>.tmp.<nano>` first, then renames into place — readers (rathole's
+// notify watcher, Caddy reload) only ever see a fully-written file. A
+// power loss or kill mid-write leaves the temp file behind for the next
+// run to clobber, never a truncated config that fails to parse.
+//
+// Two backends: direct os.WriteFile + os.Rename when the process owns the
+// directory, sudo-tee + sudo-mv when it doesn't.
 func writeLocalFile(path, content string) error {
-	// Try direct write first (works when running as root or owning the dir).
+	// Try direct atomic write first.
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err == nil {
-		if err2 := os.WriteFile(path, []byte(content), 0644); err2 == nil {
-			return nil
+		tmp := fmt.Sprintf("%s.tmp.%d", path, time.Now().UnixNano())
+		if err2 := os.WriteFile(tmp, []byte(content), 0644); err2 == nil {
+			if rerr := os.Rename(tmp, path); rerr == nil {
+				return nil
+			}
+			// Rename can fail across filesystems or when the dest exists
+			// with different ownership. Clean up the temp before falling
+			// through to sudo so we don't leak it.
+			_ = os.Remove(tmp)
 		}
 	}
-	// Fall back to sudo: ensure directory exists, then write with tee.
+	// Fall back to sudo. tee writes to a temp path we own, mv installs
+	// atomically. mv inside the same directory is rename(2) on Linux.
 	dir := filepath.Dir(path)
 	if err := exec.Command("sudo", "mkdir", "-p", dir).Run(); err != nil { // #nosec G204
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
-	cmd := exec.Command("sudo", "tee", path) // #nosec G204
+	tmp := fmt.Sprintf("%s.tmp.%d", path, time.Now().UnixNano())
+	cmd := exec.Command("sudo", "tee", tmp) // #nosec G204
 	cmd.Stdin = strings.NewReader(content)
 	cmd.Stdout = io.Discard
 	var errBuf strings.Builder
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(errBuf.String()))
+	}
+	if err := exec.Command("sudo", "mv", tmp, path).Run(); err != nil { // #nosec G204
+		_ = exec.Command("sudo", "rm", "-f", tmp).Run() // #nosec G204
+		return fmt.Errorf("atomic install of %s failed: %w", path, err)
 	}
 	return nil
 }
