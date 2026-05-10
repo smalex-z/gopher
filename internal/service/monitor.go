@@ -148,18 +148,24 @@ func (s *MonitorService) checkTunnels() {
 	}
 }
 
-// checkTunnel probes the tunnel and stores one of three status values:
+// checkTunnel probes the tunnel and stores one of four status values:
 //
-//   - "active"    — rathole client connected, service responding
-//   - "connected" — rathole client connected, but service not responding on the client side
-//   - "offline"   — rathole client not connected
+//   - "active"    — rathole client connected, upstream responded with bytes
+//   - "connected" — rathole client connected, upstream is silent (e.g. a
+//     client-speaks-first TCP service like Minecraft / MySQL that ignores
+//     unrecognised data without closing the connection)
+//   - "idle"      — rathole client connected, upstream EOF'd quickly
+//     (port not bound on the client, app refused the connection)
+//   - "offline"   — rathole bind port unreachable, OR probe was ambiguous
+//     AND the corresponding machine is reporting offline
 //
-// The key distinction between "connected" and "offline" relies on rathole's
-// behaviour: when no client is connected, rathole holds the data-channel TCP
-// connection open indefinitely (waiting for a client), so a read times out.
-// When a client is connected but the service is not listening, rathole forwards
-// the connection, the client gets an immediate connection refused, and closes
-// the channel — so we receive an EOF with no data almost immediately.
+// The probe alone can't distinguish "no rathole client" from "client
+// connected, silent upstream" — both observe as "TCP connect succeeded,
+// no bytes flow." We resolve the ambiguity by cross-referencing the
+// owning machine's status: if the machine is reachable (agent or SSH),
+// the rathole-client is up, so a probe-side timeout means the upstream
+// app is silent (= "connected"). If the machine is offline, the rathole
+// tunnel really is dead (= "offline").
 func (s *MonitorService) checkTunnel(t db.Tunnel) {
 	if t.RatholePort == 0 {
 		return
@@ -167,6 +173,16 @@ func (s *MonitorService) checkTunnel(t db.Tunnel) {
 	start := time.Now()
 	status := probeTunnel(t)
 	latency := int(time.Since(start) / time.Millisecond)
+
+	// Resolve the ambiguous "connected" against the machine's own status.
+	// probeTunnel returns "connected" whenever it can't tell whether the
+	// upstream is silent or absent; if the machine itself is offline, the
+	// truth is "absent" and we relabel.
+	if status == "connected" && t.MachineID != "" {
+		if machine, err := db.GetMachine(t.MachineID); err == nil && machine != nil && machine.Status == "offline" {
+			status = "offline"
+		}
+	}
 
 	// Partial Update — see SetTunnelStatus godoc. Avoids the race where
 	// the monitor's stale snapshot of the row would otherwise revert a
@@ -176,12 +192,15 @@ func (s *MonitorService) checkTunnel(t db.Tunnel) {
 	}
 
 	// Record a health-check row per probe so the dashboard can render
-	// per-tunnel uptime % and a sparkline. "active" is the only fully-OK
-	// state — "connected" means rathole sees a client but the upstream
-	// service didn't respond, which the operator should still notice.
+	// per-tunnel uptime % and a sparkline. Anything other than "offline"
+	// means the tunnel layer is functional — gopher's responsibility ends
+	// at the rathole forwarding path, and whether the upstream app is
+	// responsive ("active"), silent ("connected"), or refusing ("idle")
+	// is the user's domain. Treating only "active" as OK undercounted
+	// uptime for client-speaks-first services like Minecraft.
 	_ = db.RecordHealthCheck(&db.HealthCheck{
 		Subject:   "tunnel:" + t.ID,
-		OK:        status == "active",
+		OK:        status != "offline",
 		LatencyMS: latency,
 		ErrorMsg:  "",
 	})
@@ -243,14 +262,21 @@ func probeTunnel(t db.Tunnel) string {
 			return "connected"
 		}
 
-		// TCP tunnel: passive read timed out (service speaks first — SSH, SMTP,
-		// etc. — but nothing arrived). Fall back to an HTTP HEAD probe.
-		// • If a client IS connected and the service is HTTP, it will respond →
-		//   we get data → "active".
-		// • If no client is connected, rathole buffers the HEAD but can't
-		//   forward it → second read also times out → "offline".
-		// • If the service is non-HTTP passive (rare), second read times out
-		//   too → "offline" (acceptable: we can't confirm connectivity).
+		// TCP tunnel: passive read timed out (no banner). Fall back to an
+		// HTTP HEAD probe and classify by the response.
+		// • Bytes back            → "active" (service responded — common
+		//                          for HTTP tunnels)
+		// • EOF / RST quickly     → "idle" (rathole forwarded, upstream
+		//                          rejected — port not bound on the client)
+		// • Second timeout        → "connected" (genuinely ambiguous — could
+		//                          be no rathole client OR a client-speaks-
+		//                          first service like Minecraft / MySQL that
+		//                          ignores garbage bytes without closing).
+		//                          checkTunnel resolves the ambiguity by
+		//                          consulting machine.Status: if the machine
+		//                          is offline the tunnel is too; otherwise
+		//                          the rathole-client is up and we count it
+		//                          as a working tunnel.
 		_, _ = fmt.Fprintf(conn, "HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n")
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		n2, readErr2 := conn.Read(buf)
@@ -258,7 +284,7 @@ func probeTunnel(t db.Tunnel) string {
 			return "active"
 		}
 		if isTimeout(readErr2) {
-			return "offline"
+			return "connected"
 		}
 		// EOF after HEAD: rathole forwarded but service closed immediately.
 		return "idle"
