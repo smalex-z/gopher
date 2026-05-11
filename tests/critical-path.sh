@@ -43,15 +43,18 @@ echo "1. Starting Gopher on port $GOPHER_PORT..."
 ./gopher --db "$GOPHER_DB" --port "$GOPHER_PORT" >/dev/null 2>&1 &
 GOPHER_PID=$!
 
-# Poll until ready (up to 15s)
-for i in $(seq 1 30); do
+# Poll until ready (up to 30s). 15s was tight enough that local laptops
+# passed at ~13s but GitHub Actions runners (slower disks + cold caches)
+# regularly tripped the ceiling — bumped to 30s so the test reflects
+# actual server-up latency, not the runner's I/O variance.
+for i in $(seq 1 60); do
     if curl -sf "http://localhost:$GOPHER_PORT/api/status" >/dev/null 2>&1; then
         pass "Server ready (${i} × 0.5s)"
         break
     fi
     sleep 0.5
-    if [[ $i -eq 30 ]]; then
-        fail "Server did not start within 15 seconds"
+    if [[ $i -eq 60 ]]; then
+        fail "Server did not start within 30 seconds"
     fi
 done
 

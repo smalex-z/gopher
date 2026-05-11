@@ -45,13 +45,15 @@ echo "1. Starting Gopher on port $GOPHER_PORT..."
 ./gopher --db "$GOPHER_DB" --port "$GOPHER_PORT" >/dev/null 2>&1 &
 GOPHER_PID=$!
 
-for i in $(seq 1 30); do
+# 30s ceiling — CI runners hit the previous 15s cap intermittently
+# under cold-cache conditions; see critical-path.sh for the same fix.
+for i in $(seq 1 60); do
     if curl -sf "http://localhost:$GOPHER_PORT/api/status" >/dev/null 2>&1; then
         pass "Server ready"
         break
     fi
     sleep 0.5
-    [[ $i -eq 30 ]] && fail "Server did not start within 15 seconds"
+    [[ $i -eq 60 ]] && fail "Server did not start within 30 seconds"
 done
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
