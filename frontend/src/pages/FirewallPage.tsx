@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Shield, Plus, Trash2, RefreshCw, Terminal, ChevronDown, ChevronRight, AlertTriangle, CheckCircle2, Lock, Globe } from 'lucide-react'
 import { localApi } from '../api/local'
@@ -7,6 +7,39 @@ import type { FirewallEntry } from '../types'
 
 const PROTOCOL_OPTIONS = ['tcp', 'udp', 'all', 'icmp']
 const ACTION_OPTIONS = ['ACCEPT', 'DROP', 'REJECT']
+
+type FirewallFilter = 'all' | 'system' | 'tunnel' | 'custom'
+
+function matchesFilter(entry: FirewallEntry, filter: FirewallFilter): boolean {
+  if (filter === 'all') return true
+  if (filter === 'system') return entry.type === 'system'
+  if (filter === 'tunnel') return entry.type === 'tunnel' || entry.type === 'machine-ssh'
+  return entry.type === 'custom'
+}
+
+interface FilterChipProps {
+  label: string
+  count: number
+  active: boolean
+  onClick: () => void
+}
+
+function FilterChip({ label, count, active, onClick }: FilterChipProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-full border transition-colors ${
+        active
+          ? 'bg-blue-600 border-blue-600 text-white'
+          : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+      }`}
+    >
+      <span className="font-medium">{label}</span>
+      <span className={`tabular-nums ${active ? 'text-blue-100' : 'text-gray-400'}`}>{count}</span>
+    </button>
+  )
+}
 
 function actionBadge(action: string) {
   if (action === 'ACCEPT') return <span className="text-xs px-1.5 py-0.5 rounded bg-green-50 text-green-700 border border-green-200 font-medium">ACCEPT</span>
@@ -33,13 +66,29 @@ export default function FirewallPage() {
   const qc = useQueryClient()
   const [showAdd, setShowAdd] = useState(false)
   const [showLive, setShowLive] = useState(false)
+  const [filter, setFilter] = useState<FirewallFilter>('all')
   const [form, setForm] = useState({ ...emptyForm })
 
   const { data: overviewData, isLoading } = useQuery({
     queryKey: ['firewall-overview'],
     queryFn: () => localApi.firewallOverview(),
   })
-  const entries: FirewallEntry[] = overviewData?.data ?? []
+  const entries: FirewallEntry[] = useMemo(
+    () => overviewData?.data ?? [],
+    [overviewData],
+  )
+
+  const counts = useMemo(() => ({
+    all: entries.length,
+    system: entries.filter(e => e.type === 'system').length,
+    tunnel: entries.filter(e => e.type === 'tunnel' || e.type === 'machine-ssh').length,
+    custom: entries.filter(e => e.type === 'custom').length,
+  }), [entries])
+
+  const visibleEntries = useMemo(
+    () => entries.filter(e => matchesFilter(e, filter)),
+    [entries, filter],
+  )
 
   const { data: statusData } = useQuery({
     queryKey: ['local-status'],
@@ -246,14 +295,24 @@ export default function FirewallPage() {
 
       {/* Main table */}
       <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-        <div className="px-5 py-3 border-b bg-gray-50 flex items-center justify-between">
+        <div className="px-5 py-3 border-b bg-gray-50 flex items-center justify-between gap-4 flex-wrap">
           <span className="text-sm font-semibold text-gray-700">
             Open Ports &amp; Rules
             <span className="ml-2 text-xs font-normal text-gray-400">({entries.length} entries)</span>
           </span>
+          <div className="flex items-center gap-1.5">
+            <FilterChip label="All"     count={counts.all}     active={filter === 'all'}     onClick={() => setFilter('all')} />
+            <FilterChip label="System"  count={counts.system}  active={filter === 'system'}  onClick={() => setFilter('system')} />
+            <FilterChip label="Tunnels" count={counts.tunnel}  active={filter === 'tunnel'}  onClick={() => setFilter('tunnel')} />
+            <FilterChip label="Custom"  count={counts.custom}  active={filter === 'custom'}  onClick={() => setFilter('custom')} />
+          </div>
         </div>
         {entries.length === 0 ? (
           <div className="py-10 text-center text-sm text-gray-400">No rules — firewall may not be active.</div>
+        ) : visibleEntries.length === 0 ? (
+          <div className="py-10 text-center text-sm text-gray-400">
+            No {filter} rules. <button onClick={() => setFilter('all')} className="text-blue-600 hover:underline">Show all</button>
+          </div>
         ) : (
           <table className="w-full text-sm">
             <thead className="border-b">
@@ -264,7 +323,7 @@ export default function FirewallPage() {
               </tr>
             </thead>
             <tbody className="divide-y">
-              {entries.map((entry, i) => (
+              {visibleEntries.map((entry, i) => (
                 <tr key={entry.id ?? `${entry.type}-${i}`} className="hover:bg-gray-50">
                   <td className="px-4 py-2.5">
                     <div className="font-medium text-gray-800">

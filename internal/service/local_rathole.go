@@ -414,7 +414,7 @@ func (s *LocalSetupService) removeMachineClientViaSSH(machine *db.Machine) error
 	// Precheck 2: passwordless sudo for the script. `sudo -nl <cmd>` exits 0
 	// only when the user has a NOPASSWD entry for that exact path; otherwise
 	// it prints "a password is required" or "may not run" to stderr and exits
-	// non-zero. Capture that for the operator-visible error message.
+	// non-zero. Capture that for the oper ator-visible error message.
 	if out, perr := sshClient.Execute("sudo -nl /usr/local/bin/gopher-uninstall 2>&1"); perr != nil {
 		return fmt.Errorf("client lacks NOPASSWD sudo for gopher-uninstall (re-run bootstrap to refresh /etc/sudoers.d/gopher; %s): %w", strings.TrimSpace(out), perr)
 	}
