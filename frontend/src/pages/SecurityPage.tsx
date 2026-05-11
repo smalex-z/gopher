@@ -8,6 +8,7 @@ import {
 import client from '../api/client'
 import { securityApi, type AuditEvent, type Fail2banStatus, type Fail2banConfig, type StaleTokenAttempt } from '../api/security'
 import { toast } from '../lib/toast'
+import { PaginatedTable, type Column } from '../components/PaginatedTable'
 
 // ─── TOTP types + hook ───────────────────────────────────────────────────────
 
@@ -427,6 +428,26 @@ function formatTime(iso: string) {
   }
 }
 
+const auditLogColumns: Column<AuditEvent>[] = [
+  {
+    key: 'time',
+    header: 'Time',
+    cellClassName: 'text-gray-400 text-xs whitespace-nowrap font-mono',
+    render: ev => formatTime(ev.time),
+  },
+  {
+    key: 'event',
+    header: 'Event',
+    render: ev => eventBadge(ev.event),
+  },
+  {
+    key: 'ip',
+    header: 'IP',
+    cellClassName: 'font-mono text-xs text-gray-600',
+    render: ev => ev.ip || '—',
+  },
+]
+
 function AuditLogSection() {
   const { data: events, isLoading, error } = useQuery<AuditEvent[]>({
     queryKey: ['security-audit-log'],
@@ -447,26 +468,11 @@ function AuditLogSection() {
       {events && events.length === 0 && <p className="text-sm text-gray-400">No events yet.</p>}
 
       {events && events.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100">
-                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Time</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Event</th>
-                <th className="text-left py-2 font-medium text-gray-500 text-xs">IP</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {events.map((ev, i) => (
-                <tr key={i} className="hover:bg-gray-50">
-                  <td className="py-2 pr-4 text-gray-400 text-xs whitespace-nowrap font-mono">{formatTime(ev.time)}</td>
-                  <td className="py-2 pr-4">{eventBadge(ev.event)}</td>
-                  <td className="py-2 font-mono text-xs text-gray-600">{ev.ip || '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <PaginatedTable
+          rows={events}
+          columns={auditLogColumns}
+          rowKey={(ev, i) => `${ev.time}-${ev.ip}-${i}`}
+        />
       )}
     </div>
   )
@@ -498,39 +504,48 @@ function StaleTokensSection() {
       {data && data.length === 0 && <p className="text-sm text-gray-400">No stale clients detected.</p>}
 
       {data && data.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100">
-                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Token</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Source IP</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Last seen</th>
-                <th className="text-left py-2 font-medium text-gray-500 text-xs">Attempts</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {data.map((a, i) => (
-                <tr key={i} className="hover:bg-gray-50">
-                  <td className="py-2 pr-4">
-                    <span
-                      className="font-mono text-xs text-gray-600 bg-gray-100 px-2 py-0.5 rounded"
-                      title={a.token}
-                    >
-                      {a.token.length > 16 ? a.token.slice(0, 16) + '…' : a.token}
-                    </span>
-                  </td>
-                  <td className="py-2 pr-4 font-mono text-xs text-gray-700">{a.ip}</td>
-                  <td className="py-2 pr-4 text-xs text-gray-500 whitespace-nowrap">{formatTime(a.last_seen)}</td>
-                  <td className="py-2 text-xs font-medium text-amber-600">{a.count}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <PaginatedTable
+          rows={data}
+          columns={staleTokenColumns}
+          rowKey={(a, i) => `${a.token}-${a.ip}-${i}`}
+        />
       )}
     </div>
   )
 }
+
+const staleTokenColumns: Column<StaleTokenAttempt>[] = [
+  {
+    key: 'token',
+    header: 'Token',
+    render: a => (
+      <span
+        className="font-mono text-xs text-gray-600 bg-gray-100 px-2 py-0.5 rounded"
+        title={a.token}
+      >
+        {a.token.length > 16 ? a.token.slice(0, 16) + '…' : a.token}
+      </span>
+    ),
+  },
+  {
+    key: 'ip',
+    header: 'Source IP',
+    cellClassName: 'font-mono text-xs text-gray-700',
+    render: a => a.ip,
+  },
+  {
+    key: 'last_seen',
+    header: 'Last seen',
+    cellClassName: 'text-xs text-gray-500 whitespace-nowrap',
+    render: a => formatTime(a.last_seen),
+  },
+  {
+    key: 'count',
+    header: 'Attempts',
+    cellClassName: 'text-xs font-medium text-amber-600',
+    render: a => a.count,
+  },
+]
 
 // ─── Fail2ban status section ──────────────────────────────────────────────────
 
