@@ -62,10 +62,12 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	// Rebuild gopher-managed config from DB using the canonical generator.
 	settings, _ := db.GetSettings()
 	bindIP := ""
+	noisePriv := ""
 	if settings != nil {
 		bindIP = settings.BindIP
+		noisePriv = settings.RatholeNoisePrivKey
 	}
-	managedConfig := config.GenerateRatholeServerConfig(machines, tunnels, bindIP)
+	managedConfig := config.GenerateRatholeServerConfig(machines, tunnels, bindIP, noisePriv)
 
 	// Guardrail: never write a generated config that fails self-validation.
 	validation := config.ValidateRatholeConfig(managedConfig, machines, tunnels)
@@ -159,8 +161,9 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		return fmt.Errorf("failed to load machine tunnels: %w", err)
 	}
 	ratholeHost := ratholeHostFromSettings(settings)
+	noisePub := settings.RatholeNoisePubKey
 	transformer := func(existing string) (string, error) {
-		return mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost)
+		return mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost, noisePub)
 	}
 	if err := s.updateClientToml(machine, transformer); err != nil {
 		return fmt.Errorf("failed to write client.toml on machine: %w", err)
@@ -514,7 +517,7 @@ local_addr = "127.0.0.1:%d"
 `, machine.ID, machine.ID, machine.AgentRatholeToken, machine.AgentLocalPort, machine.ID)
 }
 
-func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db.Tunnel, ratholeHost string) (string, error) {
+func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db.Tunnel, ratholeHost, noisePubKey string) (string, error) {
 	base := strings.TrimSpace(existing)
 	if base == "" {
 		ratholeHost = strings.TrimSpace(ratholeHost)
@@ -529,8 +532,18 @@ func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db
 		return "", fmt.Errorf("machine is missing SSH tunnel token; bootstrap the machine again")
 	}
 
+	// Synchronise the [client.transport] block with what the server currently
+	// expects. Without this step, a machine that was bootstrapped before
+	// noise was enabled keeps its plaintext-only client.toml across config
+	// pushes and silently fails to reconnect the moment the server flips to
+	// noise. Strip any stale block and re-emit from the canonical key.
+	base = stripClientTransportSection(base)
+
 	cleaned := stripClientManagedSections(base)
 	updated := strings.TrimRight(cleaned, "\n")
+	if block := strings.TrimRight(config.RenderClientNoiseTransport(noisePubKey), "\n"); block != "" {
+		updated += "\n\n" + block
+	}
 
 	sections := []string{machineSection}
 	if agentSection := strings.TrimSpace(buildClientMachineAgentSection(machine)); agentSection != "" {
@@ -565,6 +578,17 @@ func stripClientManagedSections(content string) string {
 	stripped = removeTomlSectionsWithPrefix(stripped, "client.services.tunnel-")
 	stripped = removeTomlSectionsWithPrefix(stripped, "client.services.machine-")
 	return stripped
+}
+
+// stripClientTransportSection removes the [client.transport] header and its
+// [client.transport.noise] subsection. Used during config merges so the
+// canonical transport block can be re-emitted from the current server pubkey
+// — if we only stripped the [client.transport] header, the orphan
+// [client.transport.noise] section below it would cause rathole to error.
+func stripClientTransportSection(content string) string {
+	content = removeTomlSection(content, "client.transport")
+	content = removeTomlSection(content, "client.transport.noise")
+	return content
 }
 
 func stripClientManagedMarkerBlocks(content string) string {

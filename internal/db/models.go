@@ -173,6 +173,13 @@ type AppSettings struct {
 	Fail2banIgnoreIPs string `json:"fail2ban_ignore_ips"` // JSON array of whitelisted CIDRs/IPs
 	// UpdateChannel controls which release stream to track: "stable" (default), "beta", or "alpha".
 	UpdateChannel string `json:"update_channel"`
+	// Rathole noise-transport keypair. Generated lazily on first reconcile and
+	// then frozen — rotating the private key would invalidate every machine's
+	// client.toml until a fresh push lands. Empty values mean the upgrade
+	// migration hasn't run yet (or this is a fresh install pre-wizard);
+	// callers must treat empty as "skip noise emission" so config still parses.
+	RatholeNoisePrivKey string `json:"-"`
+	RatholeNoisePubKey  string `json:"-"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

@@ -128,6 +128,15 @@ func runServer(args []string) {
 		if err := localSvc.ReconcileServerConfig(); err != nil {
 			log.Printf("startup: failed to reconcile rathole server config: %v", err)
 		}
+		// One-shot upgrade from plaintext rathole transport → encrypted noise.
+		// Runs in a goroutine so a slow SSH push to one offline machine doesn't
+		// hold up the dashboard coming online. No-op on installs that have
+		// already migrated or haven't completed the wizard yet.
+		go func() {
+			if err := localSvc.MigrateRatholeNoise(); err != nil {
+				log.Printf("startup: rathole noise migration: %v", err)
+			}
+		}()
 	} else {
 		log.Printf("dev mode: skipping rathole/Caddy/sudoers/authorized_keys reconciles")
 	}

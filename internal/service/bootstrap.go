@@ -159,7 +159,11 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 		ratholeHost = h
 	}
 
-	ratholeConfig := config.GenerateMachineSSHClientConfig(ratholeHost, machine)
+	noisePub := ""
+	if settings, sErr := db.GetSettings(); sErr == nil && settings != nil {
+		noisePub = settings.RatholeNoisePubKey
+	}
+	ratholeConfig := config.GenerateMachineSSHClientConfig(ratholeHost, machine, noisePub)
 
 	// Async: wait for tunnel then verify SSH connectivity.
 	go goSafe("awaitSSHHealth", func() { s.awaitSSHHealth(machine, sshKey.PrivateKey) })

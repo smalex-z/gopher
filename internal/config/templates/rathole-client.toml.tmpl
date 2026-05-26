@@ -3,7 +3,13 @@ remote_addr = "{{.VPSHost}}:2333"
 
 [client.default_token]
 default_token = "changeme"
+{{if .NoisePubKey}}
+[client.transport]
+type = "noise"
 
+[client.transport.noise]
+remote_public_key = "{{.NoisePubKey}}"
+{{end}}
 {{range .Tunnels}}
 [client.services.tunnel-{{.ID}}]
 token = "{{.RatholeToken}}"
