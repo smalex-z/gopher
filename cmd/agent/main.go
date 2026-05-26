@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -465,11 +466,41 @@ func (s *server) uninstall(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// availableBytes returns the number of bytes free for non-root writes in dir,
+// or (0, false) if the syscall isn't supported. Hoisted into a var so tests
+// can stub it without needing privileged access to actually fill the disk.
+var availableBytes = func(dir string) (uint64, bool) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(dir, &stat); err != nil {
+		return 0, false
+	}
+	// f_bavail (blocks free to non-root) × f_bsize (block size) = bytes safely
+	// usable. f_bavail can be smaller than f_bfree because the FS reserves
+	// some space for root — we honour that conservatively.
+	return uint64(stat.Bavail) * uint64(stat.Bsize), true
+}
+
 // writeFilePreservingMode overwrites a file's contents while keeping its mode
 // and ownership. Uses truncate-write rather than rename-into-place because the
 // agent owns the file but not the parent directory (/etc/rathole is
 // root-owned), which would block atomic rename.
+//
+// Pre-flight statfs check defends against the corruption mode where O_TRUNC
+// destroys the existing content before the write fails with ENOSPC, leaving
+// the file at 0 bytes. Hit in the wild during the noise migration on a
+// machine with a full disk — the rathole tunnel went down and recovery
+// required manually reconstructing the file from server-side state.
 func writeFilePreservingMode(path string, content []byte) error {
+	dir := filepath.Dir(path)
+	if avail, ok := availableBytes(dir); ok {
+		// 8 KiB margin covers ext4 metadata writes (inode + indirect block
+		// updates) on a worst-case fragmented filesystem.
+		needed := uint64(len(content)) + 8192
+		if avail < needed {
+			return fmt.Errorf("insufficient disk space in %s: %d bytes available, need %d (free disk before retrying)", dir, avail, needed)
+		}
+	}
+
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o644) // #nosec G304 — caller resolved path
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)

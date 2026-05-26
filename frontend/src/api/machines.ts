@@ -30,4 +30,9 @@ export const machinesApi = {
     client.post<{ data: { check: HealthCheck; now: string } }>(`/machines/${id}/health/check`).then(r => r.data.data),
   agentStatus: (id: string) =>
     client.get<ApiResponse<AgentStatus>>(`/machines/${id}/agent-status`).then(r => r.data.data),
+  // Canonical client.toml the machine should be running. format='script'
+  // wraps it in a one-shot recovery shell script (sudo bash on the machine).
+  // format=undefined returns the raw .toml. Both are gated by dashboard auth.
+  ratholeConfigUrl: (id: string, format?: 'script') =>
+    `/api/machines/${id}/rathole-config${format ? `?format=${format}` : ''}`,
 }

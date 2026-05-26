@@ -169,6 +169,32 @@ func (s *MachineService) Deploy(id string) error {
 	return nil
 }
 
+// CanonicalRatholeConfig returns the client.toml that this machine should
+// currently be running, derived from the DB and the current server-side noise
+// pubkey. Provides a manual recovery handle for the case where automated
+// config push can't land (machine unreachable, disk full, agent broken).
+// Equivalent to what mergeClientManagedConfig would produce against an empty
+// existing file — the canonical "fresh paste" version.
+func (s *MachineService) CanonicalRatholeConfig(id string) (string, error) {
+	machine, err := db.GetMachine(id)
+	if err != nil {
+		return "", err
+	}
+	settings, err := db.GetSettings()
+	if err != nil {
+		return "", fmt.Errorf("load settings: %w", err)
+	}
+	tunnels, err := db.GetTunnelsByMachine(machine.ID)
+	if err != nil {
+		return "", fmt.Errorf("load tunnels for machine: %w", err)
+	}
+	cfg, err := mergeClientManagedConfig("", machine, tunnels, ratholeHostFromSettings(settings), settings.RatholeNoisePubKey)
+	if err != nil {
+		return "", err
+	}
+	return cfg, nil
+}
+
 func (s *MachineService) Status(id string) (map[string]interface{}, error) {
 	machine, err := db.GetMachine(id)
 	if err != nil {

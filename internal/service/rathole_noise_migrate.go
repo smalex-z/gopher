@@ -8,6 +8,36 @@ import (
 	"github.com/smalex-z/gopher/internal/db"
 )
 
+// RetryPendingConfigPush is the ConfigPusher hook the health service calls
+// when a machine that previously failed a push (e.g. during the noise
+// migration) becomes reachable again. Replays the same merge logic the
+// migration would have used — current DB state + current settings — so
+// regardless of how stale the machine's local config is, one successful
+// retry brings it fully in sync.
+//
+// On success, the push pipeline (updateClientToml) clears the flag. On
+// failure, the flag stays set and the health service will retry on the
+// next reconnect.
+func (s *LocalSetupService) RetryPendingConfigPush(machine *db.Machine) error {
+	if machine == nil {
+		return fmt.Errorf("nil machine")
+	}
+	settings, err := db.GetSettings()
+	if err != nil {
+		return fmt.Errorf("load settings: %w", err)
+	}
+	machineTunnels, err := db.GetTunnelsByMachine(machine.ID)
+	if err != nil {
+		return fmt.Errorf("load tunnels: %w", err)
+	}
+	ratholeHost := ratholeHostFromSettings(settings)
+	noisePub := settings.RatholeNoisePubKey
+	transformer := func(existing string) (string, error) {
+		return mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost, noisePub)
+	}
+	return s.updateClientToml(machine, transformer)
+}
+
 // EnsureRatholeNoiseKeys generates and persists a fresh X25519 keypair the
 // first time it's called on a given install; subsequent calls are no-ops.
 // Returns the (pub, priv) pair in base64 form regardless of whether they
@@ -112,7 +142,16 @@ func (s *LocalSetupService) MigrateRatholeNoise() error {
 			return mergeClientManagedConfig(existing, m, machineTunnels, ratholeHost, noisePub)
 		}
 		if perr := s.updateClientToml(m, transformer); perr != nil {
-			log.Printf("rathole noise migration: push to %s (%s) failed: %v — machine will be unreachable after server flip until re-bootstrapped", m.ID, m.Name, perr)
+			log.Printf("rathole noise migration: push to %s (%s) failed: %v — flagged for retry on next health-check reconnect", m.ID, m.Name, perr)
+			// Mark for the health-loop retry path. When the machine next
+			// becomes reachable (operator frees disk / brings it back online),
+			// HealthService re-attempts the push and clears the flag on
+			// success. Without this flag, the only recovery is operator-
+			// triggered (re-bootstrap, manual edit, or the new /rathole-config
+			// recovery script).
+			if cerr := db.SetMachineConfigPushPending(m.ID, true); cerr != nil {
+				log.Printf("rathole noise migration: set config_push_pending for %s: %v", m.ID, cerr)
+			}
 			failed++
 			continue
 		}

@@ -63,6 +63,13 @@ type Machine struct {
 	AgentVersion      string     `json:"agent_version,omitempty"`       // version string returned by the agent's /version endpoint
 	AgentLastSeen     *time.Time `json:"agent_last_seen,omitempty"`     // last successful agent poll
 	AgentInstallError string     `json:"agent_install_error,omitempty"` // last install failure (cleared on success)
+	// ConfigPushPending marks machines whose last attempted client.toml push
+	// failed (offline, full disk, agent down). The health service retries the
+	// push the next time the machine becomes reachable, then clears the flag.
+	// Set by the noise migration's failure path; intended to be general — any
+	// future push path that fails to land should set this rather than logging
+	// and moving on.
+	ConfigPushPending bool       `json:"config_push_pending,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at"`
 	Tunnels           []Tunnel   `json:"tunnels,omitempty" gorm:"foreignKey:MachineID"`

@@ -222,18 +222,37 @@ func (s *LocalSetupService) updateClientToml(machine *db.Machine, transform func
 		return fmt.Errorf("nil machine")
 	}
 
+	var pushErr error
 	if machine.AgentInstalled && machine.AgentRemotePort > 0 {
-		if err := s.updateClientTomlViaAgent(machine, transform); err == nil {
+		if pushErr = s.updateClientTomlViaAgent(machine, transform); pushErr == nil {
+			clearConfigPushPending(machine)
 			return nil
-		} else {
-			// Agent failed (network, timeout, permission). Fall back to SSH so
-			// the operation still completes; log so we can spot persistent
-			// agent issues that should be debugged.
-			log.Printf("agent client.toml push failed for machine %s (%s): %v — falling back to SSH", machine.ID, machine.Name, err)
 		}
+		// Agent failed (network, timeout, permission). Fall back to SSH so
+		// the operation still completes; log so we can spot persistent
+		// agent issues that should be debugged.
+		log.Printf("agent client.toml push failed for machine %s (%s): %v — falling back to SSH", machine.ID, machine.Name, pushErr)
 	}
 
-	return s.updateClientTomlViaSSH(machine, transform)
+	if pushErr = s.updateClientTomlViaSSH(machine, transform); pushErr == nil {
+		clearConfigPushPending(machine)
+	}
+	return pushErr
+}
+
+// clearConfigPushPending is the success-hook for any client.toml push path.
+// Centralised here (not in each push variant) so the agent and SSH transports
+// share the same flag-clear semantics: a config push that lands successfully
+// means the machine is current, regardless of how it got there.
+func clearConfigPushPending(machine *db.Machine) {
+	if machine == nil || !machine.ConfigPushPending {
+		return // fast-path: nothing to clear
+	}
+	if err := db.SetMachineConfigPushPending(machine.ID, false); err != nil {
+		log.Printf("clear config_push_pending for %s (%s): %v", machine.ID, machine.Name, err)
+		return
+	}
+	machine.ConfigPushPending = false
 }
 
 func (s *LocalSetupService) updateClientTomlViaAgent(machine *db.Machine, transform func(existing string) (string, error)) error {

@@ -402,6 +402,13 @@ export default function MachinesPage() {
                           >
                             <Plus size={11} /> Tunnel
                           </button>
+                          <a
+                            href={machinesApi.ratholeConfigUrl(m.id, 'script')}
+                            title="Download a one-shot recovery shell script (run as root on the machine) that restores /etc/rathole/client.toml to its canonical state. Use when the agent push can't reach the box (offline, full disk, broken tunnel)."
+                            className="px-2 py-1 text-xs bg-slate-50 text-slate-700 border border-slate-200 rounded hover:bg-slate-100"
+                          >
+                            Recover
+                          </a>
                           <button
                             onClick={() => handleDelete(m.id)}
                             className="px-2 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100"

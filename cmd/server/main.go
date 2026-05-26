@@ -93,6 +93,11 @@ func runServer(args []string) {
 	backupSvc := service.NewBackupService(*dbPath)
 	agentInstaller := service.NewAgentInstaller(localSvc)
 	healthSvc := service.NewHealthService(true)
+	// Wire the deferred-push retry hook before Start: when a previously-
+	// unreachable machine comes back online, the health loop retries the
+	// client.toml push that the migration couldn't land. Setter-style to
+	// avoid a circular dep with LocalSetupService.
+	healthSvc.SetConfigPusher(localSvc)
 	healthSvc.Start()
 	go secSvc.SyncFail2banConfig()
 	monitorSvc := service.NewMonitorService()

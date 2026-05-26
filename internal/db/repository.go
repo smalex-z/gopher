@@ -83,6 +83,16 @@ func UpdateMachine(machine *Machine) error {
 // SetMachineStatus updates only Status / LastSeen / UpdatedAt — used by the
 // monitor and the TCP-fallback health probe so concurrent writes from the
 // agent path can't be clobbered by a stale full-record Save.
+// SetMachineConfigPushPending sets/clears the ConfigPushPending flag without
+// touching any other field. Partial Update (vs. a full GORM Save) so we don't
+// race the health/monitor writers that may have just updated agent fields.
+func SetMachineConfigPushPending(id string, pending bool) error {
+	return DB.Model(&Machine{}).Where("id = ?", id).Updates(map[string]any{
+		"config_push_pending": pending,
+		"updated_at":          time.Now(),
+	}).Error
+}
+
 func SetMachineStatus(id, status string, lastSeen *time.Time) error {
 	updates := map[string]any{
 		"status":     status,
