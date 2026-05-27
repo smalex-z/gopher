@@ -9,20 +9,12 @@ GOPHER_PORT=8181
 GOPHER_DB="test-idempotency.db"
 COOKIE_JAR=""
 GOPHER_PID=""
+GOPHER_LOG=""
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck disable=SC1091
+source "$(dirname "$0")/lib.sh"
 
-pass() { echo -e "${GREEN}✅ $1${NC}"; }
-fail() { echo -e "${RED}❌ $1${NC}"; exit 1; }
-
-cleanup() {
-    [[ -n "$GOPHER_PID" ]] && kill "$GOPHER_PID" 2>/dev/null || true
-    [[ -n "$COOKIE_JAR" ]] && rm -f "$COOKIE_JAR"
-    rm -f "$GOPHER_DB"
-}
-trap cleanup EXIT
+trap cleanup_gopher_artefacts EXIT
 
 echo "🧪 Idempotency Tests"
 echo "===================="
@@ -34,25 +26,13 @@ fi
 command -v jq >/dev/null 2>&1 || fail "jq is required but not installed"
 command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 is required but not installed"
 
-rm -f "$GOPHER_DB"
 COOKIE_JAR=$(mktemp /tmp/gopher-cookies.XXXXX)
+GOPHER_LOG=$(mktemp /tmp/gopher-stderr.XXXXX)
 
 # ── Start Server ───────────────────────────────────────────────────────────────
 echo ""
 echo "1. Starting Gopher on port $GOPHER_PORT..."
-./gopher --db "$GOPHER_DB" --port "$GOPHER_PORT" >/dev/null 2>&1 &
-GOPHER_PID=$!
-
-# 30s ceiling — CI runners hit the previous 15s cap intermittently
-# under cold-cache conditions; see critical-path.sh for the same fix.
-for i in $(seq 1 60); do
-    if curl -sf "http://localhost:$GOPHER_PORT/api/status" >/dev/null 2>&1; then
-        pass "Server ready"
-        break
-    fi
-    sleep 0.5
-    [[ $i -eq 60 ]] && fail "Server did not start within 30 seconds"
-done
+start_gopher_with_retry
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 curl -sf -c "$COOKIE_JAR" \
