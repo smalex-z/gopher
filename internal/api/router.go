@@ -149,6 +149,8 @@ func NewRouter(
 				r.Post("/{id}/deploy", machineH.Deploy)
 				r.Get("/{id}/status", machineH.Status)
 				r.Get("/{id}/network-info", machineH.NetworkInfo)
+				r.Get("/{id}/rathole-config", machineH.RatholeConfig)
+				r.Post("/{id}/recover", machineH.Recover)
 				r.Put("/{id}/ssh-key", machineH.ReassignSSHKey)
 				// Agent migration / health
 				r.Get("/agent/pending", agentH.PendingMigrations)

@@ -184,11 +184,22 @@ func (h *BootstrapHandler) Migrate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// noise_pubkey lets migrate.sh ensure the [client.transport] block is
+	// present on the machine before adding the agent service. A pre-noise
+	// machine whose plaintext client.toml survived the upgrade migration
+	// (because it was offline at the time) gets repaired here on the next
+	// agent-install pass — the operator clicking "Install Agent" is the
+	// natural recovery handle for those stragglers.
+	noisePub := ""
+	if settings, sErr := db.GetSettings(); sErr == nil && settings != nil {
+		noisePub = settings.RatholeNoisePubKey
+	}
 	response.Success(w, map[string]any{
 		"machine_id":     machine.ID,
 		"agent_token":    machine.AgentToken,
 		"agent_port":     machine.AgentLocalPort,
 		"rathole_token":  machine.AgentRatholeToken,
+		"noise_pubkey":   noisePub,
 	})
 }
 

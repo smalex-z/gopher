@@ -25,7 +25,7 @@ func TestBuildClientTunnelSection_UsesServerStyleDelimiters(t *testing.T) {
 
 func TestGenerateMachineSSHClientConfig_UsesServerStyleDelimiters(t *testing.T) {
 	machine := &db.Machine{ID: "mac123", RatholeSSHToken: "ssh-token"}
-	cfg := config.GenerateMachineSSHClientConfig("router.example.com", machine)
+	cfg := config.GenerateMachineSSHClientConfig("router.example.com", machine, "")
 
 	if !strings.Contains(cfg, "# gopher-machine-start: mac123") {
 		t.Fatalf("missing machine start marker:\n%s", cfg)
@@ -98,7 +98,7 @@ local_addr = "127.0.0.1:7000"
 		{ID: "tunB", MachineID: "mac123", RatholeToken: "tokB", LocalPort: 3001},
 	}
 
-	updated, err := mergeClientManagedConfig(existing, machine, tunnels, "router.example.com")
+	updated, err := mergeClientManagedConfig(existing, machine, tunnels, "router.example.com", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -122,7 +122,7 @@ local_addr = "127.0.0.1:7000"
 
 func TestMergeClientManagedConfig_EmptyExistingRequiresHost(t *testing.T) {
 	machine := &db.Machine{ID: "mac123", RatholeSSHToken: "tok-ssh"}
-	_, err := mergeClientManagedConfig("", machine, nil, "")
+	_, err := mergeClientManagedConfig("", machine, nil, "", "")
 	if err == nil {
 		t.Fatal("expected error when existing config and host are both empty")
 	}
@@ -159,7 +159,7 @@ local_addr = "127.0.0.1:4322"
 		AgentLocalPort:    4322,
 		AgentRemotePort:   1027, // required by symmetric gating (#30)
 	}
-	updated, err := mergeClientManagedConfig(existing, machine, nil, "router.example.com")
+	updated, err := mergeClientManagedConfig(existing, machine, nil, "router.example.com", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -179,7 +179,7 @@ local_addr = "127.0.0.1:4322"
 // should not emit an agent block and should not error.
 func TestMergeClientManagedConfig_OmitsAgentBlockForLegacyMachine(t *testing.T) {
 	machine := &db.Machine{ID: "leg1", RatholeSSHToken: "ssh"}
-	updated, err := mergeClientManagedConfig("", machine, nil, "router.example.com")
+	updated, err := mergeClientManagedConfig("", machine, nil, "router.example.com", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -212,6 +212,72 @@ token = "custom"
 	}
 	if !strings.Contains(out, "[client.services.user-custom]") {
 		t.Fatalf("user section should be preserved:\n%s", out)
+	}
+}
+
+// The upgrade path depends on mergeClientManagedConfig injecting the
+// [client.transport] block when the server has a noise pubkey, AND on it
+// stripping any stale transport section first so a key rotation (or a
+// re-run of the migration) doesn't leave two conflicting blocks behind.
+func TestMergeClientManagedConfig_AddsNoiseTransportFromEmpty(t *testing.T) {
+	machine := &db.Machine{ID: "m1", RatholeSSHToken: "tok"}
+	out, err := mergeClientManagedConfig("", machine, nil, "router.example.com", "PUBKEY_BASE64")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "[client.transport]") {
+		t.Fatalf("expected [client.transport] block when pubkey supplied:\n%s", out)
+	}
+	if !strings.Contains(out, `remote_public_key = "PUBKEY_BASE64"`) {
+		t.Fatalf("expected pubkey embedded:\n%s", out)
+	}
+	// Transport must precede service sections — rathole applies it during
+	// the handshake, not retroactively.
+	if strings.Index(out, "[client.transport]") > strings.Index(out, "[client.services.") {
+		t.Fatalf("transport block must come before service blocks:\n%s", out)
+	}
+}
+
+func TestMergeClientManagedConfig_ReplacesStaleNoiseTransport(t *testing.T) {
+	// A previous migration (or a manual edit) left an out-of-date transport
+	// section. We need the merge to strip it before re-emitting from the
+	// current pubkey, otherwise rathole sees two [client.transport.noise]
+	// sections and errors out.
+	existing := `[client]
+remote_addr = "router.example.com:2333"
+
+[client.transport]
+type = "noise"
+
+[client.transport.noise]
+remote_public_key = "OLD_KEY"
+`
+	machine := &db.Machine{ID: "m1", RatholeSSHToken: "tok"}
+	out, err := mergeClientManagedConfig(existing, machine, nil, "router.example.com", "NEW_KEY")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out, "OLD_KEY") {
+		t.Fatalf("stale pubkey should have been stripped:\n%s", out)
+	}
+	if !strings.Contains(out, `remote_public_key = "NEW_KEY"`) {
+		t.Fatalf("expected new pubkey present:\n%s", out)
+	}
+	if strings.Count(out, "[client.transport]") != 1 {
+		t.Fatalf("expected exactly one [client.transport] section, got %d:\n%s", strings.Count(out, "[client.transport]"), out)
+	}
+}
+
+func TestMergeClientManagedConfig_OmitsTransportWhenPubKeyEmpty(t *testing.T) {
+	// Pre-migration installs: no key yet, must not emit a transport block
+	// (rathole would treat an empty noise key as invalid).
+	machine := &db.Machine{ID: "m1", RatholeSSHToken: "tok"}
+	out, err := mergeClientManagedConfig("", machine, nil, "router.example.com", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out, "[client.transport]") {
+		t.Fatalf("[client.transport] must not be emitted when no pubkey is configured:\n%s", out)
 	}
 }
 

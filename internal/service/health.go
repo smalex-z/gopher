@@ -39,6 +39,21 @@ type HealthService struct {
 	// first check for a given machine — a "first observation" is not a
 	// transition and produces no event.
 	lastStatus map[string]string
+
+	// configPusher retries a deferred client.toml push when a machine that
+	// missed an earlier push (offline / disk full during the noise migration)
+	// becomes reachable. Set by the cmd/server wiring; left nil in tests that
+	// only exercise the health-poll path. Nil disables the retry, which is the
+	// pre-existing behaviour.
+	configPusher ConfigPusher
+}
+
+// ConfigPusher decouples the health loop from the LocalSetupService. The
+// production implementation is *LocalSetupService — it pushes via the agent
+// back-channel and falls back to SSH. Tests that don't need the side effect
+// can leave it nil.
+type ConfigPusher interface {
+	RetryPendingConfigPush(machine *db.Machine) error
 }
 
 const (
@@ -58,6 +73,15 @@ func NewHealthService(autoRecover bool) *HealthService {
 		lastRecovery:   map[string]time.Time{},
 		lastStatus:     map[string]string{},
 	}
+}
+
+// SetConfigPusher wires the deferred-push retry hook. Called once from
+// cmd/server/main.go after both services are constructed. Doing it via a
+// post-construction setter avoids a circular dependency
+// (LocalSetupService needs HealthService for its hub, HealthService now
+// needs LocalSetupService for retries).
+func (s *HealthService) SetConfigPusher(p ConfigPusher) {
+	s.configPusher = p
 }
 
 // emitTransition records a state change as an event, but only when it's
@@ -256,6 +280,7 @@ func (s *HealthService) checkViaAgent(ctx context.Context, m *db.Machine, subjec
 		LatencyMS: latency,
 	})
 	s.emitTransition(m, "ok", "")
+	s.maybeRetryConfigPush(m)
 	return true
 }
 
@@ -290,6 +315,31 @@ func (s *HealthService) checkViaTCP(ctx context.Context, m *db.Machine, subject 
 		LatencyMS: latency,
 	})
 	s.emitTransition(m, "ok", "")
+	s.maybeRetryConfigPush(m)
+}
+
+// maybeRetryConfigPush re-attempts a previously-failed config push when the
+// machine has just been confirmed reachable. Set by the noise migration's
+// failure path (any future deferred-push case should set the same flag).
+//
+// The retry runs in a goroutine — we don't want a slow SSH dial to delay the
+// next health tick. On success, the push helper itself clears the flag so we
+// don't re-fire on the next cycle. Failure leaves the flag set and we retry
+// on the next reconnect — eventual-consistency, no exponential backoff
+// state to track here.
+func (s *HealthService) maybeRetryConfigPush(m *db.Machine) {
+	if s.configPusher == nil || !m.ConfigPushPending {
+		return
+	}
+	machine := *m // copy — m may be reused by the caller's pool
+	go goSafe("health.retryConfigPush", func() {
+		log.Printf("health: retrying deferred config push for %s (%s)", machine.ID, machine.Name)
+		if err := s.configPusher.RetryPendingConfigPush(&machine); err != nil {
+			log.Printf("health: retry config push for %s failed: %v — will retry on next reconnect", machine.ID, err)
+			return
+		}
+		log.Printf("health: deferred config push for %s succeeded", machine.ID)
+	})
 }
 
 // maybeRecover triggers `restart-rathole` via the agent when:

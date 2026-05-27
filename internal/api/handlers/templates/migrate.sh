@@ -57,6 +57,8 @@ MACHINE_ID=$(_json machine_id)
 AGENT_TOKEN=$(_json agent_token)
 AGENT_PORT=$(_json agent_port)
 RATHOLE_TOKEN=$(_json rathole_token)
+NOISE_PUBKEY=$(_json noise_pubkey 2>/dev/null || echo "")
+[ "$NOISE_PUBKEY" = "null" ] && NOISE_PUBKEY=""
 
 if [ -z "$MACHINE_ID" ] || [ "$MACHINE_ID" = "null" ]; then
   echo "ERROR: invalid response from /api/migrate" >&2
@@ -129,6 +131,29 @@ if [ -f /etc/rathole/client.toml ]; then
     $0 == end   { skip=0; next }
     !skip       { print }
   ' /etc/rathole/client.toml > /etc/rathole/client.toml.tmp
+
+  # Ensure the [client.transport] noise block is present. Required for any
+  # machine whose original bootstrap predated the noise upgrade — without
+  # this, rathole-client tries to connect plaintext to a noise-only server
+  # and the tunnel never establishes. Strip any stale transport sections
+  # first so re-running migrate.sh with a rotated key is idempotent.
+  if [ -n "$NOISE_PUBKEY" ]; then
+    awk '
+      /^\[client\.transport\]/         { skip=1; next }
+      /^\[client\.transport\.noise\]/  { skip=1; next }
+      skip && /^\[/                    { skip=0 }
+      !skip                            { print }
+    ' /etc/rathole/client.toml.tmp > /etc/rathole/client.toml.tmp2
+    mv /etc/rathole/client.toml.tmp2 /etc/rathole/client.toml.tmp
+    cat >> /etc/rathole/client.toml.tmp <<EOF
+
+[client.transport]
+type = "noise"
+
+[client.transport.noise]
+remote_public_key = "$NOISE_PUBKEY"
+EOF
+  fi
 
   cat >> /etc/rathole/client.toml.tmp <<EOF
 

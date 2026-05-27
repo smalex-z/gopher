@@ -62,10 +62,12 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	// Rebuild gopher-managed config from DB using the canonical generator.
 	settings, _ := db.GetSettings()
 	bindIP := ""
+	noisePriv := ""
 	if settings != nil {
 		bindIP = settings.BindIP
+		noisePriv = settings.RatholeNoisePrivKey
 	}
-	managedConfig := config.GenerateRatholeServerConfig(machines, tunnels, bindIP)
+	managedConfig := config.GenerateRatholeServerConfig(machines, tunnels, bindIP, noisePriv)
 
 	// Guardrail: never write a generated config that fails self-validation.
 	validation := config.ValidateRatholeConfig(managedConfig, machines, tunnels)
@@ -159,8 +161,9 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		return fmt.Errorf("failed to load machine tunnels: %w", err)
 	}
 	ratholeHost := ratholeHostFromSettings(settings)
+	noisePub := settings.RatholeNoisePubKey
 	transformer := func(existing string) (string, error) {
-		return mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost)
+		return mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost, noisePub)
 	}
 	if err := s.updateClientToml(machine, transformer); err != nil {
 		return fmt.Errorf("failed to write client.toml on machine: %w", err)
@@ -219,18 +222,37 @@ func (s *LocalSetupService) updateClientToml(machine *db.Machine, transform func
 		return fmt.Errorf("nil machine")
 	}
 
+	var pushErr error
 	if machine.AgentInstalled && machine.AgentRemotePort > 0 {
-		if err := s.updateClientTomlViaAgent(machine, transform); err == nil {
+		if pushErr = s.updateClientTomlViaAgent(machine, transform); pushErr == nil {
+			clearConfigPushPending(machine)
 			return nil
-		} else {
-			// Agent failed (network, timeout, permission). Fall back to SSH so
-			// the operation still completes; log so we can spot persistent
-			// agent issues that should be debugged.
-			log.Printf("agent client.toml push failed for machine %s (%s): %v — falling back to SSH", machine.ID, machine.Name, err)
 		}
+		// Agent failed (network, timeout, permission). Fall back to SSH so
+		// the operation still completes; log so we can spot persistent
+		// agent issues that should be debugged.
+		log.Printf("agent client.toml push failed for machine %s (%s): %v — falling back to SSH", machine.ID, machine.Name, pushErr)
 	}
 
-	return s.updateClientTomlViaSSH(machine, transform)
+	if pushErr = s.updateClientTomlViaSSH(machine, transform); pushErr == nil {
+		clearConfigPushPending(machine)
+	}
+	return pushErr
+}
+
+// clearConfigPushPending is the success-hook for any client.toml push path.
+// Centralised here (not in each push variant) so the agent and SSH transports
+// share the same flag-clear semantics: a config push that lands successfully
+// means the machine is current, regardless of how it got there.
+func clearConfigPushPending(machine *db.Machine) {
+	if machine == nil || !machine.ConfigPushPending {
+		return // fast-path: nothing to clear
+	}
+	if err := db.SetMachineConfigPushPending(machine.ID, false); err != nil {
+		log.Printf("clear config_push_pending for %s (%s): %v", machine.ID, machine.Name, err)
+		return
+	}
+	machine.ConfigPushPending = false
 }
 
 func (s *LocalSetupService) updateClientTomlViaAgent(machine *db.Machine, transform func(existing string) (string, error)) error {
@@ -514,7 +536,7 @@ local_addr = "127.0.0.1:%d"
 `, machine.ID, machine.ID, machine.AgentRatholeToken, machine.AgentLocalPort, machine.ID)
 }
 
-func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db.Tunnel, ratholeHost string) (string, error) {
+func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db.Tunnel, ratholeHost, noisePubKey string) (string, error) {
 	base := strings.TrimSpace(existing)
 	if base == "" {
 		ratholeHost = strings.TrimSpace(ratholeHost)
@@ -529,8 +551,18 @@ func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db
 		return "", fmt.Errorf("machine is missing SSH tunnel token; bootstrap the machine again")
 	}
 
+	// Synchronise the [client.transport] block with what the server currently
+	// expects. Without this step, a machine that was bootstrapped before
+	// noise was enabled keeps its plaintext-only client.toml across config
+	// pushes and silently fails to reconnect the moment the server flips to
+	// noise. Strip any stale block and re-emit from the canonical key.
+	base = stripClientTransportSection(base)
+
 	cleaned := stripClientManagedSections(base)
 	updated := strings.TrimRight(cleaned, "\n")
+	if block := strings.TrimRight(config.RenderClientNoiseTransport(noisePubKey), "\n"); block != "" {
+		updated += "\n\n" + block
+	}
 
 	sections := []string{machineSection}
 	if agentSection := strings.TrimSpace(buildClientMachineAgentSection(machine)); agentSection != "" {
@@ -565,6 +597,17 @@ func stripClientManagedSections(content string) string {
 	stripped = removeTomlSectionsWithPrefix(stripped, "client.services.tunnel-")
 	stripped = removeTomlSectionsWithPrefix(stripped, "client.services.machine-")
 	return stripped
+}
+
+// stripClientTransportSection removes the [client.transport] header and its
+// [client.transport.noise] subsection. Used during config merges so the
+// canonical transport block can be re-emitted from the current server pubkey
+// — if we only stripped the [client.transport] header, the orphan
+// [client.transport.noise] section below it would cause rathole to error.
+func stripClientTransportSection(content string) string {
+	content = removeTomlSection(content, "client.transport")
+	content = removeTomlSection(content, "client.transport.noise")
+	return content
 }
 
 func stripClientManagedMarkerBlocks(content string) string {

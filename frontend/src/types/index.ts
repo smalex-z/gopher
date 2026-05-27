@@ -31,6 +31,10 @@ export interface Machine {
   agent_version?: string
   agent_last_seen?: string | null
   agent_install_error?: string
+  // config_push_pending — set when an earlier config push (typically the
+  // noise migration) couldn't land. The health loop retries on reconnect;
+  // the dashboard surfaces a Recover button until cleared.
+  config_push_pending?: boolean
   created_at: string
   updated_at: string
   tunnels?: Tunnel[]

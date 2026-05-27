@@ -231,7 +231,7 @@ func (s *DeployService) DeployClient(machine *db.Machine) error {
 	defer client.Close()
 
 	existingConfig, _ := client.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
-	clientConfig, err := mergeClientManagedConfig(existingConfig, machine, tunnels, ratholeHostFromSettings(settings))
+	clientConfig, err := mergeClientManagedConfig(existingConfig, machine, tunnels, ratholeHostFromSettings(settings), settings.RatholeNoisePubKey)
 	if err != nil {
 		fmt.Fprintf(w, "ERROR: Failed to generate client config: %v\n", err)
 		s.Hub.Broadcast("\x00DONE")

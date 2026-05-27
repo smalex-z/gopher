@@ -93,6 +93,11 @@ func runServer(args []string) {
 	backupSvc := service.NewBackupService(*dbPath)
 	agentInstaller := service.NewAgentInstaller(localSvc)
 	healthSvc := service.NewHealthService(true)
+	// Wire the deferred-push retry hook before Start: when a previously-
+	// unreachable machine comes back online, the health loop retries the
+	// client.toml push that the migration couldn't land. Setter-style to
+	// avoid a circular dep with LocalSetupService.
+	healthSvc.SetConfigPusher(localSvc)
 	healthSvc.Start()
 	go secSvc.SyncFail2banConfig()
 	monitorSvc := service.NewMonitorService()
@@ -128,6 +133,15 @@ func runServer(args []string) {
 		if err := localSvc.ReconcileServerConfig(); err != nil {
 			log.Printf("startup: failed to reconcile rathole server config: %v", err)
 		}
+		// One-shot upgrade from plaintext rathole transport → encrypted noise.
+		// Runs in a goroutine so a slow SSH push to one offline machine doesn't
+		// hold up the dashboard coming online. No-op on installs that have
+		// already migrated or haven't completed the wizard yet.
+		go func() {
+			if err := localSvc.MigrateRatholeNoise(); err != nil {
+				log.Printf("startup: rathole noise migration: %v", err)
+			}
+		}()
 	} else {
 		log.Printf("dev mode: skipping rathole/Caddy/sudoers/authorized_keys reconciles")
 	}

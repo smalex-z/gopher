@@ -1,9 +1,11 @@
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Activity, Cpu, MemoryStick, HardDrive, Clock, RefreshCw, AlertTriangle } from 'lucide-react'
+import { Activity, Cpu, MemoryStick, HardDrive, Clock, RefreshCw, AlertTriangle, LifeBuoy } from 'lucide-react'
 import { machinesApi } from '../api/machines'
 import { toast } from '../lib/toast'
 import { relativeTime, formatBytes, formatDuration } from '../lib/time'
 import Sparkline from './Sparkline'
+import RecoveryModal from './RecoveryModal'
 import type { Machine } from '../types'
 
 // Per-machine health panel embedded in the Machines page expanded row.
@@ -53,6 +55,35 @@ export default function MachineHealthPanel({ machine }: Props) {
     onError: (e: Error) => toast.error(e.message),
   })
 
+  // Recovery fallback chain:
+  //   1. POST /recover — server-side push (agent → SSH-via-tunnel).
+  //   2. If that fails (typically because the tunnel is fully down), open
+  //      a modal with the manual script + instructions.
+  // The button is shown whenever something is actually broken on this row:
+  // the machine itself is offline, a config push is still pending from an
+  // earlier failure, OR any single tunnel is offline. The last case covers
+  // "machine reachable but tunnel-X's client section got lost" — the
+  // canonical config push re-adds it. Idempotent for healthy-but-stale rows.
+  const [recoveryModal, setRecoveryModal] = useState<{ open: boolean; reason: string }>({ open: false, reason: '' })
+  const anyTunnelDown = (machine.tunnels ?? []).some(t => t.status === 'offline')
+  const needsRecovery = machine.status === 'offline' || machine.config_push_pending === true || anyTunnelDown
+  const recover = useMutation({
+    mutationFn: () => machinesApi.recover(machine.id),
+    onSuccess: (res) => {
+      toast.success(res?.message || 'Config pushed — rathole reconnecting')
+      qc.invalidateQueries({ queryKey: ['machine-health', machine.id] })
+      qc.invalidateQueries({ queryKey: ['agent-status', machine.id] })
+      qc.invalidateQueries({ queryKey: ['machines'] })
+    },
+    onError: (e: Error) => {
+      // Both server-side push paths failed — the rathole tunnel is fully
+      // down. Fall back to manual: open the modal with the script and
+      // instructions. The error message is shown verbatim so the operator
+      // can see why (disk full, timeout, etc.) and act on it.
+      setRecoveryModal({ open: true, reason: e.message })
+    },
+  })
+
   const summary = summaryQuery.data
   const status = statusQuery.data
 
@@ -71,15 +102,28 @@ export default function MachineHealthPanel({ machine }: Props) {
           <Activity size={12} className="text-blue-500" />
           Health & metrics
         </div>
-        <button
-          onClick={() => testNow.mutate()}
-          disabled={testNow.isPending}
-          className="flex items-center gap-1 px-2 py-0.5 text-xs border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
-          title="Run a health check now instead of waiting for the next 60s poll"
-        >
-          <RefreshCw size={11} className={testNow.isPending ? 'animate-spin' : ''} />
-          {testNow.isPending ? 'Testing…' : 'Test now'}
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => testNow.mutate()}
+            disabled={testNow.isPending}
+            className="flex items-center gap-1 px-2 py-0.5 text-xs border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
+            title="Run a health check now instead of waiting for the next 60s poll"
+          >
+            <RefreshCw size={11} className={testNow.isPending ? 'animate-spin' : ''} />
+            {testNow.isPending ? 'Testing…' : 'Test now'}
+          </button>
+          {needsRecovery && (
+            <button
+              onClick={() => recover.mutate()}
+              disabled={recover.isPending}
+              title="Try to repair this machine: agent push → SSH fallback → manual script. The button only appears when the machine is offline or has a deferred config push."
+              className="flex items-center gap-1 px-2 py-0.5 text-xs border border-amber-300 bg-amber-50 text-amber-800 rounded hover:bg-amber-100 disabled:opacity-50"
+            >
+              <LifeBuoy size={11} className={recover.isPending ? 'animate-spin' : ''} />
+              {recover.isPending ? 'Recovering…' : 'Recover'}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Uptime + sparkline */}
@@ -165,6 +209,14 @@ export default function MachineHealthPanel({ machine }: Props) {
           )}
         </div>
       )}
+
+      <RecoveryModal
+        isOpen={recoveryModal.open}
+        onClose={() => setRecoveryModal({ open: false, reason: '' })}
+        machineID={machine.id}
+        machineName={machine.name}
+        reason={recoveryModal.reason}
+      />
     </div>
   )
 }
