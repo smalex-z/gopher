@@ -30,9 +30,18 @@ export const machinesApi = {
     client.post<{ data: { check: HealthCheck; now: string } }>(`/machines/${id}/health/check`).then(r => r.data.data),
   agentStatus: (id: string) =>
     client.get<ApiResponse<AgentStatus>>(`/machines/${id}/agent-status`).then(r => r.data.data),
-  // Canonical client.toml the machine should be running. format='script'
-  // wraps it in a one-shot recovery shell script (sudo bash on the machine).
-  // format=undefined returns the raw .toml. Both are gated by dashboard auth.
+  // Server-side recovery: tries agent push, falls back to SSH-via-tunnel.
+  // Resolves with a success message; rejects with the underlying push error
+  // when both paths failed (typically the tunnel is fully down — operator
+  // falls back to the manual script).
+  recover: (id: string) => client.post<ApiResponse<{ message: string }>>(`/machines/${id}/recover`).then(r => r.data.data),
+  // Canonical client.toml the machine should be running. The text variant is
+  // fetched into the dashboard for display in the recovery modal; the script
+  // variant is the .sh download (server-side recovery has already failed).
+  ratholeConfig: (id: string) =>
+    client.get<string>(`/machines/${id}/rathole-config`, { responseType: 'text', transformResponse: r => r }).then(r => r.data),
+  ratholeConfigScript: (id: string) =>
+    client.get<string>(`/machines/${id}/rathole-config?format=script`, { responseType: 'text', transformResponse: r => r }).then(r => r.data),
   ratholeConfigUrl: (id: string, format?: 'script') =>
     `/api/machines/${id}/rathole-config${format ? `?format=${format}` : ''}`,
 }

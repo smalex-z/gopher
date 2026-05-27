@@ -169,6 +169,29 @@ func (s *MachineService) Deploy(id string) error {
 	return nil
 }
 
+// RecoverMachine drives the server-side recovery flow: tries the agent push
+// first, then SSH-via-tunnel, exactly as RetryPendingConfigPush does for the
+// health-loop. Exposed as a separate entry point so the API handler doesn't
+// need to know about LocalSetupService internals.
+//
+// Returns the underlying push error verbatim so the operator can see why
+// recovery failed in the dashboard (e.g. "no space left on device" tells
+// them to free disk first; "i/o timeout" tells them the tunnel is fully
+// down and only the manual script will work).
+func (s *MachineService) RecoverMachine(id string) error {
+	machine, err := db.GetMachine(id)
+	if err != nil {
+		return err
+	}
+	local, ok := s.local.(interface {
+		RetryPendingConfigPush(*db.Machine) error
+	})
+	if !ok {
+		return fmt.Errorf("recovery not supported in this build")
+	}
+	return local.RetryPendingConfigPush(machine)
+}
+
 // CanonicalRatholeConfig returns the client.toml that this machine should
 // currently be running, derived from the DB and the current server-side noise
 // pubkey. Provides a manual recovery handle for the case where automated
