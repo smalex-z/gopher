@@ -111,6 +111,7 @@ func NewRouter(
 				r.Post("/setup-fail2ban", localH.SetupFail2ban)
 				r.Put("/server-ports", localH.SetServerPorts)
 				r.Put("/bind-ip", localH.SetBindIP)
+				r.Post("/dismiss-custom-services-warning", localH.DismissCustomServicesWarning)
 				r.Route("/firewall", func(r chi.Router) {
 					r.Get("/overview", firewallH.Overview)
 					r.Post("/rules", firewallH.CreateRule)

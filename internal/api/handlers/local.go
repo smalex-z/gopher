@@ -38,6 +38,21 @@ func (h *LocalHandler) Status(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, status)
 }
 
+// POST /api/local/dismiss-custom-services-warning — clears the
+// "user-managed services need manual noise pubkey update" banner. Doesn't
+// touch the underlying service list (operator may want to re-show it later
+// by clicking a button — out of scope for now; just dismisses).
+func (h *LocalHandler) DismissCustomServicesWarning(w http.ResponseWriter, r *http.Request) {
+	if err := db.MutateSettings(func(s *db.AppSettings) error {
+		s.RatholeCustomServicesWarningDismissed = true
+		return nil
+	}); err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"message": "warning dismissed"})
+}
+
 // guardSetupOnly rejects the request with 403 when setup has already
 // progressed past the point where the endpoint makes sense. Used to lock
 // down the public first-run wizard endpoints once the operator has finished
@@ -308,43 +323,41 @@ func (h *LocalHandler) ResolveIP(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, map[string]string{"ip": ips[0]})
 }
 
-// GET /api/local/check-dns?domain=example.com
+// GET /api/local/check-dns?domain=example.com&expected_ip=1.2.3.4
 // Public endpoint — called during setup wizard before auth is established.
-// Resolves router.DOMAIN to verify the wildcard DNS record is in place.
+// Runs a structured DNS preflight (wildcard, router, propagation, ip_match,
+// CAA) and returns per-check results so the wizard can show the operator
+// *why* DNS isn't ready, not just a generic "not found." The expected_ip
+// query param is optional — when provided (the wizard passes the result of
+// detect-ip), the ip_match check compares resolved IPs against it; when
+// absent, ip_match is skipped.
 func (h *LocalHandler) CheckDNS(w http.ResponseWriter, r *http.Request) {
 	domain := strings.TrimSpace(r.URL.Query().Get("domain"))
 	if domain == "" {
 		response.BadRequest(w, "domain is required")
 		return
 	}
-
-	// Validate domain: only allow valid hostname characters and reasonable length.
 	if len(domain) > 253 || !validDomain.MatchString(domain) {
 		response.BadRequest(w, "invalid domain")
 		return
 	}
 
-	host := fmt.Sprintf("router.%s", domain)
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	ips, err := net.DefaultResolver.LookupHost(ctx, host)
-	if err != nil || len(ips) == 0 {
-		msg := fmt.Sprintf("DNS lookup for %s returned no results", host)
-		if err != nil {
-			msg = err.Error()
-		}
-		response.Success(w, map[string]interface{}{
-			"ok":      false,
-			"message": msg,
-		})
-		return
+	expectedIP := strings.TrimSpace(r.URL.Query().Get("expected_ip"))
+	if expectedIP != "" && net.ParseIP(expectedIP) == nil {
+		// An invalid expected_ip shouldn't fail the whole request — just
+		// drop it and skip the ip_match check.
+		expectedIP = ""
 	}
 
-	response.Success(w, map[string]interface{}{
-		"ok":          true,
-		"resolved_to": ips[0],
-		"host":        host,
-	})
+	// Hard ceiling on the full preflight (random subdomain + router +
+	// 3-resolver fan-out + CAA, all in parallel) so a hung resolver can't
+	// stall the wizard. Each sub-check has its own ~3s timeout; the
+	// wrapper just guarantees we return.
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+
+	result := service.RunDNSPreflight(ctx, domain, expectedIP)
+	response.Success(w, result)
 }
 
 // GET /api/local/detect-ip

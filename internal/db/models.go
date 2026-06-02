@@ -187,6 +187,16 @@ type AppSettings struct {
 	// callers must treat empty as "skip noise emission" so config still parses.
 	RatholeNoisePrivKey string `json:"-"`
 	RatholeNoisePubKey  string `json:"-"`
+	// RatholeCustomServicesWarning is a JSON array of service names that were
+	// detected in /etc/rathole/server.toml's BEGIN/END CUSTOM CONFIGURATION
+	// block at noise-migration time. Those clients are managed outside Gopher
+	// (the operator added them by hand) and therefore weren't reachable for
+	// the automatic client.toml push — they need to be updated manually with
+	// the noise pubkey or they silently break the moment the server flips to
+	// noise. Empty when nothing was detected. Set once during migration;
+	// cleared only when the operator dismisses the dashboard banner.
+	RatholeCustomServicesWarning          string `json:"-"`
+	RatholeCustomServicesWarningDismissed bool   `json:"-"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }

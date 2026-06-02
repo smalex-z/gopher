@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -91,6 +92,18 @@ type LocalServiceStatus struct {
 	// HostIPs lists all non-loopback IPs detected on the host's network interfaces.
 	// Used by the frontend to warn when the host has multiple IPs and BindIP is unset.
 	HostIPs              []string `json:"host_ips"`
+	// RatholeNoisePubKey is the base64 X25519 server public key. Surfaced
+	// here (not behind a separate endpoint) so the dashboard can show it
+	// near the custom-services warning without an extra round trip. Operators
+	// updating hand-rolled rathole-client configs copy this into their
+	// [client.transport.noise] remote_public_key field.
+	RatholeNoisePubKey string `json:"rathole_noise_pubkey"`
+	// RatholeCustomServicesWarning carries the names of user-managed
+	// services detected in /etc/rathole/server.toml's custom block during
+	// the noise migration. When non-empty AND not dismissed, the dashboard
+	// renders a banner instructing the operator to update those clients.
+	// Empty slice (not absent) when nothing needs attention.
+	RatholeCustomServicesWarning []string `json:"rathole_custom_services_warning"`
 }
 
 type LocalSetupService struct {
@@ -131,7 +144,24 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 	if key, kerr := db.GetDefaultSSHKey(); kerr == nil {
 		status.SSHPublicKey = key.PublicKey
 	}
+	status.RatholeNoisePubKey = settings.RatholeNoisePubKey
+	status.RatholeCustomServicesWarning = decodeCustomServicesWarning(settings)
 	return status, nil
+}
+
+// decodeCustomServicesWarning returns the list of detected custom services
+// when there's an active warning, or an empty slice when none / dismissed.
+// JSON decode failures degrade silently — a corrupted JSON cell shouldn't
+// prevent the dashboard from rendering.
+func decodeCustomServicesWarning(s *db.AppSettings) []string {
+	if s == nil || s.RatholeCustomServicesWarningDismissed || s.RatholeCustomServicesWarning == "" {
+		return []string{}
+	}
+	var list []string
+	if err := json.Unmarshal([]byte(s.RatholeCustomServicesWarning), &list); err != nil {
+		return []string{}
+	}
+	return list
 }
 
 // ListSSHKeys returns all stored SSH key records (private keys excluded).

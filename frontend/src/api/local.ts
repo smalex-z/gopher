@@ -30,6 +30,13 @@ export interface LocalServiceStatus {
   bind_ip: string
   /** All non-loopback IPv4 addresses on the host. More than one means multi-homed. */
   host_ips: string[]
+  /** Base64 X25519 public key for rathole's noise transport. Operators copy
+   *  this into hand-rolled rathole-client configs for user-managed services. */
+  rathole_noise_pubkey: string
+  /** Names of user-managed services from server.toml's custom block that
+   *  need a manual noise pubkey update on their client side. Set during
+   *  noise migration. Empty when nothing needs attention or after dismissal. */
+  rathole_custom_services_warning: string[]
 }
 
 export interface FirewallStatus {
@@ -42,22 +49,38 @@ export interface FirewallStatus {
 
 export type FirewallMode = 'gopher' | 'manual' | 'none'
 
+export type DNSCheckStatus = 'pass' | 'warn' | 'fail' | 'skip'
+
+export interface DNSCheck {
+  name: string
+  label: string
+  status: DNSCheckStatus
+  message: string
+}
+
 export interface DNSCheckResult {
   ok: boolean
   message?: string
   resolved_to?: string
   host?: string
+  expected_ip?: string
+  checks?: DNSCheck[]
 }
 
 export const localApi = {
   status: () => client.get<{ data: LocalServiceStatus }>('/local/status').then(r => r.data.data),
+  dismissCustomServicesWarning: () =>
+    client.post('/local/dismiss-custom-services-warning').then(r => r.data),
   install: (domain: string, serverHost: string, skipCaddy?: boolean) =>
     client.post('/local/install', { domain, server_host: serverHost, skip_caddy: Boolean(skipCaddy) }).then(r => r.data),
   skip: (domain?: string) => client.post('/local/skip', { domain }).then(r => r.data),
   detectIP: () =>
     client.get<{ data: { ip: string } }>('/local/detect-ip').then(r => r.data.data),
-  checkDNS: (domain: string) =>
-    client.get<{ data: DNSCheckResult }>(`/local/check-dns?domain=${encodeURIComponent(domain)}`).then(r => r.data.data),
+  checkDNS: (domain: string, expectedIP?: string) => {
+    const params = new URLSearchParams({ domain })
+    if (expectedIP) params.set('expected_ip', expectedIP)
+    return client.get<{ data: DNSCheckResult }>(`/local/check-dns?${params.toString()}`).then(r => r.data.data)
+  },
   resolveIP: (host: string) =>
     client.get<{ data: { ip: string } }>(`/local/resolve-ip?host=${encodeURIComponent(host)}`).then(r => r.data.data),
   listSSHKeys: () =>

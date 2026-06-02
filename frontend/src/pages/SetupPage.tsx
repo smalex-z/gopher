@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 
 const toKeyFilename = (name: string) =>
   name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '')
-import { Lock, Eye, EyeOff, CheckCircle2, XCircle, Loader2, SkipForward, Key, RefreshCw, Upload, Download, ClipboardCopy, Shield, ShieldAlert, ShieldCheck, ShieldOff, ShieldBan } from 'lucide-react'
+import { Lock, Eye, EyeOff, CheckCircle2, XCircle, Loader2, SkipForward, Key, RefreshCw, Upload, Download, ClipboardCopy, Shield, ShieldAlert, ShieldCheck, ShieldOff, ShieldBan, AlertTriangle, MinusCircle } from 'lucide-react'
 import client from '../api/client'
 import { useAuth } from '../lib/auth'
-import { localApi, type LocalServiceStatus, type FirewallStatus, type FirewallMode } from '../api/local'
+import { localApi, type LocalServiceStatus, type FirewallStatus, type FirewallMode, type DNSCheckResult, type DNSCheck } from '../api/local'
 import { toast } from '../lib/toast'
 import DeployLogModal from '../components/DeployLogModal'
 import DownloadKeyButton from '../components/DownloadKeyButton'
@@ -106,6 +106,106 @@ function ServicePill({ state, label }: { state: string; label: string }) {
   )
 }
 
+// ─── DNS preflight UI ────────────────────────────────────────────────────────
+
+function DNSCheckRow({ check }: { check: DNSCheck }) {
+  const iconMap = {
+    pass: <CheckCircle2 size={14} className="text-green-600" />,
+    warn: <AlertTriangle size={14} className="text-amber-600" />,
+    fail: <XCircle size={14} className="text-red-600" />,
+    skip: <MinusCircle size={14} className="text-gray-400" />,
+  }
+  const labelColor = {
+    pass: 'text-green-800',
+    warn: 'text-amber-800',
+    fail: 'text-red-800',
+    skip: 'text-gray-500',
+  }[check.status]
+  return (
+    <li className="flex items-start gap-2 text-xs">
+      <span className="mt-0.5 shrink-0">{iconMap[check.status]}</span>
+      <span>
+        <span className={`font-medium ${labelColor}`}>{check.label}</span>
+        <span className="text-gray-600"> — {check.message}</span>
+      </span>
+    </li>
+  )
+}
+
+function DNSPreflightBanner({
+  domain,
+  serverIP,
+  status,
+  message,
+  result,
+}: {
+  domain: string
+  serverIP: string
+  status: 'idle' | 'checking' | 'ok' | 'fail'
+  message: string
+  result: DNSCheckResult | null
+}) {
+  const wrapperCls =
+    status === 'ok'
+      ? 'bg-green-50 border-green-200 text-green-800'
+      : status === 'fail'
+      ? 'bg-red-50 border-red-200 text-red-800'
+      : 'bg-blue-50 border-blue-200 text-blue-800'
+
+  const headerIcon =
+    status === 'checking' ? <Loader2 size={15} className="animate-spin" /> :
+    status === 'ok' ? <CheckCircle2 size={15} /> :
+    status === 'fail' ? <XCircle size={15} /> :
+    <span>📋</span>
+
+  const headerText =
+    status === 'checking' ? 'Checking DNS…' :
+    status === 'ok' ? 'DNS looks good' :
+    status === 'fail' ? 'DNS not ready' :
+    'DNS setup required'
+
+  const serverIPDisplay = serverIP || '<your server IP>'
+
+  return (
+    <div className={`rounded-lg p-4 text-sm border space-y-2 ${wrapperCls}`}>
+      <div className="flex items-center gap-2 font-semibold">
+        {headerIcon}
+        {headerText}
+      </div>
+
+      {/* Setup-guidance code block — shown when there's no result yet or the
+          top-level check failed. Skipped when the preflight is happy. */}
+      {(status === 'idle' || status === 'fail') && (
+        <>
+          <p>Point a <strong>wildcard A record</strong> at your DNS provider to this server's IP:</p>
+          <code className="block bg-white border border-current/20 rounded px-3 py-1.5 text-xs font-mono text-gray-800">
+            *.{domain}  →  {serverIPDisplay}
+          </code>
+          {status === 'idle' && (
+            <p className="text-xs text-blue-600 mt-1">
+              Every subdomain (e.g. <code>router.{domain}</code>) will resolve here automatically.
+            </p>
+          )}
+        </>
+      )}
+
+      {/* One-line summary on the happy path */}
+      {status === 'ok' && message && (
+        <p className="text-xs">{message}</p>
+      )}
+
+      {/* Structured per-check results from the preflight */}
+      {result?.checks && result.checks.length > 0 && (
+        <ul className="space-y-1.5 pt-1 border-t border-current/15">
+          {result.checks.map(c => (
+            <DNSCheckRow key={c.name} check={c} />
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function ServicesStep({ onDone }: { onDone: () => void }) {
   const [domain, setDomain] = useState('')
   const [serverHost, setServerHost] = useState('')
@@ -116,6 +216,11 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
   const [skipping, setSkipping] = useState(false)
   const [dnsStatus, setDnsStatus] = useState<'idle' | 'checking' | 'ok' | 'fail'>('idle')
   const [dnsMessage, setDnsMessage] = useState('')
+  const [dnsResult, setDnsResult] = useState<DNSCheckResult | null>(null)
+  // Public IP of this VPS — detected once on mount and passed to /check-dns
+  // so the preflight's ip_match check can flag parking-page IPs and stale
+  // records pointing at the wrong host.
+  const [serverIP, setServerIP] = useState('')
   const [installComplete, setInstallComplete] = useState(false)
   const dnsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -149,38 +254,55 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       .finally(() => setDetectingIP(false))
   }, [skipCaddy, serverHost])
 
-  // Debounced DNS check whenever domain changes
+  // Detect the public IP once on mount regardless of skipCaddy — the DNS
+  // preflight needs it for the ip_match check (catches parking-page IPs
+  // and stale records pointing at the wrong host). Cheap, runs in parallel
+  // with everything else, swallows errors silently.
+  useEffect(() => {
+    localApi.detectIP()
+      .then(({ ip }) => { if (ip) setServerIP(ip) })
+      .catch(() => {})
+  }, [])
+
+  // Debounced DNS preflight whenever domain (or detected server IP) changes.
+  // Re-runs when serverIP arrives so the ip_match check has something to
+  // compare against; the wizard would otherwise have to wait for the user
+  // to retype the domain before the check became aware of the IP.
   useEffect(() => {
     if (dnsTimerRef.current) clearTimeout(dnsTimerRef.current)
     if (skipCaddy) {
       setDnsStatus('idle')
       setDnsMessage('')
+      setDnsResult(null)
       return
     }
     const trimmed = domain.trim()
     if (!trimmed || !trimmed.includes('.')) {
       setDnsStatus('idle')
       setDnsMessage('')
+      setDnsResult(null)
       return
     }
     setDnsStatus('checking')
     dnsTimerRef.current = setTimeout(async () => {
       try {
-        const result = await localApi.checkDNS(trimmed)
+        const result = await localApi.checkDNS(trimmed, serverIP || undefined)
+        setDnsResult(result)
         if (result.ok) {
           setDnsStatus('ok')
-          setDnsMessage(result.resolved_to ? `Resolves to ${result.resolved_to}` : 'DNS resolves ✓')
+          setDnsMessage(result.resolved_to ? `Resolves to ${result.resolved_to}` : 'DNS resolves')
         } else {
           setDnsStatus('fail')
-          setDnsMessage(result.message ?? 'DNS not found')
+          setDnsMessage(result.message ?? 'DNS not ready')
         }
       } catch {
         setDnsStatus('fail')
         setDnsMessage('DNS check failed')
+        setDnsResult(null)
       }
     }, 1200)
     return () => { if (dnsTimerRef.current) clearTimeout(dnsTimerRef.current) }
-  }, [domain, skipCaddy])
+  }, [domain, skipCaddy, serverIP])
 
   // Advance to step 3 (firewall) once install completes. We deliberately do NOT
   // redirect to https://router.{domain} here — port 80/443 may still be blocked by
@@ -317,49 +439,15 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
         </div>
       )}
 
-      {/* DNS check banner */}
+      {/* DNS preflight banner */}
       {!skipCaddy && domain && domain.includes('.') && (
-        <div className={`rounded-lg p-4 text-sm border space-y-2 ${
-          dnsStatus === 'ok'
-            ? 'bg-green-50 border-green-200 text-green-800'
-            : dnsStatus === 'fail'
-            ? 'bg-red-50 border-red-200 text-red-800'
-            : 'bg-blue-50 border-blue-200 text-blue-800'
-        }`}>
-          <div className="flex items-center gap-2 font-semibold">
-            {dnsStatus === 'checking' && <Loader2 size={15} className="animate-spin" />}
-            {dnsStatus === 'ok' && <CheckCircle2 size={15} />}
-            {dnsStatus === 'fail' && <XCircle size={15} />}
-            {dnsStatus === 'idle' && '📋'}
-            {dnsStatus === 'checking' ? 'Checking DNS…' :
-             dnsStatus === 'ok' ? 'Wildcard DNS is set up ✓' :
-             dnsStatus === 'fail' ? 'Wildcard DNS not detected' :
-             'DNS setup required'}
-          </div>
-          {dnsStatus === 'ok' && (
-            <p className="text-xs">{dnsMessage}</p>
-          )}
-          {dnsStatus === 'fail' && (
-            <>
-              <p>Point a <strong>wildcard A record</strong> at your DNS provider to this server's IP:</p>
-              <code className="block bg-white border border-red-200 rounded px-3 py-1.5 text-xs font-mono">
-                *.{domain}  →  {'<your server IP>'}
-              </code>
-              <p className="text-xs mt-1">{dnsMessage}</p>
-            </>
-          )}
-          {(dnsStatus === 'idle') && (
-            <>
-              <p>Point a <strong>wildcard A record</strong> at your DNS provider to this server's IP:</p>
-              <code className="block bg-white border border-blue-200 rounded px-3 py-1.5 text-xs font-mono">
-                *.{domain}  →  {'<your server IP>'}
-              </code>
-              <p className="text-xs text-blue-600 mt-1">
-                This lets every subdomain (e.g. <code>router.{domain}</code>) resolve here automatically.
-              </p>
-            </>
-          )}
-        </div>
+        <DNSPreflightBanner
+          domain={domain}
+          serverIP={serverIP}
+          status={dnsStatus}
+          message={dnsMessage}
+          result={dnsResult}
+        />
       )}
 
       {/* Post-install advance notice */}

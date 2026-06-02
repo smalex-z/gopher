@@ -1,12 +1,74 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"regexp"
+	"strings"
 
 	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
 )
+
+const ratholeServerTomlPath = "/etc/rathole/server.toml"
+
+// detectCustomRatholeServices reads the rathole server config and returns the
+// names of [server.services.X] sections inside the BEGIN/END CUSTOM
+// CONFIGURATION marker block. These are services the operator added by hand
+// (the documented escape hatch) — they're NOT in Gopher's DB and therefore
+// CAN'T be reached by the migration's automatic config push. They need a
+// manual update to the client side or they silently break on noise flip.
+//
+// Returns an empty slice (not nil) when:
+//   - the file doesn't exist (pre-install)
+//   - the markers are missing (fresh install before first reconcile)
+//   - the custom block is present but empty
+//
+// Parser is intentionally simple: marker-delimited substring + a regex for
+// section headers. We don't want a full TOML parse here because the custom
+// block can legitimately contain syntax that hasn't been validated yet
+// (operator typing it in via the dashboard) and we don't want to refuse to
+// surface a warning just because their custom block has a stray bracket.
+func detectCustomRatholeServices(path string) []string {
+	body, err := os.ReadFile(path) // #nosec G304 — fixed path
+	if err != nil {
+		return []string{}
+	}
+	const beginMarker = "# ===== BEGIN CUSTOM CONFIGURATION ====="
+	const endMarker = "# ===== END CUSTOM CONFIGURATION ====="
+	content := string(body)
+	bIdx := strings.Index(content, beginMarker)
+	if bIdx == -1 {
+		return []string{}
+	}
+	below := content[bIdx+len(beginMarker):]
+	eIdx := strings.Index(below, endMarker)
+	if eIdx == -1 {
+		// Marker malformed — treat the whole tail as the custom block. Bias
+		// toward over-reporting rather than missing a custom service.
+		eIdx = len(below)
+	}
+	customBody := below[:eIdx]
+
+	// Match [server.services.<name>] section headers. Only inside the custom
+	// block; gopher-managed sections live above the BEGIN marker and won't
+	// be parsed here.
+	re := regexp.MustCompile(`(?m)^\s*\[server\.services\.([A-Za-z0-9_\-]+)\]\s*$`)
+	matches := re.FindAllStringSubmatch(customBody, -1)
+	out := make([]string, 0, len(matches))
+	seen := map[string]bool{}
+	for _, m := range matches {
+		name := m[1]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
 
 // RetryPendingConfigPush is the ConfigPusher hook the health service calls
 // when a machine that previously failed a push (e.g. during the noise
@@ -113,9 +175,38 @@ func (s *LocalSetupService) MigrateRatholeNoise() error {
 
 	log.Printf("rathole noise migration: starting (this install is on plaintext rathole transport, upgrading to encrypted)")
 
+	// Detect user-managed services in server.toml's custom block BEFORE the
+	// reconcile. Once the server flips to noise, their plaintext clients
+	// will fail to reconnect — we want a paper trail (log + persisted
+	// warning surfaced to the dashboard) so the operator knows what just
+	// silently broke and can update those clients with the noise pubkey.
+	customServices := detectCustomRatholeServices(ratholeServerTomlPath)
+
 	_, noisePub, err := EnsureRatholeNoiseKeys()
 	if err != nil {
 		return fmt.Errorf("generate keys: %w", err)
+	}
+
+	if len(customServices) > 0 {
+		log.Printf("rathole noise migration: detected %d user-managed services in /etc/rathole/server.toml custom block — these need a manual client.toml update with the noise pubkey or they'll fail to reconnect after the server flips:", len(customServices))
+		for _, name := range customServices {
+			log.Printf("    [server.services.%s]", name)
+		}
+		log.Printf("rathole noise migration: noise public key for manual updates: %s", noisePub)
+
+		// Persist for the dashboard banner. New warning supersedes any prior
+		// dismissal — if there's something newly broken to surface, the
+		// operator deserves a fresh banner.
+		if payload, jerr := json.Marshal(customServices); jerr == nil {
+			perr := db.MutateSettings(func(a *db.AppSettings) error {
+				a.RatholeCustomServicesWarning = string(payload)
+				a.RatholeCustomServicesWarningDismissed = false
+				return nil
+			})
+			if perr != nil {
+				log.Printf("rathole noise migration: persist custom-services warning: %v", perr)
+			}
+		}
 	}
 
 	machines, err := db.GetMachines()
