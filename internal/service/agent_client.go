@@ -58,26 +58,26 @@ func (c *AgentClient) dial() (*grpc.ClientConn, error) {
 // preserved from the previous HTTP/JSON client so existing callers and the
 // dashboard are unchanged.
 type AgentStatus struct {
-	AgentVersion   string
-	AgentUptime    int64
-	RestartsServed int64
+	AgentVersion   string `json:"agent_version"`
+	AgentUptime    int64  `json:"agent_uptime_seconds"`
+	RestartsServed int64  `json:"restarts_served"`
 	Rathole        struct {
-		Active   bool
-		State    string
-		Substate string
-	}
+		Active   bool   `json:"active"`
+		State    string `json:"state"`
+		Substate string `json:"substate"`
+	} `json:"rathole"`
 	System struct {
-		LoadAvg1       float64
-		LoadAvg5       float64
-		LoadAvg15      float64
-		MemTotalKB     uint64
-		MemAvailKB     uint64
-		DiskFreeBytes  uint64
-		DiskTotalBytes uint64
-		Hostname       string
-		Kernel         string
-	}
-	Now time.Time
+		LoadAvg1       float64 `json:"load_avg_1"`
+		LoadAvg5       float64 `json:"load_avg_5"`
+		LoadAvg15      float64 `json:"load_avg_15"`
+		MemTotalKB     uint64  `json:"mem_total_kb"`
+		MemAvailKB     uint64  `json:"mem_avail_kb"`
+		DiskFreeBytes  uint64  `json:"disk_free_bytes"`
+		DiskTotalBytes uint64  `json:"disk_total_bytes"`
+		Hostname       string  `json:"hostname"`
+		Kernel         string  `json:"kernel"`
+	} `json:"system"`
+	Now time.Time `json:"now"`
 }
 
 func statusFromPB(p *agentpb.StatusInfo) *AgentStatus {
