@@ -1,8 +1,12 @@
 package service
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -87,6 +91,53 @@ func (i *AgentInstaller) Install(machineID string) (*MigrateInstructions, error)
 			"The agent registers itself once installed — the dashboard badge flips " +
 			"green on the next health check (≤60s).",
 	}, nil
+}
+
+// UpgradeAgent rolls a machine's agent forward to targetAgentVersion by calling
+// the agent's own bearer-authed /self-update endpoint over the rathole
+// back-channel. The agent (running as gopher = NOPASSWD: ALL) downloads the new
+// binary from the edge, verifies it, and restarts itself — the server has no
+// root on the origin, so the agent is the actor.
+//
+// This is the steady-state, automatic path for v0.2.0+ agents. An agent that
+// predates /self-update (pre-gRPC v0.1.0) returns 404, surfaced as an error so
+// the operator is told to run the one-time manual upgrade (same migrate UX as a
+// fresh install).
+func (i *AgentInstaller) UpgradeAgent(machine *db.Machine) error {
+	if machine.AgentRemotePort == 0 || machine.AgentToken == "" {
+		return fmt.Errorf("machine %s missing agent port/token", machine.ID)
+	}
+	settings, err := db.GetSettings()
+	if err != nil {
+		return fmt.Errorf("settings lookup: %w", err)
+	}
+	baseURL, err := buildAgentDownloadBaseURL(settings)
+	if err != nil {
+		return err
+	}
+	payload, _ := json.Marshal(map[string]string{"base_url": baseURL, "version": targetAgentVersion})
+	url := fmt.Sprintf("http://127.0.0.1:%d/self-update", machine.AgentRemotePort)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+machine.AgentToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("trigger self-update on %s: %w", machine.Name, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("agent on %s predates self-update — one-time manual upgrade required", machine.Name)
+	}
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("self-update on %s: status %d: %s", machine.Name, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 // allocateAgentFields generates per-machine agent secrets and ports if the

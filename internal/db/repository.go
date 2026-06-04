@@ -159,6 +159,16 @@ func SetMachineAgentSeen(id, version string, when time.Time) error {
 	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
 }
 
+// SetMachineAgentOutdated flags (or clears) a machine whose agent needs an
+// upgrade — reachable-but-older or pre-gRPC skew. Partial update so it doesn't
+// clobber concurrent status writes.
+func SetMachineAgentOutdated(id string, outdated bool) error {
+	return DB.Model(&Machine{}).Where("id = ?", id).Updates(map[string]any{
+		"agent_outdated": outdated,
+		"updated_at":     time.Now(),
+	}).Error
+}
+
 func DeleteMachine(id string) error {
 	return DB.Delete(&Machine{}, "id = ?", id).Error
 }

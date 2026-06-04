@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,6 +47,14 @@ type HealthService struct {
 	// only exercise the health-poll path. Nil disables the retry, which is the
 	// pre-existing behaviour.
 	configPusher ConfigPusher
+
+	// agentUpgrader rolls an outdated/protocol-skewed agent forward by running
+	// the install over the server's SSH connection (no operator paste). Set by
+	// the cmd/server wiring; nil disables auto-upgrade (e.g. in tests).
+	agentUpgrader AgentUpgrader
+	// lastAgentUpgrade throttles auto-upgrade attempts per machine so a durably
+	// broken upgrade doesn't re-fire every health tick.
+	lastAgentUpgrade map[string]time.Time
 }
 
 // ConfigPusher decouples the health loop from the LocalSetupService. The
@@ -55,6 +64,22 @@ type HealthService struct {
 type ConfigPusher interface {
 	RetryPendingConfigPush(machine *db.Machine) error
 }
+
+// AgentUpgrader rolls a machine's gopher-agent forward to the version the
+// server embeds — automatically, over the server's own SSH connection. The
+// production implementation is *AgentInstaller. Decoupled as an interface so
+// the health loop doesn't hard-depend on the installer and tests can stub it.
+type AgentUpgrader interface {
+	UpgradeAgent(machine *db.Machine) error
+}
+
+// targetAgentVersion is the agent version this server expects; bump it in
+// lockstep with cmd/agent's agentVersion. A reachable agent reporting an older
+// version is auto-upgraded.
+const targetAgentVersion = "0.2.0"
+
+// agentUpgradeCooldown throttles repeated auto-upgrade attempts per machine.
+const agentUpgradeCooldown = 10 * time.Minute
 
 const (
 	healthCheckInterval        = 60 * time.Second
@@ -70,8 +95,9 @@ func NewHealthService(autoRecover bool) *HealthService {
 		purgeOlderThan: time.Duration(healthCheckRetentionDays) * 24 * time.Hour,
 		autoRecover:    autoRecover,
 		stopCh:         make(chan struct{}),
-		lastRecovery:   map[string]time.Time{},
-		lastStatus:     map[string]string{},
+		lastRecovery:     map[string]time.Time{},
+		lastStatus:       map[string]string{},
+		lastAgentUpgrade: map[string]time.Time{},
 	}
 }
 
@@ -82,6 +108,48 @@ func NewHealthService(autoRecover bool) *HealthService {
 // needs LocalSetupService for retries).
 func (s *HealthService) SetConfigPusher(p ConfigPusher) {
 	s.configPusher = p
+}
+
+// SetAgentUpgrader wires the auto-upgrade hook. Called once from
+// cmd/server/main.go, same post-construction pattern as SetConfigPusher.
+func (s *HealthService) SetAgentUpgrader(u AgentUpgrader) {
+	s.agentUpgrader = u
+}
+
+// maybeAutoUpgradeAgent triggers an SSH-driven agent upgrade for m, throttled
+// per machine. Runs in the background so it never blocks a health tick; the
+// upgraded agent is picked up on a subsequent poll.
+func (s *HealthService) maybeAutoUpgradeAgent(m *db.Machine, reason string) {
+	if s.agentUpgrader == nil {
+		return
+	}
+	s.mu.Lock()
+	if time.Since(s.lastAgentUpgrade[m.ID]) < agentUpgradeCooldown {
+		s.mu.Unlock()
+		return
+	}
+	s.lastAgentUpgrade[m.ID] = time.Now()
+	s.mu.Unlock()
+
+	machine := *m // copy: the pointer's fields may change under the next poll
+	go goSafe("health.autoUpgradeAgent", func() {
+		log.Printf("health: auto-upgrading agent on %s (%s)", machine.Name, reason)
+		if err := s.agentUpgrader.UpgradeAgent(&machine); err != nil {
+			log.Printf("health: auto-upgrade agent on %s failed: %v", machine.Name, err)
+			return
+		}
+		log.Printf("health: auto-upgrade agent on %s complete", machine.Name)
+	})
+}
+
+// isAgentProtocolSkew reports whether a failed agent RPC looks like the server
+// (gRPC) talking to a pre-gRPC HTTP/1.1 agent — the signature of an agent that
+// predates the current wire protocol and needs upgrading.
+func isAgentProtocolSkew(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "HTTP/1.1") ||
+		strings.Contains(msg, "frame too large") ||
+		strings.Contains(msg, "server preface")
 }
 
 // emitTransition records a state change as an event, but only when it's
@@ -237,6 +305,14 @@ func (s *HealthService) checkViaAgent(ctx context.Context, m *db.Machine, subjec
 			LatencyMS: latency,
 			ErrorMsg:  "agent unreachable: " + err.Error(),
 		})
+		// A protocol-skew error means the agent predates the current wire
+		// protocol (e.g. old HTTP agent vs new gRPC server). The box is
+		// reachable enough to have answered with HTTP/1.1, so SSH works —
+		// auto-upgrade it instead of leaving the operator with a cryptic error.
+		if isAgentProtocolSkew(err) {
+			_ = db.SetMachineAgentOutdated(m.ID, true)
+			s.maybeAutoUpgradeAgent(m, "agent predates current wire protocol")
+		}
 		return false
 	}
 
@@ -281,6 +357,15 @@ func (s *HealthService) checkViaAgent(ctx context.Context, m *db.Machine, subjec
 	})
 	s.emitTransition(m, "ok", "")
 	s.maybeRetryConfigPush(m)
+	// Reachable but running an older agent than this server embeds → flag it
+	// (so the dashboard surfaces the upgrade one-liner) and roll it forward
+	// automatically (covers gRPC→gRPC version bumps; the skew path above covers
+	// the pre-gRPC jump). Clear the flag once it's current.
+	outdated := status.AgentVersion != "" && isNewer(targetAgentVersion, status.AgentVersion)
+	_ = db.SetMachineAgentOutdated(m.ID, outdated)
+	if outdated {
+		s.maybeAutoUpgradeAgent(m, fmt.Sprintf("agent %s older than %s", status.AgentVersion, targetAgentVersion))
+	}
 	return true
 }
 

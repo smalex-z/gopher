@@ -139,7 +139,7 @@ func main() {
 	reflection.Register(grpcSrv)
 
 	httpSrv := &http.Server{
-		Handler:           healthzMux(),
+		Handler:           srv.httpHandler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -166,14 +166,18 @@ func errIsClosed(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "use of closed network connection")
 }
 
-// healthzMux serves the single unauthenticated liveness endpoint.
-func healthzMux() http.Handler {
+// httpHandler serves the stable plaintext HTTP surface multiplexed alongside
+// gRPC: an unauthenticated /healthz liveness/compat anchor and the bearer-authed
+// /self-update trigger. Kept on HTTP (not gRPC) so both survive across gRPC
+// protocol changes.
+func (s *agentServer) httpHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"ok":true,"version":%q,"protocol_version":%d}`, agentVersion, protocolVersion)
 	})
+	mux.HandleFunc("/self-update", s.handleSelfUpdate)
 	return mux
 }
 

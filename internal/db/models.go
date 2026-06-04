@@ -67,6 +67,11 @@ type Machine struct {
 	AgentVersion      string     `json:"agent_version,omitempty"`       // version string returned by the agent's /version endpoint
 	AgentLastSeen     *time.Time `json:"agent_last_seen,omitempty"`     // last successful agent poll
 	AgentInstallError string     `json:"agent_install_error,omitempty"` // last install failure (cleared on success)
+	// AgentOutdated is true when the agent is reachable but older than the
+	// server's target version, or is a pre-gRPC agent the server can't talk to
+	// (protocol skew). The dashboard surfaces the same Install/Upgrade one-liner
+	// for it. Cleared once a current agent is seen.
+	AgentOutdated bool `json:"agent_outdated"`
 	// ConfigPushPending marks machines whose last attempted client.toml push
 	// failed (offline, full disk, agent down). The health service retries the
 	// push the next time the machine becomes reachable, then clears the flag.

@@ -368,7 +368,7 @@ export default function MachinesPage() {
                       <td className="px-4 py-3 text-gray-600">{m.username}</td>
                       <td className="px-4 py-3"><StatusBadge status={m.status} /></td>
                       <td className="px-4 py-3">
-                        {m.agent_installed ? (
+                        {m.agent_installed && !m.agent_outdated ? (
                           <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium text-green-700 bg-green-50 border border-green-200">
                             <CheckCircle size={11} /> v{m.agent_version || '–'}
                           </span>
@@ -376,7 +376,13 @@ export default function MachinesPage() {
                           <button
                             onClick={() => installAgentMutation.mutate(m.id)}
                             disabled={installAgentMutation.isPending && installAgentMutation.variables === m.id}
-                            title={m.agent_install_error ? `Last error: ${m.agent_install_error}` : 'Install gopher-agent on this machine'}
+                            title={
+                              m.agent_outdated
+                                ? `Agent is outdated${m.agent_version ? ` (v${m.agent_version})` : ''} — run the upgrade command on this machine`
+                                : m.agent_install_error
+                                  ? `Last error: ${m.agent_install_error}`
+                                  : 'Install gopher-agent on this machine'
+                            }
                             className={`px-2 py-1 text-xs rounded border flex items-center gap-1 transition-colors ${
                               m.agent_install_error
                                 ? 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
@@ -384,10 +390,12 @@ export default function MachinesPage() {
                             }`}
                           >
                             {installAgentMutation.isPending && installAgentMutation.variables === m.id
-                              ? <><Loader2 size={11} className="animate-spin" /> Installing…</>
-                              : m.agent_install_error
-                                ? <>Retry install</>
-                                : <>Install agent</>}
+                              ? <><Loader2 size={11} className="animate-spin" /> {m.agent_outdated ? 'Upgrading…' : 'Installing…'}</>
+                              : m.agent_outdated
+                                ? <>Upgrade agent</>
+                                : m.agent_install_error
+                                  ? <>Retry install</>
+                                  : <>Install agent</>}
                           </button>
                         )}
                       </td>
