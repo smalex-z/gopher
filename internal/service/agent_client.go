@@ -2,186 +2,236 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"strings"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	agentpb "github.com/smalex-z/gopher/internal/agentpb"
 	"github.com/smalex-z/gopher/internal/db"
 )
 
-// AgentClient is the VPS-side counterpart to cmd/agent. It talks to the
-// gopher-agent on a machine via the rathole back-channel — the bind_addr the
-// rathole server holds open at 127.0.0.1:<machine.AgentRemotePort> forwards to
-// the agent listening on 127.0.0.1:<machine.AgentLocalPort> on the client.
+// AgentClient is the VPS-side gRPC client for the gopher-agent on a machine.
+// It reaches the agent via the rathole back-channel — the bind_addr the rathole
+// server holds open at 127.0.0.1:<machine.AgentRemotePort> forwards to the
+// agent listening on 127.0.0.1:<machine.AgentLocalPort> on the client.
 //
-// All methods are bounded by a per-call context. Network failures, timeouts,
-// and non-2xx responses are returned as plain errors — callers (HealthService,
-// migration UI) decide what to do.
+// The transport is cleartext HTTP/2 (gRPC insecure): the tunnel hop is already
+// encrypted by rathole's Noise transport. The per-machine bearer token is
+// attached to every call as "authorization" metadata via PerRPCCredentials.
+//
+// Unary methods dial-and-close per call — control traffic is infrequent
+// (status polls, config pushes) so a short-lived ClientConn avoids holding open
+// connections for machines that may have gone away. WatchStatus holds the conn
+// open for the lifetime of the stream.
+//
+// Network failures, timeouts, and RPC errors are returned as plain errors —
+// callers (HealthService, migration UI) decide what to do.
 type AgentClient struct {
 	machine *db.Machine
-	http    *http.Client
 }
 
 func NewAgentClient(machine *db.Machine) *AgentClient {
-	return &AgentClient{
-		machine: machine,
-		http: &http.Client{
-			Timeout: 8 * time.Second,
-		},
-	}
+	return &AgentClient{machine: machine}
 }
 
-func (c *AgentClient) baseURL() string {
-	return fmt.Sprintf("http://127.0.0.1:%d", c.machine.AgentRemotePort)
+// bearerToken implements credentials.PerRPCCredentials, attaching the
+// per-machine token to every RPC. RequireTransportSecurity is false because the
+// transport is insecure-over-Noise (see type doc).
+type bearerToken struct{ token string }
+
+func (b bearerToken) GetRequestMetadata(_ context.Context, _ ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + b.token}, nil
+}
+func (bearerToken) RequireTransportSecurity() bool { return false }
+
+func (c *AgentClient) dial() (*grpc.ClientConn, error) {
+	target := fmt.Sprintf("127.0.0.1:%d", c.machine.AgentRemotePort)
+	return grpc.NewClient(target,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithPerRPCCredentials(bearerToken{token: c.machine.AgentToken}),
+	)
 }
 
-// AgentStatus is the parsed shape of GET /status from the agent.
+// AgentStatus is the VPS-side view of a status snapshot. Field shape is
+// preserved from the previous HTTP/JSON client so existing callers and the
+// dashboard are unchanged.
 type AgentStatus struct {
-	AgentVersion   string    `json:"agent_version"`
-	AgentUptime    int64     `json:"agent_uptime_seconds"`
-	RestartsServed int64     `json:"restarts_served"`
+	AgentVersion   string
+	AgentUptime    int64
+	RestartsServed int64
 	Rathole        struct {
-		Active   bool   `json:"active"`
-		State    string `json:"state"`
-		Substate string `json:"substate"`
-	} `json:"rathole"`
+		Active   bool
+		State    string
+		Substate string
+	}
 	System struct {
-		LoadAvg1       float64 `json:"load_avg_1"`
-		LoadAvg5       float64 `json:"load_avg_5"`
-		LoadAvg15      float64 `json:"load_avg_15"`
-		MemTotalKB     uint64  `json:"mem_total_kb"`
-		MemAvailKB     uint64  `json:"mem_avail_kb"`
-		DiskFreeBytes  uint64  `json:"disk_free_bytes"`
-		DiskTotalBytes uint64  `json:"disk_total_bytes"`
-		Hostname       string  `json:"hostname"`
-		Kernel         string  `json:"kernel"`
-	} `json:"system"`
-	Now time.Time `json:"now"`
+		LoadAvg1       float64
+		LoadAvg5       float64
+		LoadAvg15      float64
+		MemTotalKB     uint64
+		MemAvailKB     uint64
+		DiskFreeBytes  uint64
+		DiskTotalBytes uint64
+		Hostname       string
+		Kernel         string
+	}
+	Now time.Time
 }
 
+func statusFromPB(p *agentpb.StatusInfo) *AgentStatus {
+	s := &AgentStatus{
+		AgentVersion:   p.GetVersion(),
+		AgentUptime:    p.GetAgentUptimeSeconds(),
+		RestartsServed: p.GetRestartsServed(),
+		Now:            time.Unix(p.GetNowUnix(), 0).UTC(),
+	}
+	if r := p.GetRathole(); r != nil {
+		s.Rathole.Active = r.GetActive()
+		s.Rathole.State = r.GetState()
+		s.Rathole.Substate = r.GetSubstate()
+	}
+	if sys := p.GetSystem(); sys != nil {
+		s.System.LoadAvg1 = sys.GetLoadAvg_1()
+		s.System.LoadAvg5 = sys.GetLoadAvg_5()
+		s.System.LoadAvg15 = sys.GetLoadAvg_15()
+		s.System.MemTotalKB = sys.GetMemTotalKb()
+		s.System.MemAvailKB = sys.GetMemAvailKb()
+		s.System.DiskFreeBytes = sys.GetDiskFreeBytes()
+		s.System.DiskTotalBytes = sys.GetDiskTotalBytes()
+		s.System.Hostname = sys.GetHostname()
+		s.System.Kernel = sys.GetKernel()
+	}
+	return s
+}
+
+// Status fetches a one-shot status snapshot from the agent.
 func (c *AgentClient) Status(ctx context.Context) (*AgentStatus, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL()+"/status", nil)
-	c.authHeader(req)
-	resp, err := c.http.Do(req)
+	conn, err := c.dial()
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("agent status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	defer conn.Close()
+	resp, err := agentpb.NewAgentControlClient(conn).GetStatus(ctx, &agentpb.GetStatusRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("agent GetStatus: %w", err)
 	}
-	var s AgentStatus
-	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
-		return nil, fmt.Errorf("decode status: %w", err)
-	}
-	return &s, nil
+	return statusFromPB(resp), nil
 }
 
-// RestartRathole asks the agent to run `systemctl restart rathole-client`.
-// Returns nil on success; an error including the agent's stderr on failure.
+// WatchStatus opens a server-streaming status subscription and invokes onUpdate
+// for each snapshot until the stream ends (ctx cancellation, agent death, or
+// network failure), at which point the terminating error is returned. The
+// stream dropping is the signal that the agent/origin is gone.
+//
+// heartbeat is the requested cadence between snapshots; the agent clamps it to
+// a sane range. Pass 0 for the agent default.
+func (c *AgentClient) WatchStatus(ctx context.Context, heartbeat time.Duration, onUpdate func(*AgentStatus)) error {
+	conn, err := c.dial()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	stream, err := agentpb.NewAgentControlClient(conn).WatchStatus(ctx, &agentpb.WatchStatusRequest{
+		HeartbeatSeconds: uint32(heartbeat / time.Second), // #nosec G115 — clamped agent-side
+	})
+	if err != nil {
+		return fmt.Errorf("agent WatchStatus: %w", err)
+	}
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			return err // includes io.EOF on clean close and the cause on drop
+		}
+		onUpdate(statusFromPB(msg))
+	}
+}
+
+// RestartRathole asks the agent to run `systemctl start rathole-client`.
 func (c *AgentClient) RestartRathole(ctx context.Context) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/restart-rathole", nil)
-	c.authHeader(req)
-	resp, err := c.http.Do(req)
+	conn, err := c.dial()
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("agent restart-rathole %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	defer conn.Close()
+	if _, err := agentpb.NewAgentControlClient(conn).RestartRathole(ctx, &agentpb.RestartRatholeRequest{}); err != nil {
+		return fmt.Errorf("agent RestartRathole: %w", err)
 	}
 	return nil
 }
 
-// AgentVersion returns the version string reported by the agent. Useful for
-// detecting when an agent install has completed and is reachable.
+// Version returns the agent build version. Useful for detecting when an agent
+// install has completed and is reachable.
 func (c *AgentClient) Version(ctx context.Context) (string, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL()+"/version", nil)
-	c.authHeader(req)
-	resp, err := c.http.Do(req)
+	conn, err := c.dial()
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("agent version %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	defer conn.Close()
+	resp, err := agentpb.NewAgentControlClient(conn).GetVersion(ctx, &agentpb.GetVersionRequest{})
+	if err != nil {
+		return "", fmt.Errorf("agent GetVersion: %w", err)
 	}
-	var v struct {
-		Version string `json:"version"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
-		return "", err
-	}
-	return v.Version, nil
+	return resp.GetVersion(), nil
 }
 
-func (c *AgentClient) authHeader(req *http.Request) {
-	req.Header.Set("Authorization", "Bearer "+c.machine.AgentToken)
+// ProtocolVersion returns the agent's wire-protocol version — the value the
+// server should gate compatibility on (vs. the human-facing semver string).
+func (c *AgentClient) ProtocolVersion(ctx context.Context) (uint32, error) {
+	conn, err := c.dial()
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	resp, err := agentpb.NewAgentControlClient(conn).GetVersion(ctx, &agentpb.GetVersionRequest{})
+	if err != nil {
+		return 0, fmt.Errorf("agent GetVersion: %w", err)
+	}
+	return resp.GetProtocolVersion(), nil
 }
 
-// GetRatholeConfig fetches the current /etc/rathole/client.toml from the
-// machine via the agent's back-channel. Replaces an SSH `cat` round-trip.
+// GetRatholeConfig fetches the current /etc/rathole/client.toml from the machine
+// via the agent. Replaces an SSH `cat` round-trip.
 func (c *AgentClient) GetRatholeConfig(ctx context.Context) (string, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL()+"/rathole-config", nil)
-	c.authHeader(req)
-	resp, err := c.http.Do(req)
+	conn, err := c.dial()
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("agent get rathole-config %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	defer conn.Close()
+	resp, err := agentpb.NewAgentControlClient(conn).GetRatholeConfig(ctx, &agentpb.GetRatholeConfigRequest{})
+	if err != nil {
+		return "", fmt.Errorf("agent GetRatholeConfig: %w", err)
 	}
-	return string(body), nil
+	return resp.GetToml(), nil
 }
 
-// Uninstall asks the agent to run /usr/local/bin/gopher-uninstall in a
-// detached worker. The agent returns 202 Accepted as soon as the worker is
-// started — the actual cleanup runs after this call completes. Replaces the
-// SSH-detach-nohup-script flow that used to race with rathole tunnel teardown.
-func (c *AgentClient) Uninstall(ctx context.Context) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/uninstall", nil)
-	c.authHeader(req)
-	resp, err := c.http.Do(req)
+// PutRatholeConfig pushes a new client.toml to the machine. The agent writes it
+// in place; rathole's notify watcher reloads on inotify. Replaces an SSH SFTP
+// upload + start round-trip.
+func (c *AgentClient) PutRatholeConfig(ctx context.Context, content string) error {
+	conn, err := c.dial()
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	// 202 is the success path; 200 would also be acceptable. Anything else
-	// is an error worth surfacing.
-	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("agent uninstall %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	defer conn.Close()
+	if _, err := agentpb.NewAgentControlClient(conn).PutRatholeConfig(ctx, &agentpb.RatholeConfig{Toml: content}); err != nil {
+		return fmt.Errorf("agent PutRatholeConfig: %w", err)
 	}
 	return nil
 }
 
-// PutRatholeConfig pushes a new client.toml to the machine. The agent writes
-// it in place; rathole's notify watcher reloads on inotify. Replaces an SSH
-// SFTP upload + start round-trip.
-func (c *AgentClient) PutRatholeConfig(ctx context.Context, content string) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/rathole-config", strings.NewReader(content))
-	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
-	c.authHeader(req)
-	// Config writes can take a moment if the agent fsyncs; allow a longer
-	// timeout than the default 8s status probe.
-	httpClient := *c.http
-	httpClient.Timeout = 15 * time.Second
-	resp, err := httpClient.Do(req)
+// Uninstall asks the agent to run /usr/local/bin/gopher-uninstall in a detached
+// worker. The agent returns as soon as the worker is started — the actual
+// cleanup runs after this call completes.
+func (c *AgentClient) Uninstall(ctx context.Context) error {
+	conn, err := c.dial()
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("agent put rathole-config %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	defer conn.Close()
+	if _, err := agentpb.NewAgentControlClient(conn).Uninstall(ctx, &agentpb.UninstallRequest{}); err != nil {
+		return fmt.Errorf("agent Uninstall: %w", err)
 	}
 	return nil
 }

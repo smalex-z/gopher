@@ -1,0 +1,13 @@
+version: v2
+# Generated *.pb.go files are committed to the repo so a normal `go build`
+# needs no protobuf toolchain. Regenerate with `make proto` (or `buf generate`
+# from this directory) after editing any .proto.
+plugins:
+  - local: protoc-gen-go
+    out: ..
+    opt:
+      - module=github.com/smalex-z/gopher
+  - local: protoc-gen-go-grpc
+    out: ..
+    opt:
+      - module=github.com/smalex-z/gopher

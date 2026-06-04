@@ -2,38 +2,57 @@
 //
 // Listens on 127.0.0.1:<port> (local-only). The Gopher VPS reaches it through
 // the same rathole tunnel that already exists for the SSH back-channel — a
-// dedicated service entry is added to rathole-client.toml so VPS can dial
-// http://localhost:<remote_port>/... and hit this agent.
+// dedicated service entry is added to rathole-client.toml so the VPS can dial
+// 127.0.0.1:<remote_port> and reach this agent.
 //
-// All endpoints require a per-machine bearer token (Authorization header).
-// The token is generated at install time and known to both sides via the DB.
+// The control surface is gRPC (service agent.v1.AgentControl), served over
+// cleartext HTTP/2 (h2c): the rathole hop is already Noise-encrypted, so
+// wrapping gRPC in TLS again would be redundant. Every RPC requires a
+// per-machine bearer token in the "authorization" metadata header, enforced by
+// a server-side interceptor.
+//
+// A tiny plaintext HTTP/1 surface is multiplexed onto the same port via cmux
+// and serves only GET /healthz — an unauthenticated liveness/compat anchor for
+// the agent's own systemd healthcheck and for a future server that needs to
+// detect an incompatible agent before speaking gRPC to it.
 package main
 
 import (
-	"context"
-	"crypto/subtle"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/soheilhy/cmux"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
+
+	agentpb "github.com/smalex-z/gopher/internal/agentpb"
 )
 
-const agentVersion = "0.1.0"
+const (
+	// agentVersion is the agent build version. It is bumped manually and is
+	// intentionally independent of the server's tag-injected version.
+	agentVersion = "0.2.0"
+
+	// protocolVersion is the wire-compatibility contract between server and
+	// agent. The server gates compatibility on this integer, NOT on the semver
+	// string above. Bump it on any breaking change to the gRPC contract.
+	// v1 = initial gRPC AgentControl service.
+	protocolVersion = 1
+)
 
 type config struct {
-	Port    int
-	Token   string
+	Port     int
+	Token    string
 	UnitName string // systemd unit to manage (default "rathole-client.service")
 }
 
@@ -96,180 +115,103 @@ func main() {
 		log.Fatal("GOPHER_AGENT_TOKEN is required (env var or /etc/gopher-agent/config.env)")
 	}
 
-	srv := &server{cfg: cfg, startedAt: time.Now()}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", srv.healthz) // unauth — for the agent's own systemd healthcheck
-	mux.HandleFunc("/status", srv.requireToken(srv.status))
-	mux.HandleFunc("/restart-rathole", srv.requireToken(srv.restartRathole))
-	mux.HandleFunc("/diagnostics", srv.requireToken(srv.diagnostics))
-	mux.HandleFunc("/version", srv.requireToken(srv.version))
-	mux.HandleFunc("/rathole-config", srv.requireToken(srv.ratholeConfig))
-	mux.HandleFunc("/uninstall", srv.requireToken(srv.uninstall))
+	srv := &agentServer{cfg: cfg, startedAt: time.Now()}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("listen %s: %v", addr, err)
+	}
+
+	// cmux multiplexes gRPC (HTTP/2) and the plaintext /healthz HTTP/1 surface
+	// onto the single port the rathole back-channel forwards to.
+	m := cmux.New(lis)
+	grpcL := m.MatchWithWriters(cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"))
+	httpL := m.Match(cmux.Any())
+
+	grpcSrv := grpc.NewServer(
+		grpc.UnaryInterceptor(unaryAuthInterceptor(cfg.Token)),
+		grpc.StreamInterceptor(streamAuthInterceptor(cfg.Token)),
+	)
+	agentpb.RegisterAgentControlServer(grpcSrv, srv)
+	// Reflection lets `grpcurl` introspect the service for debugging. The auth
+	// interceptors apply to reflection too, so it still requires the token.
+	reflection.Register(grpcSrv)
+
 	httpSrv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
+		Handler:           healthzMux(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 	}
 
-	log.Printf("gopher-agent %s listening on %s (managing %s)", agentVersion, addr, cfg.UnitName)
-	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server failed: %v", err)
+	go func() {
+		if err := grpcSrv.Serve(grpcL); err != nil && !errIsClosed(err) {
+			log.Printf("grpc serve: %v", err)
+		}
+	}()
+	go func() {
+		if err := httpSrv.Serve(httpL); err != nil && err != http.ErrServerClosed && !errIsClosed(err) {
+			log.Printf("http serve: %v", err)
+		}
+	}()
+
+	log.Printf("gopher-agent %s (protocol v%d) listening on %s (managing %s)", agentVersion, protocolVersion, addr, cfg.UnitName)
+	if err := m.Serve(); err != nil && !errIsClosed(err) {
+		log.Fatalf("cmux serve: %v", err)
 	}
 }
 
-type server struct {
+func errIsClosed(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "use of closed network connection")
+}
+
+// healthzMux serves the single unauthenticated liveness endpoint.
+func healthzMux() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"ok":true,"version":%q,"protocol_version":%d}`, agentVersion, protocolVersion)
+	})
+	return mux
+}
+
+// agentServer implements agent.v1.AgentControl. Operational logic lives in
+// grpc.go; this file owns process wiring and the pure system-inspection
+// helpers below.
+type agentServer struct {
+	agentpb.UnimplementedAgentControlServer
 	cfg          config
 	startedAt    time.Time
 	restartCount atomic.Int64
 }
 
-func (s *server) requireToken(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		const prefix = "Bearer "
-		if !strings.HasPrefix(auth, prefix) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing bearer token"})
-			return
-		}
-		got := auth[len(prefix):]
-		if subtle.ConstantTimeCompare([]byte(got), []byte(s.cfg.Token)) != 1 {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
-			return
-		}
-		next(w, r)
-	}
-}
-
-// GET /healthz — unauth, returns 200 if the agent process is alive.
-func (s *server) healthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": agentVersion})
-}
-
-// GET /version — bearer-token-protected so VPS can verify it's talking to the right agent.
-func (s *server) version(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"version": agentVersion,
-		"unit":    s.cfg.UnitName,
-		"uptime":  int64(time.Since(s.startedAt).Seconds()),
-		"arch":    runtime.GOARCH,
-	})
-}
-
-// GET /status — system + rathole status snapshot.
-func (s *server) status(w http.ResponseWriter, _ *http.Request) {
-	resp := statusResponse{
-		AgentVersion: agentVersion,
-		AgentUptime:  int64(time.Since(s.startedAt).Seconds()),
-		RestartsServed: s.restartCount.Load(),
-		Rathole:      ratholeStatus(s.cfg.UnitName),
-		System:       systemStatus(),
-		Now:          time.Now().UTC(),
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// POST /restart-rathole — recovers a stopped/failed rathole-client unit.
-//
-// We deliberately use `systemctl start`, not `restart`. start is a no-op on a
-// healthy unit and will resurrect a stopped or failed one — `restart` would
-// drop every active tunnel on the machine, which is the exact behavior we're
-// avoiding everywhere else (see CLAUDE.md: rathole reloads via inotify).
-//
-// The endpoint name stays "restart-rathole" for API stability with already-
-// deployed VPS-side callers.
-func (s *server) restartRathole(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-
-	// reset-failed clears systemd's failure counter so start can succeed
-	// after the unit hit its restart-burst limit. Best-effort; we ignore
-	// errors here because the start below is the source of truth.
-	_, _ = exec.CommandContext(ctx, "sudo", "-n", "systemctl", "reset-failed", s.cfg.UnitName).CombinedOutput() // #nosec G204
-
-	out, err := exec.CommandContext(ctx, "sudo", "-n", "systemctl", "start", s.cfg.UnitName).CombinedOutput() // #nosec G204
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error":  err.Error(),
-			"output": string(out),
-		})
-		return
-	}
-	s.restartCount.Add(1)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"restarted": true,
-		"output":    strings.TrimSpace(string(out)),
-	})
-}
-
-// GET /diagnostics — structured pass/fail checks.
-func (s *server) diagnostics(w http.ResponseWriter, _ *http.Request) {
-	out := []diagCheck{
-		runDiag("rathole_unit_active", func() (bool, string) {
-			active, detail := unitActive(s.cfg.UnitName)
-			return active, detail
-		}),
-		runDiag("rathole_config_present", func() (bool, string) {
-			if _, err := os.Stat("/etc/rathole/client.toml"); err != nil {
-				return false, err.Error()
-			}
-			return true, "/etc/rathole/client.toml"
-		}),
-		runDiag("disk_space_above_5pct", func() (bool, string) {
-			free, total, err := rootDiskSpace()
-			if err != nil {
-				return false, err.Error()
-			}
-			pct := float64(free) / float64(total) * 100
-			detail := fmt.Sprintf("%.1f%% free (%d / %d bytes)", pct, free, total)
-			return pct > 5, detail
-		}),
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"checks": out})
-}
-
-// ─── status helpers ──────────────────────────────────────────────────────────
-
-type statusResponse struct {
-	AgentVersion   string       `json:"agent_version"`
-	AgentUptime    int64        `json:"agent_uptime_seconds"`
-	RestartsServed int64        `json:"restarts_served"`
-	Rathole        ratholeInfo  `json:"rathole"`
-	System         systemInfo   `json:"system"`
-	Now            time.Time    `json:"now"`
-}
+// ─── system-inspection helpers (pure; reused by the gRPC methods) ────────────
 
 type ratholeInfo struct {
-	Active   bool   `json:"active"`
-	State    string `json:"state"`     // "active", "inactive", "failed", etc.
-	Substate string `json:"substate"`  // "running", "dead", etc.
-	Detail   string `json:"detail,omitempty"`
+	Active   bool
+	State    string // "active", "inactive", "failed", etc.
+	Substate string // "running", "dead", etc.
+	Detail   string
 }
 
 type systemInfo struct {
-	LoadAvg1   float64 `json:"load_avg_1"`
-	LoadAvg5   float64 `json:"load_avg_5"`
-	LoadAvg15  float64 `json:"load_avg_15"`
-	MemTotalKB uint64  `json:"mem_total_kb"`
-	MemAvailKB uint64  `json:"mem_avail_kb"`
-	DiskFreeBytes  uint64 `json:"disk_free_bytes"`
-	DiskTotalBytes uint64 `json:"disk_total_bytes"`
-	Hostname   string  `json:"hostname"`
-	Kernel     string  `json:"kernel"`
+	LoadAvg1       float64
+	LoadAvg5       float64
+	LoadAvg15      float64
+	MemTotalKB     uint64
+	MemAvailKB     uint64
+	DiskFreeBytes  uint64
+	DiskTotalBytes uint64
+	Hostname       string
+	Kernel         string
 }
 
 type diagCheck struct {
-	Name   string `json:"name"`
-	Pass   bool   `json:"pass"`
-	Detail string `json:"detail"`
+	Name   string
+	Pass   bool
+	Detail string
 }
 
 func runDiag(name string, fn func() (bool, string)) diagCheck {
@@ -290,18 +232,15 @@ func ratholeStatus(unit string) ratholeInfo {
 func unitActive(unit string) (bool, string) {
 	state := runProp(unit, "ActiveState")
 	substate := runProp(unit, "SubState")
-	if state == "active" {
-		return true, fmt.Sprintf("%s (%s)", state, substate)
-	}
-	return false, fmt.Sprintf("%s (%s)", state, substate)
+	return state == "active", fmt.Sprintf("%s (%s)", state, substate)
 }
 
 func runProp(unit, prop string) string {
-	out, err := exec.Command("systemctl", "show", "-p", prop, "--value", unit).Output() // #nosec G204
+	out, err := runCommand("systemctl", "show", "-p", prop, "--value", unit)
 	if err != nil {
 		return "unknown"
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(out)
 }
 
 func systemStatus() systemInfo {
@@ -351,120 +290,15 @@ func rootDiskSpace() (free, total uint64, err error) {
 	return st.Bavail * bsize, st.Blocks * bsize, nil
 }
 
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
 // ─── rathole-config push ─────────────────────────────────────────────────────
-//
-// GET returns the current /etc/rathole/client.toml so the VPS can read-merge-write
-// without an SSH session. POST writes a new config in place; rathole's notify
-// watcher picks up the change via inotify and reloads without restart.
 //
 // The agent runs as the SSH user (set in bootstrap), and bootstrap chowns
 // /etc/rathole/client.toml to that user, so direct file I/O works without sudo.
-// We deliberately do not support a $HOME/.config/rathole/client.toml fallback:
-// the bootstrap script always installs system-wide and aborts on sudo failure,
-// so a machine running the agent always has the system-wide path.
 
 const (
 	clientTomlPath        = "/etc/rathole/client.toml"
 	maxRatholeConfigBytes = 1 << 20 // 1 MiB — generous but bounded
 )
-
-func (s *server) ratholeConfig(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		data, err := os.ReadFile(clientTomlPath) // #nosec G304 — fixed path
-		if err != nil {
-			if os.IsNotExist(err) {
-				writeJSON(w, http.StatusNotFound, map[string]string{"error": "client.toml not present at " + clientTomlPath})
-				return
-			}
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write(data)
-	case http.MethodPost:
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxRatholeConfigBytes+1))
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body: " + err.Error()})
-			return
-		}
-		if len(body) > maxRatholeConfigBytes {
-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "config exceeds 1MiB"})
-			return
-		}
-		if len(body) == 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "empty body"})
-			return
-		}
-		if err := writeFilePreservingMode(clientTomlPath, body); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"written": true,
-			"bytes":   len(body),
-		})
-	default:
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET or POST required"})
-	}
-}
-
-// POST /uninstall — kicks off a detached worker that runs the on-disk
-// /usr/local/bin/gopher-uninstall script and returns 202 immediately.
-//
-// The worker is in its own session (setsid) so it survives:
-//   - the HTTP request finishing
-//   - the agent's own death when gopher-uninstall stops gopher-agent
-//   - the rathole tunnel collapsing when the VPS reconciles server.toml
-//
-// We sleep briefly before running the uninstall so the 202 response has time
-// to flush back through the tunnel before rathole-client gets stopped. Once
-// the uninstall script is running, the VPS doesn't need to be reachable —
-// every step is local.
-func (s *server) uninstall(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
-		return
-	}
-
-	const uninstallScript = "/usr/local/bin/gopher-uninstall"
-	if _, err := os.Stat(uninstallScript); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "uninstall script missing at " + uninstallScript + " — machine may need manual cleanup",
-		})
-		return
-	}
-
-	// Spawn a detached child via setsid so it survives this process being
-	// killed by the uninstall script itself. The child sleeps a few seconds
-	// to let the 202 response flush, then runs the canonical on-disk
-	// uninstall flow with output captured for post-mortem.
-	cmd := exec.Command("setsid", "sh", "-c", // #nosec G204 — fixed argv
-		"sleep 3; sudo -n "+uninstallScript+" >/tmp/.gopher-uninstall.log 2>&1")
-	if err := cmd.Start(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to spawn detached uninstall worker: " + err.Error(),
-		})
-		return
-	}
-	// Don't Wait — the child outlives this process. Release the goroutine
-	// holding the OS handle so the kernel reaps the child when it eventually
-	// exits (after we're already dead, but that's fine: PID 1 inherits it).
-	go func() { _ = cmd.Process.Release() }()
-
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"queued":     true,
-		"script":     uninstallScript,
-		"log":        "/tmp/.gopher-uninstall.log",
-		"started_at": time.Now().UTC(),
-	})
-}
 
 // availableBytes returns the number of bytes free for non-root writes in dir,
 // or (0, false) if the syscall isn't supported. Hoisted into a var so tests
@@ -474,9 +308,6 @@ var availableBytes = func(dir string) (uint64, bool) {
 	if err := syscall.Statfs(dir, &stat); err != nil {
 		return 0, false
 	}
-	// f_bavail (blocks free to non-root) × f_bsize (block size) = bytes safely
-	// usable. f_bavail can be smaller than f_bfree because the FS reserves
-	// some space for root — we honour that conservatively.
 	return uint64(stat.Bavail) * uint64(stat.Bsize), true
 }
 
