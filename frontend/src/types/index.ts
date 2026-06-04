@@ -24,6 +24,9 @@ export interface Machine {
   status: string
   public_ip?: string
   last_seen: string | null
+  // When the machine most recently became connected — used to render uptime
+  // while up; last_seen is shown once it's offline.
+  connected_since?: string | null
   // gopher-agent fields
   agent_local_port?: number
   agent_remote_port?: number

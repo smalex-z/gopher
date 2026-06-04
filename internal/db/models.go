@@ -51,6 +51,10 @@ type Machine struct {
 	Status          string     `json:"status"`
 	PublicIP        string     `json:"public_ip"`
 	LastSeen        *time.Time `json:"last_seen"`
+	// ConnectedSince is when the machine most recently transitioned to
+	// "connected". Rendered as uptime while the machine is up; once it goes
+	// offline the dashboard shows LastSeen instead.
+	ConnectedSince *time.Time `json:"connected_since,omitempty"`
 	// gopher-agent fields. AgentInstalled flips true once the machine has the
 	// agent binary running and reachable; AgentLastSeen tracks the last
 	// successful health poll; AgentInstallError stores the last failure reason

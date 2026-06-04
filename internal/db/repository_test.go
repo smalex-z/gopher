@@ -50,6 +50,51 @@ func TestMachine_CreateAndGet(t *testing.T) {
 	}
 }
 
+func TestSetMachineStatus_ConnectedSinceLifecycle(t *testing.T) {
+	initTestDB(t)
+	// Seed offline so the first "connected" is a genuine up-transition.
+	if err := CreateMachine(&Machine{ID: "m1", Name: "m1", Status: "offline"}); err != nil {
+		t.Fatalf("CreateMachine: %v", err)
+	}
+
+	t0 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := SetMachineStatus("m1", "connected", &t0); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	m, _ := GetMachine("m1")
+	if m.ConnectedSince == nil || !m.ConnectedSince.Equal(t0) {
+		t.Fatalf("connected_since should be stamped at t0=%v, got %v", t0, m.ConnectedSince)
+	}
+
+	// A later connected poll must PRESERVE connected_since (continuous uptime).
+	t1 := t0.Add(30 * time.Minute)
+	if err := SetMachineStatus("m1", "connected", &t1); err != nil {
+		t.Fatalf("re-poll: %v", err)
+	}
+	m, _ = GetMachine("m1")
+	if m.ConnectedSince == nil || !m.ConnectedSince.Equal(t0) {
+		t.Errorf("connected_since should be preserved at t0=%v across polls, got %v", t0, m.ConnectedSince)
+	}
+	if m.LastSeen == nil || !m.LastSeen.Equal(t1) {
+		t.Errorf("last_seen should advance to t1=%v, got %v", t1, m.LastSeen)
+	}
+
+	// Going offline leaves connected_since untouched (unused while offline).
+	if err := SetMachineStatus("m1", "offline", nil); err != nil {
+		t.Fatalf("offline: %v", err)
+	}
+
+	// Reconnecting AFTER an offline gap must reset connected_since to the new time.
+	t2 := t1.Add(time.Hour)
+	if err := SetMachineStatus("m1", "connected", &t2); err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	m, _ = GetMachine("m1")
+	if m.ConnectedSince == nil || !m.ConnectedSince.Equal(t2) {
+		t.Errorf("connected_since should reset to t2=%v on reconnect, got %v", t2, m.ConnectedSince)
+	}
+}
+
 func TestMachine_GetNotFound(t *testing.T) {
 	initTestDB(t)
 	_, err := GetMachine("nonexistent")

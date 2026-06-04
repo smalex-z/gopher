@@ -7,7 +7,7 @@ import { localApi } from '../api/local'
 import { vpsApi } from '../api/vps'
 import StatusBadge from '../components/StatusBadge'
 import MachineHealthPanel from '../components/MachineHealthPanel'
-import { relativeTime } from '../lib/time'
+import { relativeTime, formatDuration } from '../lib/time'
 import { toast } from '../lib/toast'
 import type { Machine, Tunnel, SSHKey } from '../types'
 
@@ -346,7 +346,7 @@ export default function MachinesPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
               <tr>
-                {['', 'Name', 'Username', 'Status', 'Agent', 'Last Seen', 'Actions'].map(h => (
+                {['', 'Name', 'Username', 'Status', 'Agent', 'Uptime', 'Actions'].map(h => (
                   <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
@@ -391,8 +391,21 @@ export default function MachinesPage() {
                           </button>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-gray-500" title={m.last_seen ? new Date(m.last_seen).toLocaleString() : ''}>
-                        {m.last_seen ? relativeTime(m.last_seen) : 'Never'}
+                      <td
+                        className="px-4 py-3 text-gray-500"
+                        title={
+                          m.status === 'connected' && m.connected_since
+                            ? `Connected since ${new Date(m.connected_since).toLocaleString()}`
+                            : m.last_seen
+                              ? `Last seen ${new Date(m.last_seen).toLocaleString()}`
+                              : ''
+                        }
+                      >
+                        {m.status === 'connected' && m.connected_since
+                          ? `up ${formatDuration(Math.max(0, Math.floor((Date.now() - new Date(m.connected_since).getTime()) / 1000)))}`
+                          : m.last_seen
+                            ? `last seen ${relativeTime(m.last_seen)}`
+                            : 'Never'}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex gap-2">

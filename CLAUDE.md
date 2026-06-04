@@ -60,6 +60,8 @@ Gopher is a self-hosted reverse tunnel gateway. It runs on a public VPS and mana
 
 The Go binary embeds the built React frontend (`frontend/dist`) and serves it as a SPA.
 
+**Encryption model:** the edge terminates visitor TLS (Caddy) to filter/route, then the rathole back-leg to the origin is re-encrypted via Noise transport — no plaintext on the public internet, but the edge holds the keys by design (the trade-off that enables edge filtering). This is *not* TLS passthrough.
+
 ### Data flow
 ```
 Internet → Caddy (80/443) → localhost:<rathole_port> → rathole tunnel → client machine

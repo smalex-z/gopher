@@ -101,7 +101,25 @@ func SetMachineStatus(id, status string, lastSeen *time.Time) error {
 	if lastSeen != nil {
 		updates["last_seen"] = *lastSeen
 	}
+	if status == "connected" {
+		when := time.Now()
+		if lastSeen != nil {
+			when = *lastSeen
+		}
+		updates["connected_since"] = connectedSinceExpr(when)
+	}
 	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
+}
+
+// connectedSinceExpr stamps connected_since on the up-transition (or the first
+// observation where it's still NULL) but preserves it across consecutive
+// connected polls, so uptime is continuous rather than resetting every tick.
+// SQLite evaluates the CASE against the pre-update row, so `status` here is the
+// machine's status *before* this Update sets it to "connected".
+func connectedSinceExpr(when time.Time) any {
+	return gorm.Expr(
+		"CASE WHEN status <> ? OR connected_since IS NULL THEN ? ELSE connected_since END",
+		"connected", when)
 }
 
 // SetMachineAgentDegraded records the "agent up, rathole down" state: the
@@ -135,6 +153,7 @@ func SetMachineAgentSeen(id, version string, when time.Time) error {
 		"agent_install_error": "",
 		"status":              "connected",
 		"last_seen":           when,
+		"connected_since":     connectedSinceExpr(when),
 		"updated_at":          when,
 	}
 	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
