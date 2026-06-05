@@ -7,6 +7,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	agentpb "github.com/smalex-z/gopher/internal/agentpb"
 	"github.com/smalex-z/gopher/internal/db"
@@ -51,6 +52,14 @@ func (c *AgentClient) dial() (*grpc.ClientConn, error) {
 	return grpc.NewClient(target,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithPerRPCCredentials(bearerToken{token: c.machine.AgentToken}),
+		// Detect a silently-dropped WatchStatus stream: ping the agent and error
+		// out if it doesn't respond, so a dead origin surfaces in ~30s instead of
+		// the Recv blocking forever.
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                20 * time.Second,
+			Timeout:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
 	)
 }
 

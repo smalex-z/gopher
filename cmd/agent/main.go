@@ -33,6 +33,7 @@ import (
 
 	"github.com/soheilhy/cmux"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 
 	agentpb "github.com/smalex-z/gopher/internal/agentpb"
@@ -132,6 +133,12 @@ func main() {
 	grpcSrv := grpc.NewServer(
 		grpc.UnaryInterceptor(unaryAuthInterceptor(cfg.Token)),
 		grpc.StreamInterceptor(streamAuthInterceptor(cfg.Token)),
+		// Permit the server's 20s client keepalive pings (default min is 5min,
+		// which would GOAWAY the WatchStatus stream with "too_many_pings").
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
 	)
 	agentpb.RegisterAgentControlServer(grpcSrv, srv)
 	// Reflection lets `grpcurl` introspect the service for debugging. The auth
