@@ -1,0 +1,139 @@
+syntax = "proto3";
+
+// Package gopher.agent.v1 is the control-plane contract between the Gopher
+// server (VPS) and the gopher-agent running on each managed origin machine.
+//
+// The server reaches the agent through the rathole back-channel (VPS dials
+// 127.0.0.1:<remote_port> -> tunnel -> agent on 127.0.0.1:4322). The transport
+// is cleartext HTTP/2 (gRPC insecure): the tunnel hop is already encrypted by
+// rathole's Noise transport, so wrapping gRPC in TLS again would be redundant.
+//
+// Every RPC requires a per-machine bearer token in the "authorization"
+// metadata header ("Bearer <token>"), enforced by a server-side interceptor.
+package agent.v1;
+
+option go_package = "github.com/smalex-z/gopher/internal/agentpb;agentpb";
+
+// AgentControl is the full set of control operations the VPS performs against
+// an origin's agent. It replaces the previous HTTP/JSON API one-for-one and
+// adds WatchStatus for push-based health.
+service AgentControl {
+  // GetVersion reports the agent build version and the wire protocol version.
+  // The server gates compatibility on protocol_version, not the semver string.
+  rpc GetVersion(GetVersionRequest) returns (VersionInfo);
+
+  // GetStatus returns a one-shot system + rathole status snapshot.
+  rpc GetStatus(GetStatusRequest) returns (StatusInfo);
+
+  // WatchStatus streams status snapshots: one immediately, then on change and
+  // on a periodic heartbeat. The stream dropping is itself the signal that the
+  // agent/origin is gone — this is what lets the server detect death without
+  // polling.
+  rpc WatchStatus(WatchStatusRequest) returns (stream StatusInfo);
+
+  // RestartRathole runs `systemctl start rathole-client` (start, never
+  // restart — start resurrects a stopped/failed unit without dropping the
+  // active tunnels a restart would kill).
+  rpc RestartRathole(RestartRatholeRequest) returns (RestartRatholeResponse);
+
+  // GetRatholeConfig returns the current /etc/rathole/client.toml.
+  rpc GetRatholeConfig(GetRatholeConfigRequest) returns (RatholeConfig);
+
+  // PutRatholeConfig writes a new client.toml in place; rathole's notify
+  // watcher reloads it via inotify without a restart.
+  rpc PutRatholeConfig(RatholeConfig) returns (PutRatholeConfigResponse);
+
+  // Diagnostics runs structured pass/fail checks on the origin.
+  rpc Diagnostics(DiagnosticsRequest) returns (DiagnosticsResponse);
+
+  // Uninstall kicks off a detached worker that runs the on-disk
+  // gopher-uninstall script and returns immediately.
+  rpc Uninstall(UninstallRequest) returns (UninstallResponse);
+}
+
+message GetVersionRequest {}
+
+message VersionInfo {
+  string version = 1;            // agent build version, e.g. "0.2.0"
+  uint32 protocol_version = 2;   // wire-compat contract; server gates on this
+  string unit = 3;               // managed systemd unit name
+  int64 uptime_seconds = 4;
+  string arch = 5;               // runtime.GOARCH
+}
+
+message GetStatusRequest {}
+
+message WatchStatusRequest {
+  // Desired heartbeat interval in seconds. The agent clamps to a sane range;
+  // 0 means "use the agent default".
+  uint32 heartbeat_seconds = 1;
+}
+
+message StatusInfo {
+  string version = 1;
+  uint32 protocol_version = 2;
+  int64 agent_uptime_seconds = 3;
+  int64 restarts_served = 4;
+  RatholeStatus rathole = 5;
+  SystemStatus system = 6;
+  int64 now_unix = 7; // server records receipt time; this is the agent's clock
+}
+
+message RatholeStatus {
+  bool active = 1;
+  string state = 2;     // "active", "inactive", "failed", ...
+  string substate = 3;  // "running", "dead", ...
+  string detail = 4;
+}
+
+message SystemStatus {
+  double load_avg_1 = 1;
+  double load_avg_5 = 2;
+  double load_avg_15 = 3;
+  uint64 mem_total_kb = 4;
+  uint64 mem_avail_kb = 5;
+  uint64 disk_free_bytes = 6;
+  uint64 disk_total_bytes = 7;
+  string hostname = 8;
+  string kernel = 9;
+}
+
+message RestartRatholeRequest {}
+
+message RestartRatholeResponse {
+  bool restarted = 1;
+  string output = 2;
+}
+
+message GetRatholeConfigRequest {}
+
+// RatholeConfig carries the client.toml body for both the Get reply and the
+// Put request.
+message RatholeConfig {
+  string toml = 1;
+}
+
+message PutRatholeConfigResponse {
+  bool written = 1;
+  int64 bytes = 2;
+}
+
+message DiagnosticsRequest {}
+
+message DiagnosticsResponse {
+  repeated DiagCheck checks = 1;
+}
+
+message DiagCheck {
+  string name = 1;
+  bool pass = 2;
+  string detail = 3;
+}
+
+message UninstallRequest {}
+
+message UninstallResponse {
+  bool queued = 1;
+  string script = 2;
+  string log = 3;
+}

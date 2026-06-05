@@ -1,9 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
+	"fmt"
 	"io/fs"
 	"net/http"
+	"strings"
 )
 
 // agentsFS holds the gopher-agent binaries built by scripts/build.sh.
@@ -29,6 +33,20 @@ func agentsHandler() http.Handler {
 	// Force download (not inline display) and lock the content type so browsers
 	// don't sniff the binary as something weird.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Serve a "<name>.sha256" sidecar for any embedded binary, computed on
+		// the fly. The agent self-updater fetches this to verify its download
+		// against corruption before installing.
+		if name := strings.TrimSuffix(r.URL.Path, ".sha256"); name != r.URL.Path {
+			data, err := fs.ReadFile(sub, strings.TrimPrefix(name, "/"))
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			sum := sha256.Sum256(data)
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			fmt.Fprintf(w, "%s  %s\n", hex.EncodeToString(sum[:]), strings.TrimPrefix(name, "/"))
+			return
+		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		fileSrv.ServeHTTP(w, r)
 	})

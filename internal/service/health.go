@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,10 +21,10 @@ import (
 // the SSH tunnel port (the same signal the existing monitor used) — they
 // produce health records too, just less detailed.
 type HealthService struct {
-	interval         time.Duration
-	purgeInterval    time.Duration
-	purgeOlderThan   time.Duration
-	autoRecover      bool
+	interval       time.Duration
+	purgeInterval  time.Duration
+	purgeOlderThan time.Duration
+	autoRecover    bool
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -31,8 +32,8 @@ type HealthService struct {
 
 	// Per-machine state for the auto-recovery throttle. We don't want to spam
 	// `systemctl restart rathole-client` if the machine is durably broken.
-	mu             sync.Mutex
-	lastRecovery   map[string]time.Time
+	mu           sync.Mutex
+	lastRecovery map[string]time.Time
 
 	// Per-machine last observed status so we can emit events on transition only,
 	// not on every poll. Values: "ok" | "degraded" | "offline". Empty until the
@@ -46,6 +47,22 @@ type HealthService struct {
 	// only exercise the health-poll path. Nil disables the retry, which is the
 	// pre-existing behaviour.
 	configPusher ConfigPusher
+
+	// agentUpgrader rolls an outdated/protocol-skewed agent forward by running
+	// the install over the server's SSH connection (no operator paste). Set by
+	// the cmd/server wiring; nil disables auto-upgrade (e.g. in tests).
+	agentUpgrader AgentUpgrader
+	// lastAgentUpgrade throttles auto-upgrade attempts per machine so a durably
+	// broken upgrade doesn't re-fire every health tick.
+	lastAgentUpgrade map[string]time.Time
+
+	// streams holds the cancel func for each agent machine's live WatchStatus
+	// consumer. Agent machines are watched via a persistent stream (push), not
+	// polled; the tick only reconciles which streams should exist. streamCtx is
+	// the parent context cancelled on Stop. All guarded by mu.
+	streams      map[string]context.CancelFunc
+	streamCtx    context.Context
+	streamCancel context.CancelFunc
 }
 
 // ConfigPusher decouples the health loop from the LocalSetupService. The
@@ -56,24 +73,60 @@ type ConfigPusher interface {
 	RetryPendingConfigPush(machine *db.Machine) error
 }
 
+// AgentUpgrader rolls a machine's gopher-agent forward to the version the
+// server embeds — automatically, over the server's own SSH connection. The
+// production implementation is *AgentInstaller. Decoupled as an interface so
+// the health loop doesn't hard-depend on the installer and tests can stub it.
+type AgentUpgrader interface {
+	UpgradeAgent(machine *db.Machine) error
+}
+
+// targetAgentVersion is the agent version this server expects; bump it in
+// lockstep with cmd/agent's agentVersion. A reachable agent reporting an older
+// version is auto-upgraded.
+const targetAgentVersion = "0.2.0"
+
+// agentUpgradeCooldown throttles repeated auto-upgrade attempts per machine.
+const agentUpgradeCooldown = 10 * time.Minute
+
 const (
-	healthCheckInterval        = 60 * time.Second
-	healthRecoveryCooldown     = 3 * time.Minute
-	healthCheckRetentionDays   = 7
-	healthCheckPurgeFrequency  = 6 * time.Hour
+	healthCheckInterval       = 60 * time.Second
+	healthRecoveryCooldown    = 3 * time.Minute
+	healthCheckRetentionDays  = 7
+	healthCheckPurgeFrequency = 6 * time.Hour
 )
 
 func NewHealthService(autoRecover bool) *HealthService {
 	return &HealthService{
-		interval:       healthCheckInterval,
-		purgeInterval:  healthCheckPurgeFrequency,
-		purgeOlderThan: time.Duration(healthCheckRetentionDays) * 24 * time.Hour,
-		autoRecover:    autoRecover,
-		stopCh:         make(chan struct{}),
-		lastRecovery:   map[string]time.Time{},
-		lastStatus:     map[string]string{},
+		interval:         healthCheckInterval,
+		purgeInterval:    healthCheckPurgeFrequency,
+		purgeOlderThan:   time.Duration(healthCheckRetentionDays) * 24 * time.Hour,
+		autoRecover:      autoRecover,
+		stopCh:           make(chan struct{}),
+		lastRecovery:     map[string]time.Time{},
+		lastStatus:       map[string]string{},
+		lastAgentUpgrade: map[string]time.Time{},
+		streams:          map[string]context.CancelFunc{},
 	}
 }
+
+const (
+	// agentStreamHeartbeat is the cadence we ask the agent to push status at.
+	// gRPC keepalive (see agent_client.dial) detects a silently-dropped stream
+	// independently, so this is just the freshness of the live metrics.
+	agentStreamHeartbeat = 15 * time.Second
+	// streamBackoffMin/Max bound the reconnect backoff after a stream drops.
+	streamBackoffMin = 2 * time.Second
+	streamBackoffMax = 30 * time.Second
+	// offlineGrace is how long a stream must stay down before we flip the
+	// machine offline — long enough that a normal agent restart (Restart=always,
+	// ~5s) or self-update reconnects without a spurious offline blip.
+	offlineGrace = 25 * time.Second
+	// legacyPollInterval is how often we poll a pre-gRPC (v0.1.0) agent over its
+	// JSON /status, since it can't stream. The worker keeps re-attempting the
+	// stream each interval, so it switches to push automatically once upgraded.
+	legacyPollInterval = 30 * time.Second
+)
 
 // SetConfigPusher wires the deferred-push retry hook. Called once from
 // cmd/server/main.go after both services are constructed. Doing it via a
@@ -82,6 +135,48 @@ func NewHealthService(autoRecover bool) *HealthService {
 // needs LocalSetupService for retries).
 func (s *HealthService) SetConfigPusher(p ConfigPusher) {
 	s.configPusher = p
+}
+
+// SetAgentUpgrader wires the auto-upgrade hook. Called once from
+// cmd/server/main.go, same post-construction pattern as SetConfigPusher.
+func (s *HealthService) SetAgentUpgrader(u AgentUpgrader) {
+	s.agentUpgrader = u
+}
+
+// maybeAutoUpgradeAgent triggers an SSH-driven agent upgrade for m, throttled
+// per machine. Runs in the background so it never blocks a health tick; the
+// upgraded agent is picked up on a subsequent poll.
+func (s *HealthService) maybeAutoUpgradeAgent(m *db.Machine, reason string) {
+	if s.agentUpgrader == nil {
+		return
+	}
+	s.mu.Lock()
+	if time.Since(s.lastAgentUpgrade[m.ID]) < agentUpgradeCooldown {
+		s.mu.Unlock()
+		return
+	}
+	s.lastAgentUpgrade[m.ID] = time.Now()
+	s.mu.Unlock()
+
+	machine := *m // copy: the pointer's fields may change under the next poll
+	go goSafe("health.autoUpgradeAgent", func() {
+		log.Printf("health: auto-upgrading agent on %s (%s)", machine.Name, reason)
+		if err := s.agentUpgrader.UpgradeAgent(&machine); err != nil {
+			log.Printf("health: auto-upgrade agent on %s failed: %v", machine.Name, err)
+			return
+		}
+		log.Printf("health: auto-upgrade agent on %s complete", machine.Name)
+	})
+}
+
+// isAgentProtocolSkew reports whether a failed agent RPC looks like the server
+// (gRPC) talking to a pre-gRPC HTTP/1.1 agent — the signature of an agent that
+// predates the current wire protocol and needs upgrading.
+func isAgentProtocolSkew(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "HTTP/1.1") ||
+		strings.Contains(msg, "frame too large") ||
+		strings.Contains(msg, "server preface")
 }
 
 // emitTransition records a state change as an event, but only when it's
@@ -147,12 +242,22 @@ func (s *HealthService) Start() {
 	if !s.running.CompareAndSwap(false, true) {
 		return
 	}
+	s.mu.Lock()
+	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
+	s.mu.Unlock()
 	go s.loop()
 	go s.janitorLoop()
 }
 
 func (s *HealthService) Stop() {
-	s.stopOnce.Do(func() { close(s.stopCh) })
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+		s.mu.Lock()
+		if s.streamCancel != nil {
+			s.streamCancel() // tear down all agent WatchStatus consumers
+		}
+		s.mu.Unlock()
+	})
 }
 
 func (s *HealthService) loop() {
@@ -180,19 +285,34 @@ func (s *HealthService) tick() {
 		log.Printf("health: list machines failed: %v", err)
 		return
 	}
+	// Agent machines are watched via a persistent WatchStatus stream (push), not
+	// polled. The tick just makes sure each one has a live consumer and reaps
+	// consumers for machines that vanished. Legacy machines with no agent still
+	// get the TCP probe on the tick.
 	const healthCheckParallelism = 4
 	sem := make(chan struct{}, healthCheckParallelism)
 	var wg sync.WaitGroup
+	agentIDs := make(map[string]bool)
 	for i := range machines {
 		m := machines[i]
+		if m.AgentRemotePort > 0 {
+			agentIDs[m.ID] = true
+			s.ensureStream(m)
+			continue
+		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			goSafe("health.checkMachine", func() { s.checkMachine(&m) })
+			goSafe("health.checkTCP", func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+				defer cancel()
+				s.checkViaTCP(ctx, &m, "machine:"+m.ID, time.Now())
+			})
 		}()
 	}
+	s.reconcileStreams(agentIDs)
 	wg.Wait()
 }
 
@@ -222,9 +342,145 @@ func (s *HealthService) checkMachine(m *db.Machine) {
 	s.checkViaTCP(ctx, m, subject, start)
 }
 
+// ensureStream starts a WatchStatus consumer for m if one isn't already running.
+func (s *HealthService) ensureStream(m db.Machine) {
+	s.mu.Lock()
+	if s.streamCtx == nil { // not started, or stopped
+		s.mu.Unlock()
+		return
+	}
+	if _, ok := s.streams[m.ID]; ok {
+		s.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(s.streamCtx)
+	s.streams[m.ID] = cancel
+	s.mu.Unlock()
+
+	id := m.ID
+	go goSafe("health.agentStream", func() { s.runAgentStream(ctx, id) })
+}
+
+// reconcileStreams cancels consumers for machines no longer present / no longer
+// agent-backed. keep holds the IDs that should stay running.
+func (s *HealthService) reconcileStreams(keep map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, cancel := range s.streams {
+		if !keep[id] {
+			cancel()
+			delete(s.streams, id)
+		}
+	}
+}
+
+// runAgentStream maintains one machine's WatchStatus consumer: applies every
+// pushed status, and on a drop flips the machine offline (after a short grace,
+// so a normal agent restart doesn't blip) then reconnects with capped backoff.
+// Exits only when its context is cancelled (machine removed, or Stop).
+func (s *HealthService) runAgentStream(ctx context.Context, machineID string) {
+	subject := "machine:" + machineID
+	backoff := streamBackoffMin
+	var downSince time.Time
+
+	for ctx.Err() == nil {
+		m, err := db.GetMachine(machineID)
+		if err != nil || m == nil || m.AgentRemotePort == 0 {
+			// Vanished between ticks; wait for reconcile to cancel us.
+			if !sleepCtx(ctx, streamBackoffMax) {
+				return
+			}
+			continue
+		}
+
+		// onUpdate runs synchronously inside WatchStatus's Recv loop (same
+		// goroutine), so backoff/downSince need no extra synchronisation.
+		streamErr := NewAgentClient(m).WatchStatus(ctx, agentStreamHeartbeat, func(st *AgentStatus) {
+			downSince = time.Time{}
+			backoff = streamBackoffMin
+			s.applyAgentStatus(m, st, subject, 0)
+		})
+		if ctx.Err() != nil {
+			return // cancelled, not a real drop
+		}
+
+		// Legacy v0.1.0 agent: it answered gRPC with HTTP/1.1, so it can't
+		// stream. Keep it monitored via the JSON /status fallback and surface
+		// the upgrade, rather than letting it flap offline. The loop re-attempts
+		// WatchStatus each interval, so it upgrades to push automatically once
+		// the agent is updated.
+		if isAgentProtocolSkew(streamErr) {
+			_ = db.SetMachineAgentOutdated(m.ID, true)
+			s.maybeAutoUpgradeAgent(m, "agent predates current wire protocol")
+
+			pctx, pcancel := context.WithTimeout(ctx, 8*time.Second)
+			status, perr := NewAgentClient(m).statusViaHTTP(pctx)
+			pcancel()
+			if perr == nil {
+				downSince = time.Time{}
+				s.applyAgentStatus(m, status, subject, 0)
+			} else {
+				if downSince.IsZero() {
+					downSince = time.Now()
+				}
+				if time.Since(downSince) >= offlineGrace {
+					s.markAgentOffline(m, subject, perr)
+				}
+			}
+			if !sleepCtx(ctx, legacyPollInterval) {
+				return
+			}
+			continue
+		}
+
+		// Real stream drop (v0.2.0+ agent) → flip offline after grace, reconnect.
+		if downSince.IsZero() {
+			downSince = time.Now()
+		}
+		if time.Since(downSince) >= offlineGrace {
+			s.markAgentOffline(m, subject, streamErr)
+		}
+		if !sleepCtx(ctx, backoff) {
+			return
+		}
+		backoff = minDuration(backoff*2, streamBackoffMax)
+	}
+}
+
+// markAgentOffline records a failed check and flips the machine offline once its
+// stream has stayed down past the grace window.
+func (s *HealthService) markAgentOffline(m *db.Machine, subject string, err error) {
+	msg := "agent stream closed"
+	if err != nil {
+		msg = "agent unreachable: " + err.Error()
+	}
+	_ = db.RecordHealthCheck(&db.HealthCheck{Subject: subject, OK: false, ErrorMsg: msg})
+	if e := db.SetMachineStatus(m.ID, "offline", nil); e != nil {
+		log.Printf("health: persist offline for %s: %v", m.ID, e)
+	}
+	s.emitTransition(m, "offline", msg)
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // checkViaAgent returns true if the agent answered (regardless of rathole
 // health on the box). false means the agent is unreachable and the caller
-// should fall back to the TCP probe.
+// should fall back to the TCP probe. Used by the on-demand "Test now" path; the
+// continuous path streams via runAgentStream.
 func (s *HealthService) checkViaAgent(ctx context.Context, m *db.Machine, subject string, start time.Time) bool {
 	client := NewAgentClient(m)
 	status, err := client.Status(ctx)
@@ -237,51 +493,56 @@ func (s *HealthService) checkViaAgent(ctx context.Context, m *db.Machine, subjec
 			LatencyMS: latency,
 			ErrorMsg:  "agent unreachable: " + err.Error(),
 		})
+		// A protocol-skew error means the agent predates the current wire
+		// protocol (e.g. old HTTP agent vs new gRPC server). The box is
+		// reachable enough to have answered with HTTP/1.1, so SSH works —
+		// auto-upgrade it instead of leaving the operator with a cryptic error.
+		if isAgentProtocolSkew(err) {
+			_ = db.SetMachineAgentOutdated(m.ID, true)
+			s.maybeAutoUpgradeAgent(m, "agent predates current wire protocol")
+		}
 		return false
 	}
 
-	// Agent reachable — but is rathole healthy on the box? An "agent up,
-	// rathole down" state means the back-channel works but tunnels don't.
-	// We must flip machine.Status to offline so the dashboard stops claiming
-	// the machine is connected (its tunnels can't actually serve traffic).
-	// Without this update the previous "connected" value from the last good
-	// poll sticks indefinitely — the agent's existence doesn't certify
-	// tunnel health, only its own reachability.
+	s.applyAgentStatus(m, status, subject, latency)
+	return true
+}
+
+// applyAgentStatus persists one status snapshot — from either the on-demand
+// unary poll (checkViaAgent / "Test now") or a WatchStatus push. It records the
+// health check, flips the machine connected/degraded, retries deferred config
+// pushes, and flags/auto-upgrades an outdated agent.
+func (s *HealthService) applyAgentStatus(m *db.Machine, status *AgentStatus, subject string, latency int) {
+	// "agent up, rathole down": the back-channel works but tunnels don't, so
+	// flip Status to offline — the agent's existence certifies its own
+	// reachability, not tunnel health.
 	if !status.Rathole.Active {
 		errMsg := fmt.Sprintf("rathole-client not active (state=%s/%s)", status.Rathole.State, status.Rathole.Substate)
-		_ = db.RecordHealthCheck(&db.HealthCheck{
-			Subject:   subject,
-			OK:        false,
-			LatencyMS: latency,
-			ErrorMsg:  errMsg,
-		})
-		// AgentLastSeen still updates so the operator can see the agent is
-		// up (the back-channel works). Status reflects rathole, not agent.
+		_ = db.RecordHealthCheck(&db.HealthCheck{Subject: subject, OK: false, LatencyMS: latency, ErrorMsg: errMsg})
 		now := time.Now()
 		if err := db.SetMachineAgentDegraded(m.ID, status.AgentVersion, now); err != nil {
 			log.Printf("health: persist agent-degraded for %s: %v", m.ID, err)
 		}
 		s.emitTransition(m, "degraded", errMsg)
 		s.maybeRecover(m, "rathole inactive")
-		return true
+		return
 	}
 
-	// Healthy. Use a partial Updates call so this write doesn't clobber
-	// fields the monitor or another writer touched between our load and our
-	// save (full-record GORM Save was racing with monitor.go).
+	// Healthy. Partial Updates so concurrent writers aren't clobbered.
 	now := time.Now()
 	if err := db.SetMachineAgentSeen(m.ID, status.AgentVersion, now); err != nil {
 		log.Printf("health: persist agent-seen for %s: %v", m.ID, err)
 	}
-
-	_ = db.RecordHealthCheck(&db.HealthCheck{
-		Subject:   subject,
-		OK:        true,
-		LatencyMS: latency,
-	})
+	_ = db.RecordHealthCheck(&db.HealthCheck{Subject: subject, OK: true, LatencyMS: latency})
 	s.emitTransition(m, "ok", "")
 	s.maybeRetryConfigPush(m)
-	return true
+	// Reachable but older than this server embeds → flag it (dashboard surfaces
+	// the upgrade one-liner) and auto-roll-forward. Clear once current.
+	outdated := status.AgentVersion != "" && isNewer(targetAgentVersion, status.AgentVersion)
+	_ = db.SetMachineAgentOutdated(m.ID, outdated)
+	if outdated {
+		s.maybeAutoUpgradeAgent(m, fmt.Sprintf("agent %s older than %s", status.AgentVersion, targetAgentVersion))
+	}
 }
 
 func (s *HealthService) checkViaTCP(ctx context.Context, m *db.Machine, subject string, start time.Time) {

@@ -7,7 +7,7 @@ import { localApi } from '../api/local'
 import { vpsApi } from '../api/vps'
 import StatusBadge from '../components/StatusBadge'
 import MachineHealthPanel from '../components/MachineHealthPanel'
-import { relativeTime } from '../lib/time'
+import { relativeTime, formatDuration } from '../lib/time'
 import { toast } from '../lib/toast'
 import type { Machine, Tunnel, SSHKey } from '../types'
 
@@ -346,7 +346,7 @@ export default function MachinesPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
               <tr>
-                {['', 'Name', 'Username', 'Status', 'Agent', 'Last Seen', 'Actions'].map(h => (
+                {['', 'Name', 'Username', 'Status', 'Agent', 'Uptime', 'Actions'].map(h => (
                   <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
@@ -368,7 +368,7 @@ export default function MachinesPage() {
                       <td className="px-4 py-3 text-gray-600">{m.username}</td>
                       <td className="px-4 py-3"><StatusBadge status={m.status} /></td>
                       <td className="px-4 py-3">
-                        {m.agent_installed ? (
+                        {m.agent_installed && !m.agent_outdated ? (
                           <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium text-green-700 bg-green-50 border border-green-200">
                             <CheckCircle size={11} /> v{m.agent_version || '–'}
                           </span>
@@ -376,7 +376,13 @@ export default function MachinesPage() {
                           <button
                             onClick={() => installAgentMutation.mutate(m.id)}
                             disabled={installAgentMutation.isPending && installAgentMutation.variables === m.id}
-                            title={m.agent_install_error ? `Last error: ${m.agent_install_error}` : 'Install gopher-agent on this machine'}
+                            title={
+                              m.agent_outdated
+                                ? `Agent is outdated${m.agent_version ? ` (v${m.agent_version})` : ''} — run the upgrade command on this machine`
+                                : m.agent_install_error
+                                  ? `Last error: ${m.agent_install_error}`
+                                  : 'Install gopher-agent on this machine'
+                            }
                             className={`px-2 py-1 text-xs rounded border flex items-center gap-1 transition-colors ${
                               m.agent_install_error
                                 ? 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
@@ -384,15 +390,30 @@ export default function MachinesPage() {
                             }`}
                           >
                             {installAgentMutation.isPending && installAgentMutation.variables === m.id
-                              ? <><Loader2 size={11} className="animate-spin" /> Installing…</>
-                              : m.agent_install_error
-                                ? <>Retry install</>
-                                : <>Install agent</>}
+                              ? <><Loader2 size={11} className="animate-spin" /> {m.agent_outdated ? 'Upgrading…' : 'Installing…'}</>
+                              : m.agent_outdated
+                                ? <>Upgrade agent</>
+                                : m.agent_install_error
+                                  ? <>Retry install</>
+                                  : <>Install agent</>}
                           </button>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-gray-500" title={m.last_seen ? new Date(m.last_seen).toLocaleString() : ''}>
-                        {m.last_seen ? relativeTime(m.last_seen) : 'Never'}
+                      <td
+                        className="px-4 py-3 text-gray-500"
+                        title={
+                          m.status === 'connected' && m.connected_since
+                            ? `Connected since ${new Date(m.connected_since).toLocaleString()}`
+                            : m.last_seen
+                              ? `Last seen ${new Date(m.last_seen).toLocaleString()}`
+                              : ''
+                        }
+                      >
+                        {m.status === 'connected' && m.connected_since
+                          ? `up ${formatDuration(Math.max(0, Math.floor((Date.now() - new Date(m.connected_since).getTime()) / 1000)))}`
+                          : m.last_seen
+                            ? `last seen ${relativeTime(m.last_seen)}`
+                            : 'Never'}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex gap-2">

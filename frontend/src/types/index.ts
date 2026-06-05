@@ -24,6 +24,9 @@ export interface Machine {
   status: string
   public_ip?: string
   last_seen: string | null
+  // When the machine most recently became connected — used to render uptime
+  // while up; last_seen is shown once it's offline.
+  connected_since?: string | null
   // gopher-agent fields
   agent_local_port?: number
   agent_remote_port?: number
@@ -31,6 +34,9 @@ export interface Machine {
   agent_version?: string
   agent_last_seen?: string | null
   agent_install_error?: string
+  // agent reachable but older than the server target, or pre-gRPC skew — the
+  // dashboard shows the same Install one-liner, relabeled "Upgrade".
+  agent_outdated?: boolean
   // config_push_pending — set when an earlier config push (typically the
   // noise migration) couldn't land. The health loop retries on reconnect;
   // the dashboard surfaces a Recover button until cleared.

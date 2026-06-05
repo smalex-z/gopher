@@ -135,6 +135,12 @@ Service responds back through tunnel
 
 Key advantage: Machines connect outbound to the VPS, bypassing NAT and firewalls. The VPS routes incoming internet traffic back through those established tunnels. Your origin IPs are never exposed.
 
+### Encryption model
+
+Visitor traffic is encrypted (HTTPS) to the edge. The edge **terminates TLS** to perform routing, filtering, and bot detection, then **re-encrypts** the traffic via rathole's Noise transport for the hop to your origin. **No plaintext ever traverses the public internet** — but because the edge inspects requests, it holds the TLS keys by design. That's the deliberate trade-off for edge filtering: terminating at the edge is what makes bot detection possible (you can't filter traffic you've chosen not to decrypt). Since the edge is *your* VPS, no third party sees your traffic at any point.
+
+> This is **not** TLS passthrough / true end-to-end encryption to the origin — the edge decrypts. If you need an edge that never sees plaintext, passthrough is the alternative, but it forecloses edge filtering.
+
 ---
 
 ## Architecture

@@ -98,6 +98,13 @@ func runServer(args []string) {
 	// client.toml push that the migration couldn't land. Setter-style to
 	// avoid a circular dep with LocalSetupService.
 	healthSvc.SetConfigPusher(localSvc)
+	// Wire the agent self-update actuator: when the health loop sees a reachable
+	// agent older than targetAgentVersion, it calls that agent's /self-update
+	// (the agent, running as gopher = NOPASSWD: ALL, swaps its own binary). A
+	// pre-self-update agent (v0.1.0) returns 404 → surfaced for the one-time
+	// manual upgrade. The server has no root on the origin, so this is the only
+	// correct actuator.
+	healthSvc.SetAgentUpgrader(agentInstaller)
 	healthSvc.Start()
 	go secSvc.SyncFail2banConfig()
 	monitorSvc := service.NewMonitorService()

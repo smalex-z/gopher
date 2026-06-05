@@ -35,6 +35,14 @@ go test ./internal/service/... -run TestXxx        # single test
 go test ./internal/api/handlers/...                # handler tests
 ```
 
+### Regenerate agent gRPC stubs (only after editing a .proto):
+```bash
+./scripts/gen-proto.sh      # buf lint + generate; writes internal/agentpb/*.pb.go
+```
+Generated `*.pb.go` files are committed, so a normal build needs no protobuf
+toolchain. Requires `buf`, `protoc-gen-go`, `protoc-gen-go-grpc` on PATH (see the
+script header for `go install` commands).
+
 ### Shell integration tests (require running service):
 ```bash
 ./tests/critical-path.sh
@@ -51,6 +59,8 @@ Gopher is a self-hosted reverse tunnel gateway. It runs on a public VPS and mana
 - **Caddy** (reverse proxy) — routes `subdomain.domain.com` → `localhost:<rathole_port>`
 
 The Go binary embeds the built React frontend (`frontend/dist`) and serves it as a SPA.
+
+**Encryption model:** the edge terminates visitor TLS (Caddy) to filter/route, then the rathole back-leg to the origin is re-encrypted via Noise transport — no plaintext on the public internet, but the edge holds the keys by design (the trade-off that enables edge filtering). This is *not* TLS passthrough.
 
 ### Data flow
 ```
@@ -91,6 +101,8 @@ The `localOps` interface (`local_ops.go`) is what `TunnelService` and `MachineSe
 - `dto/` — request structs (separate from DB models)
 
 **`internal/ssh/`** — SSH client wrapper used to push config files to client machines via SFTP and execute commands over the tunnel.
+
+**`internal/agentpb/` + `proto/agent/v1/agent.proto`** — the gRPC control contract between the VPS and the gopher-agent (`cmd/agent`). The agent serves `agent.v1.AgentControl` over cleartext HTTP/2 (gRPC insecure, since the rathole back-channel is already Noise-encrypted), multiplexed with a plaintext `GET /healthz` liveness anchor via cmux on `127.0.0.1:4322`. `internal/service/agent_client.go` is the VPS-side client; it dials the agent through the rathole back-channel (`127.0.0.1:<AgentRemotePort>`) with a per-machine bearer token in gRPC metadata. `WatchStatus` is a server-stream for push-based health (the stream dropping = the origin is gone). Agent version (`cmd/agent`: `agentVersion`) is independent of the server tag; `protocolVersion` is the wire-compat contract the server gates on. Generated stubs are committed — see `./scripts/gen-proto.sh`.
 
 ### Frontend structure
 

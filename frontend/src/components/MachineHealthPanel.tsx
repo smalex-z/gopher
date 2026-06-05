@@ -185,7 +185,9 @@ export default function MachineHealthPanel({ machine }: Props) {
           {status && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
               <Metric icon={<Cpu size={12} />} label="Load (1m / 5m / 15m)">
-                {status.system.load_avg_1.toFixed(2)} / {status.system.load_avg_5.toFixed(2)} / {status.system.load_avg_15.toFixed(2)}
+                {status.system
+                  ? `${status.system.load_avg_1.toFixed(2)} / ${status.system.load_avg_5.toFixed(2)} / ${status.system.load_avg_15.toFixed(2)}`
+                  : '—'}
               </Metric>
               <Metric icon={<MemoryStick size={12} />} label="Memory">
                 {memUsedPct != null
