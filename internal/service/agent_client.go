@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"google.golang.org/grpc"
@@ -115,7 +117,9 @@ func statusFromPB(p *agentpb.StatusInfo) *AgentStatus {
 	return s
 }
 
-// Status fetches a one-shot status snapshot from the agent.
+// Status fetches a one-shot status snapshot from the agent. If the agent
+// predates gRPC (v0.1.0, answers HTTP/1.1), it transparently falls back to the
+// legacy JSON /status endpoint so old agents stay monitored until upgraded.
 func (c *AgentClient) Status(ctx context.Context) (*AgentStatus, error) {
 	conn, err := c.dial()
 	if err != nil {
@@ -124,9 +128,38 @@ func (c *AgentClient) Status(ctx context.Context) (*AgentStatus, error) {
 	defer conn.Close()
 	resp, err := agentpb.NewAgentControlClient(conn).GetStatus(ctx, &agentpb.GetStatusRequest{})
 	if err != nil {
+		if isAgentProtocolSkew(err) {
+			return c.statusViaHTTP(ctx)
+		}
 		return nil, fmt.Errorf("agent GetStatus: %w", err)
 	}
 	return statusFromPB(resp), nil
+}
+
+// statusViaHTTP fetches the legacy v0.1.0 agent's JSON /status. The old wire
+// shape matches AgentStatus's json tags exactly, so it unmarshals directly.
+// Used as the gRPC fallback (Status) and as the legacy monitoring path in the
+// health loop's stream worker.
+func (c *AgentClient) statusViaHTTP(ctx context.Context) (*AgentStatus, error) {
+	url := fmt.Sprintf("http://127.0.0.1:%d/status", c.machine.AgentRemotePort)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.machine.AgentToken)
+	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("legacy agent status %d", resp.StatusCode)
+	}
+	var st AgentStatus
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		return nil, fmt.Errorf("decode legacy status: %w", err)
+	}
+	return &st, nil
 }
 
 // WatchStatus opens a server-streaming status subscription and invokes onUpdate

@@ -122,6 +122,10 @@ const (
 	// machine offline — long enough that a normal agent restart (Restart=always,
 	// ~5s) or self-update reconnects without a spurious offline blip.
 	offlineGrace = 25 * time.Second
+	// legacyPollInterval is how often we poll a pre-gRPC (v0.1.0) agent over its
+	// JSON /status, since it can't stream. The worker keeps re-attempting the
+	// stream each interval, so it switches to push automatically once upgraded.
+	legacyPollInterval = 30 * time.Second
 )
 
 // SetConfigPusher wires the deferred-push retry hook. Called once from
@@ -400,18 +404,42 @@ func (s *HealthService) runAgentStream(ctx context.Context, machineID string) {
 			return // cancelled, not a real drop
 		}
 
-		// Stream ended → unreachable right now.
+		// Legacy v0.1.0 agent: it answered gRPC with HTTP/1.1, so it can't
+		// stream. Keep it monitored via the JSON /status fallback and surface
+		// the upgrade, rather than letting it flap offline. The loop re-attempts
+		// WatchStatus each interval, so it upgrades to push automatically once
+		// the agent is updated.
 		if isAgentProtocolSkew(streamErr) {
 			_ = db.SetMachineAgentOutdated(m.ID, true)
 			s.maybeAutoUpgradeAgent(m, "agent predates current wire protocol")
+
+			pctx, pcancel := context.WithTimeout(ctx, 8*time.Second)
+			status, perr := NewAgentClient(m).statusViaHTTP(pctx)
+			pcancel()
+			if perr == nil {
+				downSince = time.Time{}
+				s.applyAgentStatus(m, status, subject, 0)
+			} else {
+				if downSince.IsZero() {
+					downSince = time.Now()
+				}
+				if time.Since(downSince) >= offlineGrace {
+					s.markAgentOffline(m, subject, perr)
+				}
+			}
+			if !sleepCtx(ctx, legacyPollInterval) {
+				return
+			}
+			continue
 		}
+
+		// Real stream drop (v0.2.0+ agent) → flip offline after grace, reconnect.
 		if downSince.IsZero() {
 			downSince = time.Now()
 		}
 		if time.Since(downSince) >= offlineGrace {
 			s.markAgentOffline(m, subject, streamErr)
 		}
-
 		if !sleepCtx(ctx, backoff) {
 			return
 		}
