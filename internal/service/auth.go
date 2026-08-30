@@ -170,27 +170,46 @@ func (s *AuthService) Login(password, ip string) (LoginResult, error) {
 
 // LoginTOTP completes the 2FA step after a successful password check.
 //
-// Rate-limited per-IP for defense in depth. The pendingToken is already
-// single-use (deleted on first lookup), so the practical brute-force ceiling
-// is bounded by the Login rate limiter alone — but stacking the limiter
-// here too means a TOTP attempt directly debits the IP's bucket instead of
-// only via the upstream Login that minted the pending token.
+// Rate-limited per-IP for defense in depth. The pendingToken is consumed only
+// on a SUCCESSFUL code (or once it expires) — a wrong guess leaves it usable so
+// the operator can retry within its 5-minute window. Brute force is bounded by
+// this per-IP rate limiter plus the expiry, not by burning the challenge on the
+// first wrong code (which used to make a single typo cascade into "2FA expired"
+// on every subsequent attempt).
 func (s *AuthService) LoginTOTP(pendingToken, code, ip string) (string, error) {
 	if !s.rl.record(ip) {
 		s.logEvent("LOGIN_TOTP_RATE_LIMITED", ip)
 		return "", fmt.Errorf("too many attempts")
 	}
 
+	// Look up the pending-2FA challenge but DO NOT consume it on a failed
+	// attempt — only on success (see consume() below). Deleting it on every
+	// attempt meant a single mistyped code burned the whole challenge, and
+	// every subsequent code the operator entered (correct or not) then failed
+	// as "2FA expired" until they went back and re-entered their password.
+	// Backup codes especially read as "they all came up expired" after one
+	// fat-finger. Brute force is already bounded by the per-IP rate limiter
+	// above and the 5-minute expiry — single-use-on-failure adds no security,
+	// only a footgun.
 	s.mu.Lock()
 	entry, ok := s.pendingTOTP[pendingToken]
-	if ok {
-		delete(s.pendingTOTP, pendingToken)
+	if ok && time.Now().After(entry.expiresAt) {
+		delete(s.pendingTOTP, pendingToken) // genuinely expired — clean it up
+		ok = false
 	}
 	s.mu.Unlock()
 
-	if !ok || time.Now().After(entry.expiresAt) {
+	if !ok {
 		s.logEvent("LOGIN_FAILED_2FA_EXPIRED", ip)
 		return "", fmt.Errorf("invalid or expired token")
+	}
+
+	// consume invalidates the challenge; call it only on a successful login so
+	// a wrong guess leaves the challenge usable for a retry within its window.
+	consume := func() {
+		s.mu.Lock()
+		delete(s.pendingTOTP, pendingToken)
+		s.mu.Unlock()
 	}
 
 	settings, err := db.GetSettings()
@@ -203,6 +222,7 @@ func (s *AuthService) LoginTOTP(pendingToken, code, ip string) (string, error) {
 		if err := db.TouchTOTPDevice(deviceID); err != nil {
 			log.Printf("WARN: failed to update last_used_at for device %s: %v", deviceID, err)
 		}
+		consume()
 		token, err := s.createSession()
 		if err != nil {
 			return "", err
@@ -223,6 +243,7 @@ func (s *AuthService) LoginTOTP(pendingToken, code, ip string) (string, error) {
 		}); saveErr != nil {
 			log.Printf("WARN: failed to save consumed backup code: %v", saveErr)
 		}
+		consume()
 		token, err := s.createSession()
 		if err != nil {
 			return "", err
@@ -232,6 +253,8 @@ func (s *AuthService) LoginTOTP(pendingToken, code, ip string) (string, error) {
 		return token, nil
 	}
 
+	// Wrong code: leave the challenge intact so the operator can retry within
+	// the window (rate-limited). No consume() here — that was the bug.
 	s.logEvent("LOGIN_FAILED_TOTP", ip)
 	return "", fmt.Errorf("invalid code")
 }
