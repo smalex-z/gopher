@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Regression for a real incident: rathole-client's own reconnect loop wedged
@@ -73,7 +74,7 @@ func TestRecoverRatholeOnce_DownUnitGetsStarted(t *testing.T) {
 	setStubPath(t, dir)
 
 	ticks := 0
-	recoverRatholeOnce("rathole-client", &ticks)
+	recoverRatholeOnce(config{UnitName: "rathole-client"}, &ticks)
 
 	log, _ := os.ReadFile(logPath)
 	if !strings.Contains(string(log), "start rathole-client") {
@@ -93,7 +94,7 @@ func TestRecoverRatholeOnce_ActiveWithConnectionIsLeftAlone(t *testing.T) {
 
 	ticks := 0
 	for i := 0; i < 5; i++ {
-		recoverRatholeOnce("rathole-client", &ticks)
+		recoverRatholeOnce(config{UnitName: "rathole-client"}, &ticks)
 	}
 
 	if _, err := os.Stat(logPath); err == nil {
@@ -115,7 +116,7 @@ func TestRecoverRatholeOnce_WedgedUnitGetsRestartedAfterThreshold(t *testing.T) 
 
 	ticks := 0
 	for i := 1; i < wedgedSilentTicks; i++ {
-		recoverRatholeOnce("rathole-client", &ticks)
+		recoverRatholeOnce(config{UnitName: "rathole-client"}, &ticks)
 		if _, err := os.Stat(logPath); err == nil {
 			t.Fatalf("must not restart before the %d-tick threshold (tick %d)", wedgedSilentTicks, i)
 		}
@@ -125,7 +126,7 @@ func TestRecoverRatholeOnce_WedgedUnitGetsRestartedAfterThreshold(t *testing.T) 
 	}
 
 	// The threshold-th tick should trigger the restart.
-	recoverRatholeOnce("rathole-client", &ticks)
+	recoverRatholeOnce(config{UnitName: "rathole-client"}, &ticks)
 	log, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("expected a restart to have been issued at tick %d: %v", wedgedSilentTicks, err)
@@ -154,21 +155,56 @@ func TestRecoverRatholeOnce_ConnectionReturningResetsTheCounter(t *testing.T) {
 	// One silent tick...
 	systemctlStub(t, dir, "active", "4242", logPath)
 	sudoStub(t, dir, "")
-	recoverRatholeOnce("rathole-client", &ticks)
+	recoverRatholeOnce(config{UnitName: "rathole-client"}, &ticks)
 	if ticks != 1 {
 		t.Fatalf("expected silentTicks=1, got %d", ticks)
 	}
 	// ...then a real reconnect happens...
 	sudoStub(t, dir, `ESTAB 0 0 10.0.0.5:51000 1.2.3.4:2333 users:(("rathole",pid=4242,fd=7))`)
-	recoverRatholeOnce("rathole-client", &ticks)
+	recoverRatholeOnce(config{UnitName: "rathole-client"}, &ticks)
 	if ticks != 0 {
 		t.Fatalf("a live connection must reset the counter, got %d", ticks)
 	}
 	// ...so a subsequent lone silent tick must not restart anything.
 	sudoStub(t, dir, "")
-	recoverRatholeOnce("rathole-client", &ticks)
+	recoverRatholeOnce(config{UnitName: "rathole-client"}, &ticks)
 	if _, err := os.Stat(logPath); err == nil {
 		t.Error("counter reset should mean a single follow-up silent tick doesn't restart")
+	}
+}
+
+// Regression for a second real incident: a systemd daemon re-exec (nightly
+// unattended-upgrades patching libpam) made systemctl unanswerable for ~a
+// second. The watchdog's tick landed inside that window, read the failed
+// query as "unit down", and issued reset-failed + start — a no-op, but it
+// logged a phantom recovery and the same misread flipped the machine to
+// degraded on the dashboard. An unanswerable systemctl must be treated as
+// indeterminate: no start, no counter change, wait for the next tick.
+func TestRecoverRatholeOnce_UnanswerableSystemctlDoesNothing(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "systemctl.log")
+	// `show` fails outright (manager unreachable); anything else is recorded.
+	writeStub(t, dir, "systemctl", `
+if [ "$1" = "show" ]; then exit 1; fi
+echo "$@" >> `+logPath+`
+exit 0
+`)
+	sudoStub(t, dir, "")
+	setStubPath(t, dir)
+
+	oldDelay := stateQueryRetryDelay
+	stateQueryRetryDelay = time.Millisecond
+	defer func() { stateQueryRetryDelay = oldDelay }()
+
+	ticks := 1
+	recoverRatholeOnce(config{UnitName: "rathole-client"}, &ticks)
+
+	if _, err := os.Stat(logPath); err == nil {
+		log, _ := os.ReadFile(logPath)
+		t.Errorf("indeterminate state must not trigger start/restart/reset-failed, log:\n%s", log)
+	}
+	if ticks != 1 {
+		t.Errorf("indeterminate state must leave silentTicks untouched, got %d", ticks)
 	}
 }
 

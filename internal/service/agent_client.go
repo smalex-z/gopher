@@ -42,18 +42,35 @@ func NewAgentClient(machine *db.Machine) *AgentClient {
 // bearerToken implements credentials.PerRPCCredentials, attaching the
 // per-machine token to every RPC. RequireTransportSecurity is false because the
 // transport is insecure-over-Noise (see type doc).
-type bearerToken struct{ token string }
+type bearerToken struct{ token, edgeURL string }
 
 func (b bearerToken) GetRequestMetadata(_ context.Context, _ ...string) (map[string]string, error) {
-	return map[string]string{"authorization": "Bearer " + b.token}, nil
+	md := map[string]string{"authorization": "Bearer " + b.token}
+	// Teach the agent where the public edge lives: 0.2.6+ agents persist this
+	// as their dial-home recovery address (GOPHER_EDGE_URL); older agents
+	// ignore unknown metadata. Attached to every call so machines bootstrapped
+	// before GOPHER_EDGE_URL existed learn it on first contact, and a domain
+	// change propagates without any explicit push.
+	if b.edgeURL != "" {
+		md["x-gopher-edge-url"] = b.edgeURL
+	}
+	return md, nil
 }
 func (bearerToken) RequireTransportSecurity() bool { return false }
 
 func (c *AgentClient) dial() (*grpc.ClientConn, error) {
+	edgeURL := ""
+	if db.DB != nil { // nil only in unit tests that dial a fake agent with no DB
+		if settings, err := db.GetSettings(); err == nil {
+			if u, uerr := buildAgentDownloadBaseURL(settings); uerr == nil {
+				edgeURL = u
+			}
+		}
+	}
 	target := fmt.Sprintf("127.0.0.1:%d", c.machine.AgentRemotePort)
 	return grpc.NewClient(target,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithPerRPCCredentials(bearerToken{token: c.machine.AgentToken}),
+		grpc.WithPerRPCCredentials(bearerToken{token: c.machine.AgentToken, edgeURL: edgeURL}),
 		// Detect a silently-dropped WatchStatus stream: ping the agent and error
 		// out if it doesn't respond, so a dead origin surfaces in ~30s instead of
 		// the Recv blocking forever.

@@ -377,6 +377,7 @@ if [ -n "$AGENT_TOKEN" ] && [ "$AGENT_TOKEN" != "null" ] && [ -n "$AGENT_PORT" ]
 GOPHER_AGENT_TOKEN=$AGENT_TOKEN
 GOPHER_AGENT_PORT=$AGENT_PORT
 GOPHER_AGENT_UNIT=rathole-client.service
+GOPHER_EDGE_URL=$HOST_URL
 EOF
     $SUDO chmod 640 "$AGENT_CFG"
     $SUDO chown root:gopher "$AGENT_CFG"

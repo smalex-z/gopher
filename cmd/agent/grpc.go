@@ -49,6 +49,7 @@ func unaryAuthInterceptor(token string) grpc.UnaryServerInterceptor {
 		if err := authFromContext(ctx, token); err != nil {
 			return nil, err
 		}
+		noteEdgeURL(ctx)
 		return handler(ctx, req)
 	}
 }
@@ -58,8 +59,26 @@ func streamAuthInterceptor(token string) grpc.StreamServerInterceptor {
 		if err := authFromContext(ss.Context(), token); err != nil {
 			return err
 		}
+		noteEdgeURL(ss.Context())
 		return handler(srv, ss)
 	}
+}
+
+// noteEdgeURL captures the x-gopher-edge-url metadata the server attaches to
+// every call — the public address the agent's dial-home recovery needs (see
+// recover.go). Only read AFTER auth: the value is persisted to config.env, so
+// it must come from the edge, never from an unauthenticated caller. Persisting
+// is async — it shells out to sudo and must not sit in the RPC path.
+func noteEdgeURL(ctx context.Context) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return
+	}
+	vals := md.Get("x-gopher-edge-url")
+	if len(vals) == 0 {
+		return
+	}
+	go rememberEdgeURL(vals[0])
 }
 
 // ─── AgentControl RPCs ───────────────────────────────────────────────────────

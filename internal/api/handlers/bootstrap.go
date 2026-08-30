@@ -3,6 +3,7 @@ package handlers
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -112,6 +113,47 @@ func (h *BootstrapHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, resp)
+}
+
+// POST /api/agent/recover-config — the agent's dial-home recovery endpoint.
+// Public (pre-auth) route, authenticated by the per-machine agent bearer
+// token; returns the machine's regenerated managed client.toml as text/plain.
+// The audit event is warn-severity on purpose: legitimate dial-home recovery
+// is rare, so every one deserves operator eyeballs — and the IP column shows
+// who asked.
+func (h *BootstrapHandler) RecoverConfig(w http.ResponseWriter, r *http.Request) {
+	ip := service.ClientIP(r)
+	if !h.svc.AllowAttempt(ip) {
+		response.Error(w, http.StatusTooManyRequests, "too many attempts; try again later")
+		return
+	}
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == "" || token == r.Header.Get("Authorization") {
+		response.Error(w, http.StatusUnauthorized, "bearer token required")
+		return
+	}
+	toml, machine, err := h.svc.RecoverClientConfig(token)
+	if err != nil {
+		if errors.Is(err, service.ErrUnknownAgentToken) {
+			response.Error(w, http.StatusUnauthorized, "invalid token")
+			return
+		}
+		response.InternalError(w, "config generation failed")
+		return
+	}
+	db.RecordEvent(&db.Event{
+		Severity:     "warn",
+		Source:       "machine",
+		Kind:         "agent_config_recovered",
+		Actor:        "agent",
+		ResourceType: "machine",
+		ResourceID:   machine.ID,
+		ResourceName: machine.Name,
+		IP:           ip,
+		Message:      fmt.Sprintf("Machine %s recovered client config via dial-home", machine.Name),
+	})
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(toml))
 }
 
 // GET /static/bootstrap.sh - serve bootstrap script dynamically

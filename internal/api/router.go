@@ -53,6 +53,9 @@ func NewRouter(
 	r.Get("/static/migrate.sh", bootstrapH.ServeMigrateScript)
 	r.Post("/api/bootstrap", bootstrapH.Register)
 	r.Post("/api/migrate", bootstrapH.Migrate)
+	// Agent dial-home recovery: bearer-authed by the per-machine agent token,
+	// rate-limited per IP like the other public bootstrap endpoints.
+	r.Post("/api/agent/recover-config", bootstrapH.RecoverConfig)
 	// Self-delete: gopher-uninstall on the client posts here with its
 	// per-machine bearer token before tearing down so the dashboard's
 	// machine record disappears alongside the local cleanup.
