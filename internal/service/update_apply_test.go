@@ -200,6 +200,46 @@ func TestUpdateApply_RefusesWithoutChecksums(t *testing.T) {
 	}
 }
 
+// Apply must enforce the same forward-only rule Check advertises by — it's
+// reachable directly via the API, so without its own gate a channel whose
+// latest is older than the running build installs as a silent downgrade.
+func TestUpdateApply_RefusesDowngrade(t *testing.T) {
+	initTestDB(t)
+	srv := startFakeGitHub(t, "v0.1.0", false, []byte("bin"), "irrelevant")
+	pointUpdatesAt(t, srv, "v0.2.0") // running build is newer than channel's latest
+	setChannel(t, "stable")
+
+	origInstall := installVerifiedBinary
+	installVerifiedBinary = func(string) error {
+		t.Error("installVerifiedBinary must not run for a downgrade")
+		return nil
+	}
+	t.Cleanup(func() { installVerifiedBinary = origInstall })
+
+	err := NewUpdateService().Apply()
+	if err == nil || !strings.Contains(err.Error(), "refusing to downgrade") {
+		t.Fatalf("Apply = %v, want downgrade refusal", err)
+	}
+}
+
+func TestUpdateApply_RefusesSameVersionReinstall(t *testing.T) {
+	initTestDB(t)
+	srv := startFakeGitHub(t, "v0.2.0", false, []byte("bin"), "irrelevant")
+	pointUpdatesAt(t, srv, "v0.2.0") // already running the channel's latest
+	setChannel(t, "stable")
+
+	origInstall := installVerifiedBinary
+	installVerifiedBinary = func(string) error {
+		t.Error("installVerifiedBinary must not run for a same-version reinstall")
+		return nil
+	}
+	t.Cleanup(func() { installVerifiedBinary = origInstall })
+
+	if err := NewUpdateService().Apply(); err == nil {
+		t.Fatal("Apply must refuse a same-version reinstall")
+	}
+}
+
 func TestUpdateApply_ChecksumMismatchAborts(t *testing.T) {
 	initTestDB(t)
 	sums := fmt.Sprintf("%064d  dist/%s\n", 0, releaseAssetName())

@@ -135,6 +135,18 @@ func (s *UpdateService) Apply() error {
 		return err
 	}
 
+	// Enforce the forward-only rule Check() advertises by. Check only gates
+	// the UI button; Apply is reachable directly (curl, scripts), and without
+	// this a channel whose latest is older than the running build would
+	// install as a silent downgrade — untested against a DB schema that only
+	// migrates forward. Same-version reinstalls are refused too: the running
+	// process proves the installed binary works, so there's nothing to repair
+	// that a re-download would fix. ("dev" builds parse as no version at all
+	// and any real release counts as newer, so local builds can still apply.)
+	if !isNewer(release.TagName, build.Version) {
+		return fmt.Errorf("channel's latest release %s is not newer than running %s; refusing to downgrade (install an older binary manually if you really need one)", release.TagName, build.Version)
+	}
+
 	downloadURL := findAssetURL(release)
 	if downloadURL == "" {
 		return fmt.Errorf("no compatible binary found for linux/%s in release %s", runtime.GOARCH, release.TagName)
