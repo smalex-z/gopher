@@ -314,6 +314,8 @@ export default function ServerPage() {
                       {updateInfo.latest_version}
                     </span>
                   </div>
+                ) : updateInfo.check_error ? (
+                  <p className="text-xs text-amber-600">{updateInfo.check_error}</p>
                 ) : (
                   <p className="text-xs text-gray-400">Up to date</p>
                 )}

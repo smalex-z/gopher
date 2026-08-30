@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -34,7 +35,19 @@ type UpdateInfo struct {
 	LatestVersion   string `json:"latest_version"`
 	UpdateAvailable bool   `json:"update_available"`
 	Channel         string `json:"channel"`
+	// CheckError is a human-readable note when the release lookup couldn't
+	// complete (channel has nothing published, GitHub unreachable/rate-limited).
+	// The check is advisory, so these are reported in-band rather than as an
+	// HTTP error — a 500 here used to unmount the dashboard's whole version
+	// card, channel picker included, leaving no UI path to switch channels back.
+	CheckError string `json:"check_error,omitempty"`
 }
+
+// errNoReleaseForChannel means the channel simply has nothing published — a
+// legitimate state, not a failure: the stable channel is empty until the first
+// non-prerelease ships (GitHub's /releases/latest 404s), and beta/alpha can be
+// empty on a repo that has only cut stable tags.
+var errNoReleaseForChannel = errors.New("no release published for channel")
 
 type githubRelease struct {
 	TagName    string `json:"tag_name"`
@@ -101,7 +114,14 @@ func (s *UpdateService) Check() (*UpdateInfo, error) {
 
 	release, err := fetchLatestReleaseForChannel(channel)
 	if err != nil {
-		return nil, err
+		// Advisory failure: report it in-band and keep the response 200 so the
+		// version card (and its channel picker) stays rendered.
+		if errors.Is(err, errNoReleaseForChannel) {
+			info.CheckError = fmt.Sprintf("no %s release published yet", channel)
+		} else {
+			info.CheckError = "update check failed: " + err.Error()
+		}
+		return info, nil
 	}
 
 	info.LatestVersion = release.TagName
@@ -385,6 +405,11 @@ func fetchLatestReleaseForChannel(channel string) (*githubRelease, error) {
 		}
 		defer resp.Body.Close()
 
+		if resp.StatusCode == http.StatusNotFound {
+			// /releases/latest serves only non-prereleases; 404 = the repo has
+			// never cut a stable release, not an API failure.
+			return nil, fmt.Errorf("%w %q", errNoReleaseForChannel, channel)
+		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
 		}
@@ -429,7 +454,7 @@ func fetchLatestReleaseForChannel(channel string) (*githubRelease, error) {
 	}
 
 	if best == nil {
-		return nil, fmt.Errorf("no releases found for channel %q", channel)
+		return nil, fmt.Errorf("%w %q", errNoReleaseForChannel, channel)
 	}
 	return best, nil
 }

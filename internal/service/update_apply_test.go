@@ -111,6 +111,36 @@ func TestUpdateCheck_StableChannel(t *testing.T) {
 	}
 }
 
+// Regression: a repo with only prereleases makes GitHub's /releases/latest
+// (stable-only) return 404. Check must report that in-band, not error — a 500
+// here unmounted the dashboard's version card, channel picker included, so
+// switching to stable was a one-way door until the first stable release.
+func TestUpdateCheck_StableChannelWithNoStableRelease(t *testing.T) {
+	initTestDB(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/smalex-z/gopher/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	pointUpdatesAt(t, srv, "v0.1.0-beta.20")
+	setChannel(t, "stable")
+
+	info, err := NewUpdateService().Check()
+	if err != nil {
+		t.Fatalf("Check must degrade gracefully, got error: %v", err)
+	}
+	if info.UpdateAvailable {
+		t.Errorf("no stable release must mean no update available, got %+v", info)
+	}
+	if !strings.Contains(info.CheckError, "no stable release") {
+		t.Errorf("CheckError = %q, want a 'no stable release' note", info.CheckError)
+	}
+	if info.Channel != "stable" || info.CurrentVersion != "v0.1.0-beta.20" {
+		t.Errorf("channel/current must survive the failed lookup, got %+v", info)
+	}
+}
+
 func TestUpdateCheck_BetaChannelViaList(t *testing.T) {
 	initTestDB(t)
 	srv := startFakeGitHub(t, "v0.1.0-beta.19", true, []byte("bin"), "irrelevant")
