@@ -15,6 +15,21 @@ import (
 // gopherCustomChain holds user-defined rules, jumped to before gopherChain.
 const gopherCustomChain = "GOPHER_CUSTOM"
 
+// requireGopherMode gates every firewall-mutating entry point: in "manual" or
+// "none" mode the operator owns iptables and gopher must neither touch it nor
+// accept rules it can't apply (a saved-but-never-applied rule is worse than a
+// rejected one — it looks like protection that isn't there).
+func requireGopherMode() error {
+	settings, err := db.GetSettings()
+	if err != nil {
+		return fmt.Errorf("load settings: %w", err)
+	}
+	if settings.FirewallMode != "gopher" {
+		return ErrFirewallNotManaged
+	}
+	return nil
+}
+
 // -- Chain lifecycle ---------------------------------------------------------
 
 // ensureCustomChain creates GOPHER_CUSTOM if missing and inserts the INPUT
@@ -269,6 +284,9 @@ func (s *LocalSetupService) ListFirewallRules() ([]db.FirewallRule, error) {
 
 // CreateFirewallRule saves a structured rule and applies it.
 func (s *LocalSetupService) CreateFirewallRule(description, protocol, portRange, source, action string) (*db.FirewallRule, error) {
+	if err := requireGopherMode(); err != nil {
+		return nil, err
+	}
 	if err := validateFirewallRule(protocol, portRange, source, action); err != nil {
 		return nil, err
 	}
@@ -292,6 +310,9 @@ func (s *LocalSetupService) CreateFirewallRule(description, protocol, portRange,
 
 // CreateRawFirewallRule saves a raw iptables rule spec and applies it.
 func (s *LocalSetupService) CreateRawFirewallRule(description, rawSpec string) (*db.FirewallRule, error) {
+	if err := requireGopherMode(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(rawSpec) == "" {
 		return nil, fmt.Errorf("raw rule spec cannot be empty")
 	}
@@ -318,6 +339,10 @@ func (s *LocalSetupService) CreateRawFirewallRule(description, rawSpec string) (
 }
 
 // DeleteFirewallRule removes a rule from the DB and reloads the chain.
+//
+// Deliberately NOT gated on gopher mode: rules saved before a switch to
+// manual/none are latent DB rows, and deleting is the only way to clean them
+// up — reloadCustomChain's own mode guard makes the iptables side a no-op.
 func (s *LocalSetupService) DeleteFirewallRule(id string) error {
 	if err := db.DeleteFirewallRule(id); err != nil {
 		return err
@@ -338,6 +363,9 @@ func (s *LocalSetupService) GetCustomIPTables() (string, error) {
 // blob is applied verbatim (lines may name a chain), so it's the strongest
 // lockout vector — validate every line before persisting.
 func (s *LocalSetupService) SetCustomIPTables(text string) error {
+	if err := requireGopherMode(); err != nil {
+		return err
+	}
 	if err := validateRawCustomText(text); err != nil {
 		return err
 	}
@@ -370,7 +398,16 @@ func (s *LocalSetupService) GetLiveRules() (map[string]string, error) {
 // ReloadFirewall rebuilds both chains from scratch: ensures chain/jump
 // exists (deduplicating any stale jumps), flushes both chains, then
 // re-applies all tunnel ports and custom rules.
+//
+// Gated on gopher mode: without this, POST /api/local/firewall/reload on a
+// manual/none host would create the GOPHER_TUNNELS chain, jump INPUT to it,
+// open every tunnel port, and persistRules() would overwrite the operator's
+// own saved ruleset. (The startup caller in cmd/server/main.go checks the
+// mode itself, so it never sees this error.)
 func (s *LocalSetupService) ReloadFirewall() error {
+	if err := requireGopherMode(); err != nil {
+		return err
+	}
 	sudo := privilegedCmdPrefix()
 	if err := firewallCreateChain(nil, sudo); err != nil {
 		return err

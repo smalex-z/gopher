@@ -1127,8 +1127,18 @@ func (s *LocalSetupService) ReconcileAllTunnelCaddyBlocks() error {
 }
 
 // SetDashboardPrivate persists the dashboard port visibility setting and applies
-// the iptables rule for dashboardPort when in Gopher-managed firewall mode.
+// the iptables rule for dashboardPort. Rejected outside Gopher-managed firewall
+// mode: the setting is enforced by iptables alone, so persisting it on a
+// manual/none host would make status report a privacy nothing provides —
+// "dashboard: private" while the port sits wide open.
 func (s *LocalSetupService) SetDashboardPrivate(private bool) error {
+	settings, err := db.GetSettings()
+	if err != nil {
+		return err
+	}
+	if settings.FirewallMode != "gopher" {
+		return ErrFirewallNotManaged
+	}
 	if err := db.MutateSettings(func(s *db.AppSettings) error {
 		s.DashboardPrivate = private
 		return nil

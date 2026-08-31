@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,11 @@ import (
 
 // gopherChain is the iptables chain that holds all dynamic tunnel rules.
 const gopherChain = "GOPHER_TUNNELS"
+
+// ErrFirewallNotManaged is returned by mutating firewall operations when the
+// operator chose "manual" or "none" mode — gopher must not touch iptables (or
+// record settings that only iptables can enforce) on a host it doesn't manage.
+var ErrFirewallNotManaged = errors.New("firewall is not gopher-managed")
 
 // -- LocalSetupService firewall methods --------------------------------------
 
@@ -60,8 +66,71 @@ func doFirewallConfigure(mode string, logWriter io.Writer) error {
 		return fmt.Errorf("failed to save firewall mode: %w", err)
 	}
 
+	// Apply any custom rules already saved in the DB. The takeover only creates
+	// the (empty) GOPHER_CUSTOM chain; rules persisted during a previous gopher
+	// period would otherwise stay latent until the next restart's reconcile.
+	// Must run after the mode save — reloadCustomChain no-ops unless "gopher".
+	if mode == "gopher" {
+		if err := reloadCustomChain(); err != nil {
+			fmt.Fprintf(logWriter, "WARN: could not apply saved custom rules: %v\n", err)
+		}
+	}
+
 	fmt.Fprintln(logWriter, "=== Firewall configuration complete ===")
 	return nil
+}
+
+// SwitchFirewallMode changes the firewall strategy after setup completes (the
+// wizard's /firewall/configure endpoint is locked once a mode is chosen).
+//
+// Both directions are full rebuilds, never diffs, so there is no half-migrated
+// state to land in:
+//   - → "gopher" runs the same takeover as the wizard (re-runnable by design,
+//     see firewallInitRuleSteps) — async, streaming to the log hub. Existing
+//     tunnel ports and saved custom rules are applied as part of it.
+//   - "gopher" → "manual"/"none" tears down every piece of gopher iptables
+//     state (chains, jumps, default-deny policies — TeardownFirewall, shared
+//     with uninstall) and persists the now-permissive ruleset so a reboot
+//     doesn't resurrect the old one. The host is left wide open until the
+//     operator configures their own firewall — callers must warn about that.
+//     DashboardPrivate is reset too: it was enforced by iptables alone, and
+//     status must not claim a privacy nothing provides anymore.
+//   - "manual" ↔ "none" only saves the setting.
+//
+// Returns started=true when an async gopher takeover was launched (completion
+// signalled via the log hub); started=false when the switch finished here.
+func (s *LocalSetupService) SwitchFirewallMode(mode string) (started bool, err error) {
+	settings, err := db.GetSettings()
+	if err != nil {
+		return false, err
+	}
+	if settings.FirewallMode == mode {
+		return false, nil
+	}
+	if mode == "gopher" {
+		return true, s.FirewallConfigure(mode)
+	}
+
+	// Serialize with install/takeover ops even though nothing streams — a
+	// teardown interleaving with a running takeover would corrupt both.
+	if !s.hub.TryAcquireOp() {
+		return false, ErrOpInProgress
+	}
+	defer s.hub.ReleaseOp()
+
+	if settings.FirewallMode == "gopher" {
+		logw := log.Writer()
+		TeardownFirewall(logw)
+		persistRules()
+		firewallSaveRules6(logw, privilegedCmdPrefix())
+	}
+	return false, db.MutateSettings(func(as *db.AppSettings) error {
+		as.FirewallMode = mode
+		if settings.FirewallMode == "gopher" {
+			as.DashboardPrivate = false
+		}
+		return nil
+	})
 }
 
 // -- Takeover sequence -------------------------------------------------------
@@ -776,6 +845,15 @@ func TeardownFirewall(logWriter io.Writer) {
 	for _, chain := range []string{"INPUT", "FORWARD"} {
 		pol := append(append([]string{}, sudo...), "iptables", "-P", chain, "ACCEPT")
 		_ = exec.Command(pol[0], pol[1:]...).Run() // #nosec G204
+	}
+	// The takeover mirrored default-deny onto ip6tables (firewallInitRules6);
+	// reset those policies too so IPv6 isn't left half-locked with no manager.
+	// The leftover allow rules are harmless under an ACCEPT policy.
+	if isCommandAvailable("ip6tables") {
+		for _, chain := range []string{"INPUT", "FORWARD"} {
+			pol := append(append([]string{}, sudo...), "ip6tables", "-P", chain, "ACCEPT")
+			_ = exec.Command(pol[0], pol[1:]...).Run() // #nosec G204
+		}
 	}
 	fmt.Fprintln(logWriter, "  Gopher firewall state removed; INPUT/FORWARD policy = ACCEPT")
 }

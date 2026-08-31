@@ -491,6 +491,10 @@ func (h *LocalHandler) SetServerPorts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.SetDashboardPrivate(body.DashboardPrivate); err != nil {
+		if errors.Is(err, service.ErrFirewallNotManaged) {
+			response.Conflict(w, "dashboard visibility requires the gopher-managed firewall — it is enforced by iptables")
+			return
+		}
 		response.InternalError(w, err.Error())
 		return
 	}

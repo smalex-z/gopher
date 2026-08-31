@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	chi "github.com/go-chi/chi/v5"
@@ -60,6 +61,10 @@ func (h *FirewallHandler) CreateRule(w http.ResponseWriter, r *http.Request) {
 		rule, err = h.svc.CreateFirewallRule(body.Description, body.Protocol, body.PortRange, body.Source, body.Action)
 	}
 	if err != nil {
+		if errors.Is(err, service.ErrFirewallNotManaged) {
+			response.Conflict(w, "firewall is not gopher-managed — rules can only be added in gopher mode")
+			return
+		}
 		response.InternalError(w, err.Error())
 		return
 	}
@@ -89,8 +94,48 @@ func (h *FirewallHandler) LiveRules(w http.ResponseWriter, r *http.Request) {
 // POST /api/local/firewall/reload
 func (h *FirewallHandler) Reload(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.ReloadFirewall(); err != nil {
+		if errors.Is(err, service.ErrFirewallNotManaged) {
+			response.Conflict(w, "firewall is not gopher-managed — nothing to reload")
+			return
+		}
 		response.InternalError(w, err.Error())
 		return
 	}
 	response.Success(w, map[string]string{"message": "firewall reloaded"})
+}
+
+// POST /api/local/firewall/mode — switch firewall strategy after setup.
+// Auth-gated, unlike the wizard's one-shot /local/firewall/configure.
+// Body: {"mode": "gopher"|"manual"|"none"}. Switching to gopher launches the
+// async takeover (logs stream to /api/logs/ws); leaving gopher tears down all
+// gopher iptables state synchronously, leaving the host permissive.
+func (h *FirewallHandler) SwitchMode(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.BadRequest(w, "invalid request body")
+		return
+	}
+	switch body.Mode {
+	case "gopher", "manual", "none":
+		// valid
+	default:
+		response.BadRequest(w, "mode must be one of: gopher, manual, none")
+		return
+	}
+	started, err := h.svc.SwitchFirewallMode(body.Mode)
+	if err != nil {
+		if errors.Is(err, service.ErrOpInProgress) {
+			response.Conflict(w, err.Error())
+			return
+		}
+		response.InternalError(w, err.Error())
+		return
+	}
+	msg := "firewall mode updated"
+	if started {
+		msg = "firewall takeover started"
+	}
+	response.Success(w, map[string]interface{}{"message": msg, "streaming": started})
 }

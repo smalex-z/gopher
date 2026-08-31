@@ -131,6 +131,7 @@ func NewRouter(
 					r.Delete("/rules/{id}", firewallH.DeleteRule)
 					r.Get("/live", firewallH.LiveRules)
 					r.Post("/reload", firewallH.Reload)
+					r.Post("/mode", firewallH.SwitchMode)
 				})
 				r.Route("/ssh-keys", func(r chi.Router) {
 					r.Get("/", localH.ListSSHKeys)
