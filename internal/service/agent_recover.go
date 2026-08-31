@@ -3,6 +3,8 @@ package service
 import (
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 
 	"github.com/smalex-z/gopher/internal/db"
 )
@@ -22,7 +24,14 @@ var ErrUnknownAgentToken = errors.New("unknown agent token")
 // identity (config.env) and the edge is public, so the agent dials out for
 // the authoritative copy. Managed sections only: custom user entries in the
 // lost file are not in the DB and cannot be resurrected.
-func (s *BootstrapService) RecoverClientConfig(agentToken string) (string, *db.Machine, error) {
+// requestHost is the Host the agent's recovery request arrived on (the
+// handler's r.Host) and becomes the config's remote_addr — the same derivation
+// bootstrap's Register uses. It must NOT come from settings.Domain: the agent
+// provably reached us at requestHost (it's their persisted GOPHER_EDGE_URL,
+// router.<domain> in a standard install), whereas the apex domain often points
+// somewhere else entirely (an org's main site), which would hand back a config
+// whose tunnel can never reconnect.
+func (s *BootstrapService) RecoverClientConfig(agentToken, requestHost string) (string, *db.Machine, error) {
 	machine, err := db.GetMachineByAgentToken(agentToken)
 	if err != nil {
 		return "", nil, ErrUnknownAgentToken
@@ -35,7 +44,14 @@ func (s *BootstrapService) RecoverClientConfig(agentToken string) (string, *db.M
 	if err != nil {
 		return "", nil, fmt.Errorf("load tunnels for %s: %w", machine.ID, err)
 	}
-	toml, err := mergeClientManagedConfig("", machine, tunnels, ratholeHostFromSettings(settings), settings.RatholeNoisePubKey)
+	ratholeHost := strings.TrimSpace(requestHost)
+	if h, _, err := net.SplitHostPort(ratholeHost); err == nil {
+		ratholeHost = h
+	}
+	if ratholeHost == "" {
+		ratholeHost = ratholeHostFromSettings(settings)
+	}
+	toml, err := mergeClientManagedConfig("", machine, tunnels, ratholeHost, settings.RatholeNoisePubKey)
 	if err != nil {
 		return "", nil, fmt.Errorf("generate client config for %s: %w", machine.ID, err)
 	}

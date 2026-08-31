@@ -132,7 +132,7 @@ func (h *BootstrapHandler) RecoverConfig(w http.ResponseWriter, r *http.Request)
 		response.Error(w, http.StatusUnauthorized, "bearer token required")
 		return
 	}
-	toml, machine, err := h.svc.RecoverClientConfig(token)
+	toml, machine, err := h.svc.RecoverClientConfig(token, r.Host)
 	if err != nil {
 		if errors.Is(err, service.ErrUnknownAgentToken) {
 			response.Error(w, http.StatusUnauthorized, "invalid token")

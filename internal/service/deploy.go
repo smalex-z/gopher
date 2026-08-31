@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -157,19 +158,31 @@ func NewDeployService() *DeployService {
 }
 
 // ratholeHostFromSettings returns the address that should appear as
-// `remote_addr` in client rathole configs. ServerHost wins when set
-// (covers skipCaddy installs where Domain is empty), then Domain. Returns
-// "" when neither is set; callers should treat that as "we have nothing
-// useful to write into a fresh client.toml" and either fail loudly or
-// preserve the existing value.
+// `remote_addr` in client rathole configs. ServerHost wins when set (covers
+// skipCaddy installs where Domain is empty; a scheme prefix is stripped since
+// the value lands in a host:port). With only Domain set, the answer is
+// router.<domain> — the name the edge actually serves at — NEVER the bare
+// apex: apex DNS frequently points at an org's main site on entirely
+// different hosting (uclaacm.com is the club website; router.uclaacm.com is
+// the VPS), and a client aimed at the apex can never connect.
+// MigrateServerHostToRouter rewrote persisted apex ServerHosts for exactly
+// that reason, but installs with an EMPTY ServerHost fell through to the raw
+// Domain here and kept the bug. Returns "" when neither is set; callers
+// should treat that as "we have nothing useful to write into a fresh
+// client.toml" and either fail loudly or preserve the existing value.
 func ratholeHostFromSettings(settings *db.AppSettings) string {
 	if settings == nil {
 		return ""
 	}
-	if settings.ServerHost != "" {
-		return settings.ServerHost
+	if host := strings.TrimSpace(settings.ServerHost); host != "" {
+		host = strings.TrimPrefix(host, "https://")
+		host = strings.TrimPrefix(host, "http://")
+		return strings.TrimSuffix(host, "/")
 	}
-	return settings.Domain
+	if settings.Domain != "" {
+		return "router." + settings.Domain
+	}
+	return ""
 }
 
 func (s *DeployService) logWriter() io.Writer {
