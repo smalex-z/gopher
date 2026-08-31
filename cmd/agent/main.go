@@ -80,6 +80,11 @@ const (
 	// metadata the server now attaches to every call, plus self-update's
 	// base_url — both persist back to config.env. Additive outbound HTTP only
 	// — protocolVersion unchanged.
+	// 0.2.7: restored client.toml is written 0644 (was 0640) — the rathole
+	// unit runs as the bootstrap user, not gopher, so 0.2.6's group-restricted
+	// restore left rathole crash-looping on EACCES right after a successful
+	// dial-home (caught on the feature's first field test). protocolVersion
+	// unchanged.
 	agentVersion = build.AgentVersion
 
 	// protocolVersion is the wire-compatibility contract between server and

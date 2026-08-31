@@ -144,11 +144,17 @@ func recoverConfigFromEdge(token, destPath string) error {
 // writeRecoveredConfig lands the fetched config at path. The plain write
 // covers the normal case (agent owns the file/directory from bootstrap); the
 // sudo fallback covers a deleted or root-owned parent directory.
+//
+// Mode MUST be 0644, matching bootstrap.sh: rathole-client.service runs as
+// the bootstrap user (User=<username>), not as gopher, so a group-restricted
+// 0640 gopher:gopher file leaves rathole crash-looping on "Permission denied"
+// right after a successful restore — which is exactly what happened on the
+// first field test of this feature.
 func writeRecoveredConfig(path string, body []byte) error {
 	if fileExists(path) {
 		return writeFilePreservingMode(path, body)
 	}
-	if err := os.WriteFile(path, body, 0o640); err == nil { // #nosec G306 — group-readable config, matches bootstrap
+	if err := os.WriteFile(path, body, 0o644); err == nil { // #nosec G306 — must be world-readable, see above
 		return nil
 	}
 	tmp, err := os.CreateTemp("", "gopher-client-toml-*")
@@ -169,7 +175,7 @@ func writeRecoveredConfig(path string, body []byte) error {
 	if err := sudo("mkdir", "-p", filepath.Dir(path)); err != nil {
 		return fmt.Errorf("recreate %s: %w", filepath.Dir(path), err)
 	}
-	if err := sudo("install", "-m", "640", "-o", "gopher", "-g", "gopher", tmpPath, path); err != nil {
+	if err := sudo("install", "-m", "644", "-o", "gopher", "-g", "gopher", tmpPath, path); err != nil {
 		return fmt.Errorf("install %s: %w", path, err)
 	}
 	return nil

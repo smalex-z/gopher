@@ -46,6 +46,12 @@ func TestRecoverConfigFromEdge_WritesFetchedConfig(t *testing.T) {
 	if string(got) != want {
 		t.Errorf("recovered config = %q, want %q", got, want)
 	}
+	// 0644 is load-bearing: rathole-client.service runs as the bootstrap user,
+	// not gopher, so a group-restricted restore leaves rathole crash-looping
+	// on EACCES right after a "successful" recovery (field-tested the hard way).
+	if fi, err := os.Stat(dest); err == nil && fi.Mode().Perm() != 0o644 {
+		t.Errorf("recovered config mode = %o, want 644 (world-readable for the rathole unit user)", fi.Mode().Perm())
+	}
 }
 
 func TestRecoverConfigFromEdge_RejectedTokenWritesNothing(t *testing.T) {
