@@ -196,13 +196,17 @@ func repairRatholeConfig(path string) bool {
 // a genuinely healthy client always has — a live established connection to
 // the edge — and force-restarts once that's been absent long enough to rule
 // out a normal in-flight reconnect.
-func ratholeRecoveryLoop(unit string) {
+//
+// A third failure — client.toml missing, or unloadable beyond de-duplication —
+// is repaired by dialing out to the edge for the authoritative copy (see
+// recover.go); starting the unit without a config would only crash-loop it.
+func ratholeRecoveryLoop(cfg config) {
 	silentTicks := 0
-	recoverRatholeOnce(unit, &silentTicks)
+	recoverRatholeOnce(cfg, &silentTicks)
 	t := time.NewTicker(60 * time.Second)
 	defer t.Stop()
 	for range t.C {
-		recoverRatholeOnce(unit, &silentTicks)
+		recoverRatholeOnce(cfg, &silentTicks)
 	}
 }
 
@@ -213,11 +217,37 @@ func ratholeRecoveryLoop(unit string) {
 // misses avoids restarting a client that's mid-retry on a slow network.
 const wedgedSilentTicks = 3
 
-func recoverRatholeOnce(unit string, silentTicks *int) {
-	_ = repairRatholeConfig(activeClientTomlPath())
+func recoverRatholeOnce(cfg config, silentTicks *int) {
+	unit := cfg.UnitName
+	path := activeClientTomlPath()
+	missing := !fileExists(path)
+	broken := false
+	if !missing {
+		broken = !repairRatholeConfig(path)
+	}
+	if missing || broken {
+		// The one failure class local repair can't fix: the config is gone, or
+		// unloadable beyond de-duplication. Fetch the authoritative copy from
+		// the edge (see recover.go) — the DB there is the source of truth, and
+		// every inbound repair channel rides the tunnel this file is the
+		// credentials for, so dialing out is the only route.
+		if err := recoverConfigFromEdge(cfg.Token, path); err != nil {
+			log.Printf("rathole recovery: %s missing/unrepairable and dial-home failed: %v", path, err)
+		} else {
+			log.Printf("rathole recovery: restored %s from edge", path)
+		}
+	}
 
-	active, _ := unitActive(unit)
+	active, state := unitActive(unit)
 	if !active {
+		// systemctl stayed unanswerable through runPropRetry's whole window —
+		// the unit's real state is unknowable, not "down". Starting blind
+		// would log a phantom recovery; leave everything alone and let the
+		// next tick decide.
+		if strings.HasPrefix(state, "unknown") {
+			log.Printf("rathole recovery: skipped tick — systemctl unanswerable, unit state %s", state)
+			return
+		}
 		*silentTicks = 0
 		// Unit is down. Clear any failed-state burst counter, then start (not
 		// restart — start is a no-op on a healthy unit and never flaps live tunnels).

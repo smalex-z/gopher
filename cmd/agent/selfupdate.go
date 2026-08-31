@@ -52,6 +52,12 @@ func (s *agentServer) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, http.StatusBadRequest, map[string]string{"error": "base_url required"})
 		return
 	}
+	// The trigger is bearer-authed and base_url is where the server says the
+	// edge lives — persist it as the dial-home recovery address (recover.go)
+	// before any restart, and before the same-version no-op below so even a
+	// no-op trigger teaches an agent that predates GOPHER_EDGE_URL.
+	rememberEdgeURL(base)
+
 	// No-op if we're already the target — prevents a restart loop if the server
 	// and agent briefly disagree about what's current.
 	if req.Version != "" && req.Version == agentVersion {

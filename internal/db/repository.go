@@ -784,16 +784,17 @@ type KindDefault struct {
 }
 
 var kindDefaults = map[string]KindDefault{
-	"machine_registered":   {"info", "machine", "Machine %s registered"},
-	"machine_deleted":      {"info", "machine", "Machine %s deleted"},
-	"machine_connected":    {"info", "machine", "Machine %s connected"},
-	"machine_disconnected": {"warn", "machine", "Machine %s disconnected"},
-	"machine_degraded":     {"warn", "machine", "Machine %s rathole inactive"},
-	"machine_recovered":    {"info", "machine", "Machine %s auto-recovered"},
-	"recovery_failed":      {"error", "machine", "Auto-recovery failed for machine %s"},
-	"agent_unreachable":    {"warn", "machine", "Agent unreachable on machine %s"},
-	"tunnel_created":       {"info", "tunnel", "Tunnel %s created"},
-	"tunnel_deleted":       {"info", "tunnel", "Tunnel %s deleted"},
+	"machine_registered":     {"info", "machine", "Machine %s registered"},
+	"machine_deleted":        {"info", "machine", "Machine %s deleted"},
+	"machine_connected":      {"info", "machine", "Machine %s connected"},
+	"machine_disconnected":   {"warn", "machine", "Machine %s disconnected"},
+	"machine_degraded":       {"warn", "machine", "Machine %s rathole inactive"},
+	"machine_recovered":      {"info", "machine", "Machine %s auto-recovered"},
+	"agent_config_recovered": {"warn", "machine", "Machine %s recovered client config via dial-home"},
+	"recovery_failed":        {"error", "machine", "Auto-recovery failed for machine %s"},
+	"agent_unreachable":      {"warn", "machine", "Agent unreachable on machine %s"},
+	"tunnel_created":         {"info", "tunnel", "Tunnel %s created"},
+	"tunnel_deleted":         {"info", "tunnel", "Tunnel %s deleted"},
 }
 
 // LookupKindDefault returns the registered defaults for a kind, or a fallback

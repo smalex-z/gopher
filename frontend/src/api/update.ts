@@ -7,6 +7,9 @@ export interface UpdateInfo {
   latest_version: string
   update_available: boolean
   channel: UpdateChannel
+  // Set when the release lookup couldn't complete (e.g. the channel has no
+  // published release yet) — the check itself still returns 200.
+  check_error?: string
 }
 
 export const updateApi = {

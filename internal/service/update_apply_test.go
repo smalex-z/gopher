@@ -111,6 +111,36 @@ func TestUpdateCheck_StableChannel(t *testing.T) {
 	}
 }
 
+// Regression: a repo with only prereleases makes GitHub's /releases/latest
+// (stable-only) return 404. Check must report that in-band, not error — a 500
+// here unmounted the dashboard's version card, channel picker included, so
+// switching to stable was a one-way door until the first stable release.
+func TestUpdateCheck_StableChannelWithNoStableRelease(t *testing.T) {
+	initTestDB(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/smalex-z/gopher/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	pointUpdatesAt(t, srv, "v0.1.0-beta.20")
+	setChannel(t, "stable")
+
+	info, err := NewUpdateService().Check()
+	if err != nil {
+		t.Fatalf("Check must degrade gracefully, got error: %v", err)
+	}
+	if info.UpdateAvailable {
+		t.Errorf("no stable release must mean no update available, got %+v", info)
+	}
+	if !strings.Contains(info.CheckError, "no stable release") {
+		t.Errorf("CheckError = %q, want a 'no stable release' note", info.CheckError)
+	}
+	if info.Channel != "stable" || info.CurrentVersion != "v0.1.0-beta.20" {
+		t.Errorf("channel/current must survive the failed lookup, got %+v", info)
+	}
+}
+
 func TestUpdateCheck_BetaChannelViaList(t *testing.T) {
 	initTestDB(t)
 	srv := startFakeGitHub(t, "v0.1.0-beta.19", true, []byte("bin"), "irrelevant")
@@ -167,6 +197,46 @@ func TestUpdateApply_RefusesWithoutChecksums(t *testing.T) {
 	err := NewUpdateService().Apply()
 	if err == nil || !strings.Contains(err.Error(), "SHA256SUMS") {
 		t.Fatalf("Apply = %v, want refusal naming SHA256SUMS", err)
+	}
+}
+
+// Apply must enforce the same forward-only rule Check advertises by — it's
+// reachable directly via the API, so without its own gate a channel whose
+// latest is older than the running build installs as a silent downgrade.
+func TestUpdateApply_RefusesDowngrade(t *testing.T) {
+	initTestDB(t)
+	srv := startFakeGitHub(t, "v0.1.0", false, []byte("bin"), "irrelevant")
+	pointUpdatesAt(t, srv, "v0.2.0") // running build is newer than channel's latest
+	setChannel(t, "stable")
+
+	origInstall := installVerifiedBinary
+	installVerifiedBinary = func(string) error {
+		t.Error("installVerifiedBinary must not run for a downgrade")
+		return nil
+	}
+	t.Cleanup(func() { installVerifiedBinary = origInstall })
+
+	err := NewUpdateService().Apply()
+	if err == nil || !strings.Contains(err.Error(), "refusing to downgrade") {
+		t.Fatalf("Apply = %v, want downgrade refusal", err)
+	}
+}
+
+func TestUpdateApply_RefusesSameVersionReinstall(t *testing.T) {
+	initTestDB(t)
+	srv := startFakeGitHub(t, "v0.2.0", false, []byte("bin"), "irrelevant")
+	pointUpdatesAt(t, srv, "v0.2.0") // already running the channel's latest
+	setChannel(t, "stable")
+
+	origInstall := installVerifiedBinary
+	installVerifiedBinary = func(string) error {
+		t.Error("installVerifiedBinary must not run for a same-version reinstall")
+		return nil
+	}
+	t.Cleanup(func() { installVerifiedBinary = origInstall })
+
+	if err := NewUpdateService().Apply(); err == nil {
+		t.Fatal("Apply must refuse a same-version reinstall")
 	}
 }
 

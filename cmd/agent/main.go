@@ -64,6 +64,22 @@ const (
 	// silently died with zero established connections) via hasEstablishedConnection,
 	// not just unitActive(). Purely local behavior change, no RPC surface touched
 	// — protocolVersion unchanged.
+	// 0.2.5: treat a failed systemd state query as indeterminate, not "unit
+	// down". A systemd daemon re-exec (nightly unattended-upgrades patching
+	// libpam or systemd) makes systemctl unanswerable for ~a second; that blip
+	// used to report rathole-client inactive — false machine_degraded on the
+	// dashboard — and made the watchdog log a phantom recovery. ActiveState
+	// queries now retry across the re-exec window, and the watchdog skips a
+	// tick it can't measure. Purely local — protocolVersion unchanged.
+	// 0.2.6: dial-home config recovery — a client.toml that is missing or
+	// unloadable beyond repair is fetched fresh from the edge's public
+	// /api/agent/recover-config (bearer = agent token, TLS verified), since
+	// every inbound repair channel rides the tunnel that file is the
+	// credentials for. The edge URL comes from GOPHER_EDGE_URL in config.env
+	// (written at bootstrap) and is refreshed from the x-gopher-edge-url gRPC
+	// metadata the server now attaches to every call, plus self-update's
+	// base_url — both persist back to config.env. Additive outbound HTTP only
+	// — protocolVersion unchanged.
 	agentVersion = build.AgentVersion
 
 	// protocolVersion is the wire-compatibility contract between server and
@@ -77,12 +93,14 @@ type config struct {
 	Port     int
 	Token    string
 	UnitName string // systemd unit to manage (default "rathole-client.service")
+	EdgeURL  string // public edge base URL for dial-home recovery (see recover.go)
 }
 
 func loadConfig() config {
 	c := config{
 		Port:     4322,
 		Token:    os.Getenv("GOPHER_AGENT_TOKEN"),
+		EdgeURL:  os.Getenv("GOPHER_EDGE_URL"),
 		UnitName: "rathole-client.service",
 	}
 	if p, err := strconv.Atoi(os.Getenv("GOPHER_AGENT_PORT")); err == nil && p > 0 {
@@ -123,6 +141,10 @@ func loadConfig() config {
 				if c.UnitName == "" {
 					c.UnitName = v
 				}
+			case "GOPHER_EDGE_URL":
+				if c.EdgeURL == "" {
+					c.EdgeURL = v
+				}
 			}
 		}
 	}
@@ -149,10 +171,17 @@ func main() {
 		log.Fatal("GOPHER_AGENT_TOKEN is required (env var or /etc/gopher-agent/config.env)")
 	}
 
+	// Seed the dial-home edge URL from config without re-persisting it —
+	// rememberEdgeURL is for values learned at runtime (gRPC metadata,
+	// self-update), which do get written back to config.env.
+	if u := strings.TrimRight(strings.TrimSpace(cfg.EdgeURL), "/"); u != "" {
+		edgeURLVal.Store(u)
+	}
+
 	// Local self-healing watchdog: keeps rathole-client alive even when its
 	// config is broken and the server can't reach in (the control channel rides
 	// the very tunnel that's down). Runs independently of the gRPC surface.
-	go ratholeRecoveryLoop(cfg.UnitName)
+	go ratholeRecoveryLoop(cfg)
 
 	srv := &agentServer{cfg: cfg, startedAt: time.Now()}
 
@@ -273,9 +302,40 @@ func runDiag(name string, fn func() (bool, string)) diagCheck {
 	return diagCheck{Name: name, Pass: pass, Detail: detail}
 }
 
+// State queries retry while systemctl itself fails to answer: during a
+// systemd daemon re-exec — routine when nightly unattended-upgrades patches
+// libpam or systemd itself — the manager is unreachable for ~a second, and a
+// failed *query* must not read as a stopped *unit*. One such blip flipped a
+// healthy machine to degraded on the dashboard and made the watchdog log a
+// phantom recovery. Vars, not consts, so tests can shrink the window.
+var (
+	stateQueryRetries    = 3
+	stateQueryRetryDelay = time.Second
+)
+
+// runPropRetry is runProp for the load-bearing ActiveState query: it retries
+// across a systemd re-exec window before giving up, so "unknown" means
+// systemd stayed unanswerable for several seconds straight — a real problem —
+// never a blip.
+func runPropRetry(unit, prop string) string {
+	for attempt := 0; ; attempt++ {
+		out, err := runCommand("systemctl", "show", "-p", prop, "--value", unit)
+		if err == nil {
+			return strings.TrimSpace(out)
+		}
+		if attempt >= stateQueryRetries {
+			return "unknown"
+		}
+		time.Sleep(stateQueryRetryDelay)
+	}
+}
+
 func ratholeStatus(unit string) ratholeInfo {
-	state := runProp(unit, "ActiveState")
-	substate := runProp(unit, "SubState")
+	state := runPropRetry(unit, "ActiveState")
+	substate := "unknown"
+	if state != "unknown" {
+		substate = runProp(unit, "SubState")
+	}
 	return ratholeInfo{
 		Active:   state == "active",
 		State:    state,
@@ -284,8 +344,11 @@ func ratholeStatus(unit string) ratholeInfo {
 }
 
 func unitActive(unit string) (bool, string) {
-	state := runProp(unit, "ActiveState")
-	substate := runProp(unit, "SubState")
+	state := runPropRetry(unit, "ActiveState")
+	substate := "unknown"
+	if state != "unknown" {
+		substate = runProp(unit, "SubState")
+	}
 	return state == "active", fmt.Sprintf("%s (%s)", state, substate)
 }
 
