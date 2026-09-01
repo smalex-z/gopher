@@ -39,8 +39,46 @@ fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "→ Downloading SHA256SUMS.txt for $TAG (draft=$IS_DRAFT)..."
+echo "→ Downloading SHA256SUMS.txt and binaries for $TAG (draft=$IS_DRAFT)..."
 gh release download "$TAG" --repo "$REPO" --pattern "SHA256SUMS.txt" -D "$TMP"
+gh release download "$TAG" --repo "$REPO" --pattern "gopher-linux-*" -D "$TMP"
+
+# Pre-sign coherence check: recompute each downloaded binary's sha256 and
+# compare against the sums file being signed. This proves sums ↔ assets are
+# CONSISTENT — it cannot prove the build is honest (a compromised CI produces
+# matching sums for a malicious binary; only reproducible builds would catch
+# that). Its job is narrower and matters because publish is irreversible under
+# immutable releases: a truncated upload or asset/sums mismatch frozen into a
+# published release burns that version number forever. Catch it in the draft.
+echo "→ Verifying published assets against SHA256SUMS.txt..."
+FAIL=0
+FOUND=0
+for f in "$TMP"/gopher-linux-*; do
+  [ -e "$f" ] || continue
+  FOUND=1
+  base="$(basename "$f")"
+  want="$(awk -v n="$base" '{p=$2; sub(/^\*/,"",p); sub(/.*\//,"",p); if (p==n) print $1}' "$TMP/SHA256SUMS.txt" | head -1)"
+  got="$(sha256sum "$f" | awk '{print $1}')"
+  if [ -z "$want" ]; then
+    echo "  ERROR: no entry for $base in SHA256SUMS.txt"; FAIL=1
+  elif [ "$want" != "$got" ]; then
+    echo "  MISMATCH: $base — sums say $want, asset is $got"; FAIL=1
+  else
+    echo "  $base ✓ $got"
+  fi
+done
+[ "$FOUND" -eq 1 ] || { echo "ERROR: no gopher-linux-* assets found on $TAG" >&2; exit 1; }
+[ "$FAIL" -eq 0 ] || { echo "ERROR: published assets do not match SHA256SUMS.txt — refusing to sign" >&2; exit 1; }
+
+echo
+echo "About to sign these checksums as \"gopher release $TAG\":"
+sed 's/^/    /' "$TMP/SHA256SUMS.txt"
+printf 'Proceed? [y/N] '
+read -r ANSWER
+case "$ANSWER" in
+  y|Y|yes|YES) ;;
+  *) echo "Aborted — nothing signed, nothing uploaded."; exit 1 ;;
+esac
 
 echo "→ Signing (you will be prompted for the key password)..."
 minisign -S -s "$SECKEY" -m "$TMP/SHA256SUMS.txt" -t "gopher release $TAG"
