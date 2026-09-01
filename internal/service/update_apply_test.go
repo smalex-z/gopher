@@ -252,6 +252,10 @@ func TestUpdateApply_RefusesSameVersionReinstall(t *testing.T) {
 
 func TestUpdateApply_ChecksumMismatchAborts(t *testing.T) {
 	initTestDB(t)
+	// Blank the (possibly baked-in) release key: this test exercises the
+	// checksum path in isolation, and with a key set the unsigned fake
+	// release is refused before the checksum is ever compared.
+	setSigningKey(t, "")
 	sums := fmt.Sprintf("%064d  dist/%s\n", 0, releaseAssetName())
 	srv := startFakeGitHub(t, "v0.2.0", false, []byte("real binary bytes"), sums)
 	pointUpdatesAt(t, srv, "v0.1.0")
@@ -291,6 +295,9 @@ func TestDownloadSmall_RefusesOversizedResponse(t *testing.T) {
 
 func TestUpdateApply_VerifiedDownloadReachesInstall(t *testing.T) {
 	initTestDB(t)
+	// Checksum-only path — see TestUpdateApply_ChecksumMismatchAborts.
+	// TestUpdateApply_SignedStableInstalls covers the signed equivalent.
+	setSigningKey(t, "")
 	binary := []byte("the new gopher binary")
 	sum := sha256.Sum256(binary)
 	// Same two-column, dist/-prefixed layout release.yml's sha256sum step emits.
