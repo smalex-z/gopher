@@ -85,6 +85,23 @@ const (
 	// restore left rathole crash-looping on EACCES right after a successful
 	// dial-home (caught on the feature's first field test). protocolVersion
 	// unchanged.
+	// 0.2.8: generalize dial-home refetch beyond a missing file — two new
+	// triggers treat the config itself as the suspect: the unit refusing to
+	// stay up across consecutive starts (rathole rejecting a truncated/garbage
+	// file), and repeated wedge restarts with no connection ever established
+	// (corrupted remote_addr, deleted transport block, snapshot-stale tokens).
+	// Refetch now sends the suspect config to the edge so operator custom
+	// sections are carried into the rebuild, and leaves a client.toml.bak for
+	// diffing what drifted. Pairs with the edge's 5-minute drift sweep, which
+	// heals content drift on machines whose back-channel still works.
+	// protocolVersion unchanged.
+	// 0.2.9: client.toml.bak falls back to sudo install when the parent dir is
+	// root-owned (direct create failed in the field — the agent can rewrite
+	// the existing gopher-owned inode but not create beside it). Paired with a
+	// server-side fix: dial-home custom-section salvage now extracts only
+	// non-managed [client.services.*] sections instead of "whatever survives
+	// stripping", which was re-appending corruption debris to the rebuilt
+	// config and costing an extra refetch cycle. protocolVersion unchanged.
 	agentVersion = build.AgentVersion
 
 	// protocolVersion is the wire-compatibility contract between server and

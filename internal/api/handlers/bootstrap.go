@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"text/template"
@@ -138,7 +139,10 @@ func (h *BootstrapHandler) RecoverConfig(w http.ResponseWriter, r *http.Request)
 		response.Error(w, http.StatusUnauthorized, "bearer token required")
 		return
 	}
-	toml, machine, err := h.svc.RecoverClientConfig(token, r.Host)
+	// Optional body: the agent's current (suspect) config, so custom sections
+	// survive the rebuild. 0.2.6/0.2.7 agents send no body — from-scratch.
+	current, _ := io.ReadAll(io.LimitReader(r.Body, 256<<10))
+	toml, machine, err := h.svc.RecoverClientConfig(token, r.Host, string(current))
 	if err != nil {
 		if errors.Is(err, service.ErrUnknownAgentToken) {
 			response.Error(w, http.StatusUnauthorized, "invalid token")

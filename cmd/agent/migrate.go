@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -137,8 +138,9 @@ func fileExists(path string) bool {
 }
 
 // activeClientTomlPath returns the rathole client.toml the box is actually
-// using: the consolidated path if present, else the legacy one.
-func activeClientTomlPath() string {
+// using: the consolidated path if present, else the legacy one. A var so
+// watchdog tests can point it at a temp file instead of /etc.
+var activeClientTomlPath = func() string {
 	if fileExists(paths.RatholeClientConfig) {
 		return paths.RatholeClientConfig
 	}
@@ -197,17 +199,32 @@ func repairRatholeConfig(path string) bool {
 // the edge — and force-restarts once that's been absent long enough to rule
 // out a normal in-flight reconnect.
 //
-// A third failure — client.toml missing, or unloadable beyond de-duplication —
-// is repaired by dialing out to the edge for the authoritative copy (see
-// recover.go); starting the unit without a config would only crash-loop it.
+// A third class — the config itself being lost or wrong — is repaired by
+// dialing out to the edge for the authoritative copy (see recover.go). Four
+// triggers, from cheapest diagnosis to slowest: file missing; duplicate
+// tables the de-dup can't resolve; the unit refusing to stay up across
+// consecutive starts (rathole rejecting the file — truncation, garbage);
+// and repeated wedge restarts with no connection ever established (rathole
+// runs but the config can't reach the edge — corrupted remote_addr, deleted
+// transport block, snapshot-stale tokens).
 func ratholeRecoveryLoop(cfg config) {
-	silentTicks := 0
-	recoverRatholeOnce(cfg, &silentTicks)
+	st := &watchdogState{}
+	recoverRatholeOnce(cfg, st)
 	t := time.NewTicker(60 * time.Second)
 	defer t.Stop()
 	for range t.C {
-		recoverRatholeOnce(cfg, &silentTicks)
+		recoverRatholeOnce(cfg, st)
 	}
+}
+
+// watchdogState carries the between-tick counters that turn one-off blips
+// into diagnoses. Each counter answers "how long has this exact symptom
+// persisted" — the thresholds below decide when a symptom stops being
+// transient and the config itself becomes the suspect.
+type watchdogState struct {
+	silent       int // consecutive ticks: unit active but zero established connections
+	failedStarts int // consecutive ticks: unit found down (a start was attempted each)
+	wedgeCycles  int // consecutive wedge restarts with no established connection between
 }
 
 // wedgedSilentTicks is how many consecutive recoverRatholeOnce calls (at the
@@ -217,7 +234,22 @@ func ratholeRecoveryLoop(cfg config) {
 // misses avoids restarting a client that's mid-retry on a slow network.
 const wedgedSilentTicks = 3
 
-func recoverRatholeOnce(cfg config, silentTicks *int) {
+// failedStartRefetchTicks: consecutive ticks the unit was found down (each
+// followed by a start attempt) before the config is treated as the reason
+// rathole won't stay up — truncated file, garbage TOML beyond de-duplication,
+// anything rathole itself rejects at startup. Rathole is the ultimate config
+// validator; a crash-looping unit with a present file IS the parse error.
+const failedStartRefetchTicks = 2
+
+// wedgeRefetchCycles: consecutive wedge restarts (active unit, zero
+// established connections, restarted, still nothing) before the config is
+// treated as the reason rathole can't connect — corrupted remote_addr,
+// deleted transport block, snapshot-stale tokens. A genuine network outage
+// looks identical from here, but then the dial-home fails too (same network)
+// and nothing is overwritten.
+const wedgeRefetchCycles = 2
+
+func recoverRatholeOnce(cfg config, st *watchdogState) {
 	unit := cfg.UnitName
 	path := activeClientTomlPath()
 	missing := !fileExists(path)
@@ -225,16 +257,27 @@ func recoverRatholeOnce(cfg config, silentTicks *int) {
 	if !missing {
 		broken = !repairRatholeConfig(path)
 	}
-	if missing || broken {
-		// The one failure class local repair can't fix: the config is gone, or
-		// unloadable beyond de-duplication. Fetch the authoritative copy from
-		// the edge (see recover.go) — the DB there is the source of truth, and
-		// every inbound repair channel rides the tunnel this file is the
-		// credentials for, so dialing out is the only route.
+	// Refetch the authoritative config from the edge (see recover.go) for the
+	// failure classes local repair can't fix. The DB there is the source of
+	// truth, and every inbound repair channel rides the tunnel this file is
+	// the credentials for, so dialing out is the only route.
+	refetchReason := ""
+	switch {
+	case missing:
+		refetchReason = "config missing"
+	case broken:
+		refetchReason = "config unrepairable (duplicate tables)"
+	case st.failedStarts >= failedStartRefetchTicks:
+		refetchReason = fmt.Sprintf("unit won't stay up (%d consecutive failed starts) — config suspect", st.failedStarts)
+	case st.wedgeCycles >= wedgeRefetchCycles:
+		refetchReason = fmt.Sprintf("no connection through %d wedge restarts — config suspect", st.wedgeCycles)
+	}
+	if refetchReason != "" {
 		if err := recoverConfigFromEdge(cfg.Token, path); err != nil {
-			log.Printf("rathole recovery: %s missing/unrepairable and dial-home failed: %v", path, err)
+			log.Printf("rathole recovery: %s; dial-home failed: %v", refetchReason, err)
 		} else {
-			log.Printf("rathole recovery: restored %s from edge", path)
+			log.Printf("rathole recovery: %s; restored %s from edge", refetchReason, path)
+			st.failedStarts, st.wedgeCycles = 0, 0
 		}
 	}
 
@@ -248,7 +291,8 @@ func recoverRatholeOnce(cfg config, silentTicks *int) {
 			log.Printf("rathole recovery: skipped tick — systemctl unanswerable, unit state %s", state)
 			return
 		}
-		*silentTicks = 0
+		st.silent = 0
+		st.failedStarts++
 		// Unit is down. Clear any failed-state burst counter, then start (not
 		// restart — start is a no-op on a healthy unit and never flaps live tunnels).
 		_ = sudo("systemctl", "reset-failed", unit)
@@ -259,16 +303,18 @@ func recoverRatholeOnce(cfg config, silentTicks *int) {
 		log.Printf("rathole recovery: started %s (was down)", unit)
 		return
 	}
+	st.failedStarts = 0
 
 	if hasEstablishedConnection(unit) {
-		*silentTicks = 0
+		st.silent, st.wedgeCycles = 0, 0
 		return
 	}
-	*silentTicks++
-	if *silentTicks < wedgedSilentTicks {
+	st.silent++
+	if st.silent < wedgedSilentTicks {
 		return
 	}
-	*silentTicks = 0
+	st.silent = 0
+	st.wedgeCycles++
 	// Active per systemd but no established connection for several minutes
 	// straight — wedged, not merely reconnecting. `start` would be a no-op
 	// here (systemd already thinks it's running); only `restart` kills and

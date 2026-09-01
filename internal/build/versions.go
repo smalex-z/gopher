@@ -34,7 +34,7 @@ const (
 	//
 	// Bump this whenever cmd/agent's behavior changes in a way the edge should
 	// know about (see cmd/agent/main.go's per-version changelog comment).
-	AgentVersion = "0.2.7"
+	AgentVersion = "0.2.9"
 )
 
 // InjectVersions substitutes the pinned-version placeholder tokens in an install

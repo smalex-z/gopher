@@ -44,7 +44,7 @@ func TestRecoverClientConfig_RemoteAddrComesFromRequestHost(t *testing.T) {
 	}
 	seedAgentMachine(t)
 
-	toml, machine, err := (&BootstrapService{}).RecoverClientConfig("agent-bearer-tok", "router.uclaacm.com:443")
+	toml, machine, err := (&BootstrapService{}).RecoverClientConfig("agent-bearer-tok", "router.uclaacm.com:443", "")
 	if err != nil {
 		t.Fatalf("RecoverClientConfig: %v", err)
 	}
@@ -65,7 +65,89 @@ func TestRecoverClientConfig_RemoteAddrComesFromRequestHost(t *testing.T) {
 func TestRecoverClientConfig_UnknownTokenRejected(t *testing.T) {
 	initTestDB(t)
 	seedAgentMachine(t)
-	if _, _, err := (&BootstrapService{}).RecoverClientConfig("wrong-token", "router.uclaacm.com"); err != ErrUnknownAgentToken {
+	if _, _, err := (&BootstrapService{}).RecoverClientConfig("wrong-token", "router.uclaacm.com", ""); err != ErrUnknownAgentToken {
 		t.Fatalf("err = %v, want ErrUnknownAgentToken", err)
+	}
+}
+
+// The submitted config is by definition suspect (the agent only dials home
+// when rathole keeps failing with it), so everything managed — the [client]
+// block included — is rebuilt from the DB; a corrupted remote_addr must not
+// survive. Only the operator's custom sections carry over: they exist
+// nowhere but that file.
+func TestRecoverClientConfig_RebuildsManagedKeepsCustom(t *testing.T) {
+	initTestDB(t)
+	seedAgentMachine(t)
+
+	const suspect = `[client]
+remote_addr = "corrupted-by-hand.example:9999"
+
+[client.transport]
+type = "noise"
+
+[client.transport.noise]
+remote_public_key = "stale-key"
+
+# gopher-machine-start: btb1
+[client.services.machine-btb1-ssh]
+type = "tcp"
+token = "stale-ssh-tok"
+local_addr = "0.0.0.0:22"
+# gopher-machine-end: btb1
+
+[client.services.my-custom-thing]
+type = "tcp"
+token = "operator-secret"
+local_addr = "localhost:9000"
+`
+	toml, _, err := (&BootstrapService{}).RecoverClientConfig("agent-bearer-tok", "router.uclaacm.com", suspect)
+	if err != nil {
+		t.Fatalf("RecoverClientConfig: %v", err)
+	}
+	if !strings.Contains(toml, `remote_addr = "router.uclaacm.com:2333"`) {
+		t.Errorf("corrupted remote_addr must be rebuilt from the request host:\n%s", toml)
+	}
+	if strings.Contains(toml, "corrupted-by-hand") || strings.Contains(toml, "stale-ssh-tok") || strings.Contains(toml, "stale-key") {
+		t.Errorf("suspect managed content must not survive the rebuild:\n%s", toml)
+	}
+	if !strings.Contains(toml, `token = "ssh-tok"`) {
+		t.Errorf("SSH token must come from the DB:\n%s", toml)
+	}
+	if !strings.Contains(toml, "[client.services.my-custom-thing]") || !strings.Contains(toml, `token = "operator-secret"`) {
+		t.Errorf("operator custom section must be carried over:\n%s", toml)
+	}
+}
+
+// Field regression (2026-09-01): a pure-garbage submitted config has no
+// section structure, so the old strip-based salvage kept the garbage as
+// "custom content" and appended it to the rebuilt config — re-poisoning it
+// and costing an extra refetch cycle (it only converged because a strip-order
+// accident ate the debris on the second pass). Debris must never survive;
+// real custom sections must.
+func TestRecoverClientConfig_DiscardsDebrisKeepsCustomSections(t *testing.T) {
+	initTestDB(t)
+	seedAgentMachine(t)
+	svc := &BootstrapService{}
+
+	// Pure garbage in → clean config out.
+	toml, _, err := svc.RecoverClientConfig("agent-bearer-tok", "router.uclaacm.com", "this is [not toml\n")
+	if err != nil {
+		t.Fatalf("RecoverClientConfig(garbage): %v", err)
+	}
+	if strings.Contains(toml, "not toml") {
+		t.Errorf("corruption debris must not survive the rebuild:\n%s", toml)
+	}
+
+	// Garbage AND a real custom section → keep the section, drop the debris.
+	mixed := "half a line of junk\n[client.services.my-custom]\ntype = \"tcp\"\ntoken = \"opsecret\"\nlocal_addr = \"localhost:9000\"\n"
+	toml, _, err = svc.RecoverClientConfig("agent-bearer-tok", "router.uclaacm.com", mixed)
+	if err != nil {
+		t.Fatalf("RecoverClientConfig(mixed): %v", err)
+	}
+	if strings.Contains(toml, "junk") {
+		t.Errorf("debris outside custom sections must be dropped:\n%s", toml)
+	}
+	if !strings.Contains(toml, "[client.services.my-custom]") || !strings.Contains(toml, `token = "opsecret"`) {
+		t.Errorf("custom section must survive alongside debris removal:\n%s", toml)
 	}
 }

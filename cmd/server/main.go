@@ -117,6 +117,11 @@ func runServer(args []string) {
 	// client.toml push that the migration couldn't land. Setter-style to
 	// avoid a circular dep with LocalSetupService.
 	healthSvc.SetConfigPusher(localSvc)
+	// Wire the client-config drift sweep: periodic parity check of each agent
+	// machine's client.toml against the canonical DB merge, pushing a repair
+	// when they diverge (hand-edit, truncation, restored snapshot — see
+	// client_drift.go).
+	healthSvc.SetClientDriftReconciler(localSvc)
 	// Wire the agent self-update actuator: when the health loop sees a reachable
 	// agent older than targetAgentVersion, it calls that agent's /self-update
 	// (the agent, running as gopher = NOPASSWD: ALL, swaps its own binary). A

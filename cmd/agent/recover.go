@@ -116,11 +116,19 @@ func recoverConfigFromEdge(token, destPath string) error {
 		return fmt.Errorf("no agent token")
 	}
 
-	req, err := http.NewRequest(http.MethodPost, base+"/api/agent/recover-config", nil)
+	// Send the current (suspect) config when one exists: the edge rebuilds all
+	// managed content from its DB but carries the operator's custom sections
+	// over — they exist nowhere but this file.
+	var reqBody io.Reader
+	if data, err := os.ReadFile(destPath); err == nil { // #nosec G304 — fixed config path
+		reqBody = strings.NewReader(string(data))
+	}
+	req, err := http.NewRequest(http.MethodPost, base+"/api/agent/recover-config", reqBody)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "text/plain")
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -152,12 +160,35 @@ func recoverConfigFromEdge(token, destPath string) error {
 // first field test of this feature.
 func writeRecoveredConfig(path string, body []byte) error {
 	if fileExists(path) {
+		// Best-effort backup before replacing a file that still exists — the
+		// refetch triggers on a *suspect* config, and the .bak both preserves
+		// anything the rebuild dropped and lets the operator diff what drifted.
+		// The direct write fails on a root-owned parent dir (the agent can
+		// rewrite the existing gopher-owned client.toml inode but not CREATE
+		// there — hit in the field), so fall back to sudo install.
+		if old, err := os.ReadFile(path); err == nil { // #nosec G304 — fixed config path
+			if werr := os.WriteFile(path+".bak", old, 0o600); werr != nil {
+				if serr := sudoInstallFile(path+".bak", old, "600"); serr != nil {
+					log.Printf("recovery: could not write %s.bak: %v (sudo fallback: %v)", path, werr, serr)
+				}
+			}
+		}
 		return writeFilePreservingMode(path, body)
 	}
 	if err := os.WriteFile(path, body, 0o644); err == nil { // #nosec G306 — must be world-readable, see above
 		return nil
 	}
-	tmp, err := os.CreateTemp("", "gopher-client-toml-*")
+	if err := sudo("mkdir", "-p", filepath.Dir(path)); err != nil {
+		return fmt.Errorf("recreate %s: %w", filepath.Dir(path), err)
+	}
+	return sudoInstallFile(path, body, "644")
+}
+
+// sudoInstallFile lands body at dest via a private temp file + sudo install —
+// the write path for files the gopher user can't create directly. Content
+// never touches a shell argv.
+func sudoInstallFile(dest string, body []byte, mode string) error {
+	tmp, err := os.CreateTemp("", "gopher-recover-*")
 	if err != nil {
 		return err
 	}
@@ -172,11 +203,8 @@ func writeRecoveredConfig(path string, body []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := sudo("mkdir", "-p", filepath.Dir(path)); err != nil {
-		return fmt.Errorf("recreate %s: %w", filepath.Dir(path), err)
-	}
-	if err := sudo("install", "-m", "644", "-o", "gopher", "-g", "gopher", tmpPath, path); err != nil {
-		return fmt.Errorf("install %s: %w", path, err)
+	if err := sudo("install", "-m", mode, "-o", "gopher", "-g", "gopher", tmpPath, dest); err != nil {
+		return fmt.Errorf("install %s: %w", dest, err)
 	}
 	return nil
 }

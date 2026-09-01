@@ -67,6 +67,10 @@ type HealthService struct {
 	// pre-existing behaviour.
 	configPusher ConfigPusher
 
+	// driftReconciler runs the periodic client.toml parity sweep (see
+	// client_drift.go). Same wiring pattern as configPusher; nil disables.
+	driftReconciler ClientDriftReconciler
+
 	// agentUpgrader rolls an outdated/protocol-skewed agent forward via the
 	// agent's own /self-update endpoint over the rathole back-channel (no SSH, no
 	// operator paste). Set by the cmd/server wiring; nil disables auto-upgrade
@@ -93,6 +97,14 @@ type HealthService struct {
 // can leave it nil.
 type ConfigPusher interface {
 	RetryPendingConfigPush(machine *db.Machine) error
+}
+
+// ClientDriftReconciler is the drift-sweep hook (see client_drift.go):
+// compare a machine's live client.toml against the canonical DB merge and
+// push a repair when they differ semantically. Implemented by
+// LocalSetupService; nil (tests) disables the sweep.
+type ClientDriftReconciler interface {
+	ReconcileClientConfig(machine *db.Machine) (bool, error)
 }
 
 // AgentUpgrader rolls a machine's gopher-agent forward to the version the
@@ -176,6 +188,60 @@ func (s *HealthService) SetConfigPusher(p ConfigPusher) {
 // cmd/server/main.go, same post-construction pattern as SetConfigPusher.
 func (s *HealthService) SetAgentUpgrader(u AgentUpgrader) {
 	s.agentUpgrader = u
+}
+
+// SetClientDriftReconciler wires the client-config drift sweep. Called once
+// from cmd/server/main.go, same post-construction pattern as SetConfigPusher.
+func (s *HealthService) SetClientDriftReconciler(r ClientDriftReconciler) {
+	s.driftReconciler = r
+}
+
+// driftLoop runs the client-config parity sweep (see client_drift.go). The
+// first sweep waits a full interval so it never interleaves with the startup
+// migrations' own config pushes.
+func (s *HealthService) driftLoop() {
+	defer s.wg.Done()
+	t := time.NewTicker(clientDriftSweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-t.C:
+			s.driftSweep()
+		}
+	}
+}
+
+// driftSweep runs one parity pass over every connected agent machine. A
+// machine with ConfigPushPending is skipped — the deferred-push retry already
+// owns bringing it in sync, and racing it would double-write.
+func (s *HealthService) driftSweep() {
+	if s.driftReconciler == nil {
+		return
+	}
+	machines, err := db.GetMachines()
+	if err != nil {
+		log.Printf("health: drift sweep: load machines: %v", err)
+		return
+	}
+	for i := range machines {
+		m := &machines[i]
+		if !m.AgentInstalled || m.AgentRemotePort == 0 || m.Status != "connected" || m.ConfigPushPending {
+			continue
+		}
+		repaired, rerr := s.driftReconciler.ReconcileClientConfig(m)
+		if rerr != nil {
+			// Not an event — a machine that flapped mid-sweep is the health
+			// poll's story to tell, and the sweep retries in one interval.
+			log.Printf("health: drift sweep: %s (%s): %v", m.ID, m.Name, rerr)
+			continue
+		}
+		if repaired {
+			log.Printf("health: drift sweep: repaired client config drift on %s (%s)", m.ID, m.Name)
+			db.LogEvent("config_drift_repaired", m.ID, m.Name)
+		}
+	}
 }
 
 // maybeAutoUpgradeAgent triggers an agent self-update for m (over the rathole
@@ -326,9 +392,10 @@ func (s *HealthService) Start() {
 	s.mu.Lock()
 	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
 	s.mu.Unlock()
-	s.wg.Add(2)
+	s.wg.Add(3)
 	go s.loop()
 	go s.janitorLoop()
+	go s.driftLoop()
 }
 
 func (s *HealthService) Stop() {

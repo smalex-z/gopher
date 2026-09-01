@@ -796,6 +796,7 @@ var kindDefaults = map[string]KindDefault{
 	"machine_degraded":       {"warn", "machine", "Machine %s rathole inactive"},
 	"machine_recovered":      {"info", "machine", "Machine %s auto-recovered"},
 	"agent_config_recovered": {"warn", "machine", "Machine %s recovered client config via dial-home"},
+	"config_drift_repaired":  {"warn", "machine", "Machine %s client config drift repaired"},
 	"recovery_failed":        {"error", "machine", "Auto-recovery failed for machine %s"},
 	"agent_unreachable":      {"warn", "machine", "Agent unreachable on machine %s"},
 	"tunnel_created":         {"info", "tunnel", "Tunnel %s created"},
