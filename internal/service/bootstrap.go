@@ -11,6 +11,7 @@ import (
 
 	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
+	apperrors "github.com/smalex-z/gopher/internal/errors"
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
@@ -39,6 +40,24 @@ func (s *BootstrapService) AllowAttempt(ip string) bool {
 // tunnelPort optionally pre-assigns the SSH tunnel port (0 = auto-allocate).
 // sshKeyID optionally pins the SSH key to install on the machine (empty = use default).
 func (s *BootstrapService) GenerateToken(tunnelPort int, sshKeyID string, publicSSH, sshEnabled bool) (*db.BootstrapToken, error) {
+	// Validate a pinned port up front so the operator hears about a bad choice
+	// at the dashboard, not when the bootstrap script fails on the client an
+	// hour later. Range/privilege check plus the same DB + live-OS availability
+	// checks the tunnel-create path applies (a port that's DB-free but held by
+	// a process — Caddy, sshd, the dashboard — passes the DB check and then
+	// silently fails at rathole bind time). Register's claim path re-checks:
+	// this is advisory, that one is authoritative.
+	if tunnelPort != 0 {
+		if err := config.ValidatePort(tunnelPort); err != nil {
+			return nil, &apperrors.ValidationError{Field: "tunnel_port", Message: err.Error()}
+		}
+		if exists, err := db.CheckRatholePortExists(tunnelPort); err == nil && exists {
+			return nil, &apperrors.ValidationError{Field: "tunnel_port", Message: fmt.Sprintf("port %d is already assigned to another tunnel or machine", tunnelPort)}
+		}
+		if !db.PortAvailable(tunnelPort) {
+			return nil, &apperrors.ValidationError{Field: "tunnel_port", Message: fmt.Sprintf("port %d is already in use by a process on the server", tunnelPort)}
+		}
+	}
 	bt := &db.BootstrapToken{
 		ID:         shortToken(),
 		Token:      secretToken(),
@@ -240,6 +259,13 @@ func allocatePortsAndCreateMachine(req BootstrapRequest, bt *db.BootstrapToken, 
 				}
 				if exists {
 					return nil, fmt.Errorf("port %d is already in use by another tunnel", bt.TunnelPort)
+				}
+				// DB-free isn't enough — the port must also be free on the box,
+				// same as the tunnel-create path. Without this a pinned port
+				// held by a live process passes validation and then silently
+				// fails at rathole bind time.
+				if !db.PortAvailable(bt.TunnelPort) {
+					return nil, fmt.Errorf("port %d is already in use by a process on the server", bt.TunnelPort)
 				}
 				tunnelPort = bt.TunnelPort
 			} else {

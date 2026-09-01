@@ -308,6 +308,16 @@ func (s *LocalSetupService) updateClientToml(machine *db.Machine, transform func
 
 	if pushErr = s.updateClientTomlViaSSH(machine, transform); pushErr == nil {
 		clearConfigPushPending(machine)
+		return nil
+	}
+	// Both transports failed (agent unreachable or absent, SSH failed too) —
+	// flag the machine so HealthService.maybeRetryConfigPush replays this push
+	// once the machine reports reachable again. Without this, a transient
+	// outage during a tunnel change left client.toml stale forever: the flag
+	// was only ever set in the no-private-key branch above, so machines WITH a
+	// stored key had no retry path at all.
+	if err := db.SetMachineConfigPushPending(machine.ID, true); err != nil {
+		log.Printf("mark config_push_pending for %s (%s): %v", machine.ID, machine.Name, err)
 	}
 	return pushErr
 }

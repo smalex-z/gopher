@@ -263,12 +263,17 @@ func (s *DeployService) doDeployClient(machine *db.Machine, w io.Writer) error {
 		sshKey, _ = db.GetSSHKeyForMachine(machine)
 	}
 	if sshKey == nil || sshKey.PrivateKey == "" {
+		// Same retry semantics as updateClientToml: the machine's config may be
+		// stale and nothing pushed — flag it so the health loop re-pushes via
+		// the agent once it reconnects.
+		_ = db.SetMachineConfigPushPending(machine.ID, true)
 		return fmt.Errorf("no agent and no stored SSH private key (public-only machine) — nothing to redeploy over; the agent keeps config in sync automatically once reachable")
 	}
 
 	fmt.Fprintln(w, "Connecting to machine via tunnel...")
 	client, err := sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 	if err != nil {
+		_ = db.SetMachineConfigPushPending(machine.ID, true)
 		return fmt.Errorf("failed to connect to machine: %w", err)
 	}
 	defer client.Close()
@@ -279,5 +284,10 @@ func (s *DeployService) doDeployClient(machine *db.Machine, w io.Writer) error {
 		return fmt.Errorf("failed to generate client config: %w", err)
 	}
 
-	return sshpkg.DeployClient(client, machine.ID, machine.Username, clientConfig, w)
+	if err := sshpkg.DeployClient(client, machine.ID, machine.Username, clientConfig, w); err != nil {
+		_ = db.SetMachineConfigPushPending(machine.ID, true)
+		return err
+	}
+	_ = db.SetMachineConfigPushPending(machine.ID, false)
+	return nil
 }

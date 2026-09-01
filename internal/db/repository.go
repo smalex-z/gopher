@@ -535,9 +535,14 @@ func CountMachinesUsingKey(keyID string) (int64, error) {
 func GetSSHKeyForMachine(machine *Machine) (*SSHKey, error) {
 	if machine.SSHKeyID != "" {
 		key, err := GetSSHKey(machine.SSHKeyID)
-		if err == nil {
-			return key, nil
+		if err != nil {
+			// No silent fallback to the default key: dialing with a different
+			// identity than the machine was provisioned with can't succeed and
+			// masks the real problem (the assigned key row is gone). Surface it
+			// so the operator reassigns a key instead.
+			return nil, fmt.Errorf("machine's assigned SSH key %q not found — reassign a key to this machine: %w", machine.SSHKeyID, err)
 		}
+		return key, nil
 	}
 	return GetDefaultSSHKey()
 }

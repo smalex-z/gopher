@@ -110,11 +110,15 @@ func (s *MonitorService) checkMachine(machine db.Machine) {
 	if machine.TunnelPort == 0 {
 		return
 	}
-	// Skip machines the HealthService is already polling via the agent —
-	// running both writers against the same row was clobbering agent fields
-	// every 30s. Health owns agent-installed machines; monitor stays the
-	// fallback for legacy / un-migrated ones.
-	if machine.AgentInstalled {
+	// Skip machines the HealthService owns — any machine with an agent
+	// back-channel allocated, installed or not. Gating on AgentInstalled alone
+	// left a two-writer conflict for machines whose agent install failed but
+	// whose SSH tunnel works: health's WatchStatus stream marked them offline
+	// (agent unreachable) while this probe marked them connected (SSH banner
+	// OK), flapping the status every 30-60s. Health is the single status
+	// writer for every agent-provisioned machine; monitor stays the fallback
+	// for pre-agent legacy machines only (AgentRemotePort == 0).
+	if machine.AgentInstalled || machine.AgentRemotePort > 0 {
 		return
 	}
 	// Use an SSH banner grab rather than a full SSH handshake.

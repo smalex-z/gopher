@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -386,8 +385,10 @@ func (s *HealthService) tick() {
 	sem := make(chan struct{}, healthCheckParallelism)
 	var wg sync.WaitGroup
 	agentIDs := make(map[string]bool)
+	allIDs := make(map[string]bool, len(machines))
 	for i := range machines {
 		m := machines[i]
+		allIDs[m.ID] = true
 		if m.AgentRemotePort > 0 {
 			agentIDs[m.ID] = true
 			s.ensureStream(m)
@@ -406,7 +407,31 @@ func (s *HealthService) tick() {
 		}()
 	}
 	s.reconcileStreams(agentIDs)
+	s.pruneMachineState(allIDs)
 	wg.Wait()
+}
+
+// pruneMachineState drops per-machine bookkeeping (transition status, recovery
+// throttle, upgrade backoff) for machines that no longer exist in the DB, so a
+// deleted machine doesn't pin its map entries for the life of the process.
+func (s *HealthService) pruneMachineState(known map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id := range s.lastStatus {
+		if !known[id] {
+			delete(s.lastStatus, id)
+		}
+	}
+	for id := range s.lastRecovery {
+		if !known[id] {
+			delete(s.lastRecovery, id)
+		}
+	}
+	for id := range s.agentUpgrades {
+		if !known[id] {
+			delete(s.agentUpgrades, id)
+		}
+	}
 }
 
 // checkMachine runs the appropriate probe for a machine: agent /status when
@@ -644,23 +669,27 @@ func (s *HealthService) checkViaTCP(ctx context.Context, m *db.Machine, subject 
 	if m.TunnelPort == 0 {
 		return
 	}
-	addr := fmt.Sprintf("127.0.0.1:%d", m.TunnelPort)
-	d := &net.Dialer{Timeout: 5 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	// Banner grab, not a bare TCP dial — same probe (and same rationale) as
+	// MonitorService.checkMachine: while a rathole-client holds its control
+	// channel, the edge accepts the TCP connection even when the origin's sshd
+	// is dead, so dial success only proves the tunnel, not the machine. A bare
+	// dial here marked such machines "connected" (and logged OK uptime rows)
+	// while the monitor's banner probe said "offline" — the two writers
+	// flapped the status between them.
+	reachable := probeMachineSSH(TunnelDialHost(m), m.TunnelPort)
 	latency := int(time.Since(start) / time.Millisecond)
-	if err != nil {
+	if !reachable {
 		_ = db.RecordHealthCheck(&db.HealthCheck{
 			Subject:   subject,
 			OK:        false,
 			LatencyMS: latency,
-			ErrorMsg:  "tcp probe failed: " + err.Error(),
+			ErrorMsg:  "ssh banner probe failed (tunnel port unreachable or origin sshd silent)",
 		})
 		// Without the agent we can't auto-restart. Just record the failure.
 		_ = db.SetMachineStatus(m.ID, "offline", nil)
-		s.emitTransition(m, "offline", err.Error())
+		s.emitTransition(m, "offline", "ssh banner probe failed")
 		return
 	}
-	_ = conn.Close()
 
 	now := time.Now()
 	_ = db.SetMachineStatus(m.ID, "connected", &now)

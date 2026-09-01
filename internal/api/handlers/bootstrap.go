@@ -12,6 +12,7 @@ import (
 	"github.com/smalex-z/gopher/internal/api/response"
 	"github.com/smalex-z/gopher/internal/build"
 	"github.com/smalex-z/gopher/internal/db"
+	apperrors "github.com/smalex-z/gopher/internal/errors"
 	"github.com/smalex-z/gopher/internal/service"
 )
 
@@ -71,6 +72,11 @@ func (h *BootstrapHandler) GenerateToken(w http.ResponseWriter, r *http.Request)
 
 	bt, err := h.svc.GenerateToken(req.TunnelPort, req.SSHKeyID, publicSSH, sshEnabled)
 	if err != nil {
+		var verr *apperrors.ValidationError
+		if errors.As(err, &verr) {
+			response.BadRequest(w, err.Error())
+			return
+		}
 		response.InternalError(w, err.Error())
 		return
 	}

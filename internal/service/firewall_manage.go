@@ -61,6 +61,13 @@ func doFirewallConfigure(mode string, logWriter io.Writer) error {
 
 	if err := db.MutateSettings(func(s *db.AppSettings) error {
 		s.FirewallMode = mode
+		// The install step defaults DashboardPrivate=true assuming the takeover
+		// will enforce it (step 5b). Choosing manual/none means nothing ever
+		// will — clear it so status doesn't claim a privacy no firewall
+		// provides.
+		if mode != "gopher" {
+			s.DashboardPrivate = false
+		}
 		return nil
 	}); err != nil {
 		return fmt.Errorf("failed to save firewall mode: %w", err)
