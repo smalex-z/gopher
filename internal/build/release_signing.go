@@ -21,4 +21,11 @@ package build
 // Losing the secret key means edges running signature-checking builds cannot
 // auto-update to anything you can no longer sign — back the key file up (it
 // is itself password-encrypted) before setting this.
-const ReleaseSigningPubKey = ""
+//
+// A var, not a const: a const makes every enforcement branch in
+// verifyReleaseSignature dead code that no test can reach (Go tests can't
+// override a const), so the policy's first real execution would be on a
+// production edge. Tests inject a throwaway keypair here; production code
+// never assigns it. scripts/sign-release.sh greps this assignment for its
+// pre-upload sanity verify — keep the `ReleaseSigningPubKey = "..."` shape.
+var ReleaseSigningPubKey = ""

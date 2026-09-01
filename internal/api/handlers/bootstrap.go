@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/smalex-z/gopher/internal/agentdist"
@@ -27,6 +28,14 @@ var gopherUninstallScript string
 
 //go:embed templates/migrate.sh
 var migrateScriptTmpl string
+
+// Parsed once at init: the sources are embedded, so a parse failure is a
+// build defect that should fail at startup, not per-request.
+var (
+	bootstrapTmpl = template.Must(template.New("bootstrap").Delims("{{", "}}").Parse(bootstrapScriptTmpl))
+	uninstallTmpl = template.Must(template.New("uninstall").Delims("{{", "}}").Parse(gopherUninstallScript))
+	migrateTmpl   = template.Must(template.New("migrate").Delims("{{", "}}").Parse(migrateScriptTmpl))
+)
 
 type BootstrapHandler struct {
 	svc *service.BootstrapService
@@ -181,13 +190,8 @@ func (h *BootstrapHandler) ServeScript(w http.ResponseWriter, r *http.Request) {
 // HostURL templated in so the script can call back to the dashboard's
 // /api/machines/self-delete endpoint when an operator runs it locally.
 func (h *BootstrapHandler) ServeUninstallScript(w http.ResponseWriter, r *http.Request) {
-	tmpl, err := template.New("uninstall").Delims("{{", "}}").Parse(gopherUninstallScript)
-	if err != nil {
-		http.Error(w, "uninstall template error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
 	var buf strings.Builder
-	if err := tmpl.Execute(&buf, struct{ HostURL string }{HostURL: hostURL(r)}); err != nil {
+	if err := uninstallTmpl.Execute(&buf, struct{ HostURL string }{HostURL: hostURL(r)}); err != nil {
 		http.Error(w, "uninstall template error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -201,13 +205,8 @@ func (h *BootstrapHandler) ServeUninstallScript(w http.ResponseWriter, r *http.R
 // per-machine secrets. Mirrors the bootstrap.sh pattern: a token-bearing
 // shell script + an API callback that resolves the token to config.
 func (h *BootstrapHandler) ServeMigrateScript(w http.ResponseWriter, r *http.Request) {
-	tmpl, err := template.New("migrate").Delims("{{", "}}").Parse(migrateScriptTmpl)
-	if err != nil {
-		http.Error(w, "migrate template error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
 	var buf strings.Builder
-	if err := tmpl.Execute(&buf, scriptDataFor(hostURL(r))); err != nil {
+	if err := migrateTmpl.Execute(&buf, scriptDataFor(hostURL(r))); err != nil {
 		http.Error(w, "migrate template error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -291,28 +290,35 @@ type scriptTemplateData struct {
 	RatholeSHAArmv7   string
 }
 
+// The hash fields are process-lifetime constants (embedded binaries, hashes
+// published once at startup); only HostURL varies per request, so the base is
+// captured once on first render.
+var (
+	baseScriptDataOnce sync.Once
+	baseScriptData     scriptTemplateData
+)
+
 func scriptDataFor(hostURL string) scriptTemplateData {
-	a := agentdist.All()
-	r := embedbin.RatholeSHA256ByTarget()
-	return scriptTemplateData{
-		HostURL:           hostURL,
-		AgentSHAAmd64:     a["amd64"],
-		AgentSHAArm64:     a["arm64"],
-		AgentSHAArmv7:     a["armv7"],
-		RatholeSHAX8664:   r["x86_64"],
-		RatholeSHAAarch64: r["aarch64"],
-		RatholeSHAArmv7:   r["armv7"],
-	}
+	baseScriptDataOnce.Do(func() {
+		a := agentdist.All()
+		r := embedbin.RatholeSHA256ByTarget()
+		baseScriptData = scriptTemplateData{
+			AgentSHAAmd64:     a["amd64"],
+			AgentSHAArm64:     a["arm64"],
+			AgentSHAArmv7:     a["armv7"],
+			RatholeSHAX8664:   r["x86_64"],
+			RatholeSHAAarch64: r["aarch64"],
+			RatholeSHAArmv7:   r["armv7"],
+		}
+	})
+	d := baseScriptData
+	d.HostURL = hostURL
+	return d
 }
 
 func generateBootstrapScript(hostURL string) string {
-	tmpl, err := template.New("bootstrap").Delims("{{", "}}").Parse(bootstrapScriptTmpl)
-	if err != nil {
-		// Template is embedded from a known-good file — this should never happen.
-		panic("bootstrap template parse error: " + err.Error())
-	}
 	var buf strings.Builder
-	if err := tmpl.Execute(&buf, scriptDataFor(hostURL)); err != nil {
+	if err := bootstrapTmpl.Execute(&buf, scriptDataFor(hostURL)); err != nil {
 		panic("bootstrap template execute error: " + err.Error())
 	}
 	return buf.String()

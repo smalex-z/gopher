@@ -166,7 +166,24 @@ func (s *UpdateService) Apply() error {
 
 	httpClient := &http.Client{Timeout: 5 * time.Minute}
 
-	// Download to a temp file
+	// Fetch the published checksums file and authenticate it against the
+	// offline release-signing key (when configured) BEFORE pulling the
+	// multi-MB binary: an unsigned/tampered release, or a sums file with no
+	// entry for this build, aborts the update for the cost of two small
+	// requests, and the expected hash is known up front.
+	sumsRaw, err := downloadSmall(httpClient, sumsURL, 1<<20)
+	if err != nil {
+		return fmt.Errorf("checksum download failed: %w", err)
+	}
+	if err := verifyReleaseSignature(httpClient, release, sumsName, sumsRaw); err != nil {
+		return err
+	}
+	wantHash, err := checksumFromSums(sumsRaw, downloadURL)
+	if err != nil {
+		return fmt.Errorf("checksum lookup failed: %w", err)
+	}
+
+	// Download the binary to a temp file, hashing as it streams.
 	tmpFile, err := os.CreateTemp("", "gopher-update-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
@@ -187,7 +204,6 @@ func (s *UpdateService) Apply() error {
 		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
 
-	// Stream into the temp file while computing SHA256 in parallel.
 	hasher := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(tmpFile, hasher), resp.Body); err != nil {
 		tmpFile.Close()
@@ -197,22 +213,6 @@ func (s *UpdateService) Apply() error {
 	tmpFile.Close()
 	gotHash := hex.EncodeToString(hasher.Sum(nil))
 
-	// Fetch the published checksums file, authenticate it against the offline
-	// release-signing key (when configured), and only then trust its contents.
-	sumsRaw, err := downloadSmall(httpClient, sumsURL, 1<<20)
-	if err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("checksum download failed: %w", err)
-	}
-	if err := verifyReleaseSignature(httpClient, release, sumsName, sumsRaw, channel); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	wantHash, err := checksumFromSums(sumsRaw, downloadURL)
-	if err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("checksum lookup failed: %w", err)
-	}
 	if !strings.EqualFold(gotHash, wantHash) {
 		os.Remove(tmpPath)
 		return fmt.Errorf("checksum mismatch — got %s, want %s — refusing to install", gotHash, wantHash)
@@ -501,7 +501,10 @@ func findChecksumsAsset(release *githubRelease) (string, string) {
 }
 
 // downloadSmall fetches up to max bytes from url — used for the checksums
-// file and its detached signature, never the binary itself.
+// file and its detached signature, never the binary itself. A response larger
+// than max is an error, not a silent truncation: a truncated sums file would
+// otherwise surface later as a baffling "signature FAILED" or "no entry"
+// pointing away from the real cause.
 func downloadSmall(httpClient *http.Client, url string, max int64) ([]byte, error) {
 	resp, err := httpClient.Get(url)
 	if err != nil {
@@ -511,7 +514,14 @@ func downloadSmall(httpClient *http.Client, url string, max int64) ([]byte, erro
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, max))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("response exceeds the %d-byte limit for this file", max)
+	}
+	return data, nil
 }
 
 // verifyReleaseSignature authenticates the raw SHA256SUMS content against the
@@ -521,13 +531,26 @@ func downloadSmall(httpClient *http.Client, url string, max int64) ([]byte, erro
 // with GitHub write access would be editing.
 //
 // Policy: no configured pubkey → no-op (pre-signing builds). Pubkey set:
-// stable channel requires a valid signature; alpha/beta verify when the
-// .minisig asset exists but tolerate its absence (dev velocity), and a
-// PRESENT-but-invalid signature always fails regardless of channel.
-func verifyReleaseSignature(httpClient *http.Client, release *githubRelease, sumsName string, sumsRaw []byte, channel string) error {
+// stable releases — and anything whose tag doesn't parse — require a valid
+// signature no matter which channel selected them. The decision deliberately
+// keys on the RELEASE, not the channel string: the channel is user/DB input
+// that releaseMatchesChannel treats as stable when unrecognized, and the
+// beta/alpha channels legitimately serve stable releases too — gating on the
+// channel would let either path install a stable artifact unsigned.
+// Prereleases tolerate a MISSING .minisig (dev velocity), but a
+// present-and-invalid signature always fails.
+//
+// The signature's trusted comment ("gopher release <tag>", written by
+// scripts/sign-release.sh) must name the release being installed. Without
+// that binding, a still-valid signature copied verbatim from an older release
+// alongside its old sums+binary would verify under a new tag — a signed
+// rollback replay that also slips past the forward-only isNewer gate.
+func verifyReleaseSignature(httpClient *http.Client, release *githubRelease, sumsName string, sumsRaw []byte) error {
 	if build.ReleaseSigningPubKey == "" {
 		return nil
 	}
+	sv := parseSemver(release.TagName)
+	isPrerelease := sv != nil && sv.prerelease != ""
 	sigName := strings.ToLower(sumsName) + ".minisig"
 	sigURL := ""
 	for _, asset := range release.Assets {
@@ -537,18 +560,22 @@ func verifyReleaseSignature(httpClient *http.Client, release *githubRelease, sum
 		}
 	}
 	if sigURL == "" {
-		if channel == "stable" {
+		if !isPrerelease {
 			return fmt.Errorf("release %s is not signed (%s missing) — stable releases must carry a signature from the offline release key (scripts/sign-release.sh); refusing to install", release.TagName, sigName)
 		}
-		log.Printf("WARN: release %s has no %s — allowed on the %s channel, but the download is only checksum-protected", release.TagName, sigName, channel)
+		log.Printf("WARN: prerelease %s has no %s — allowed for prereleases, but the download is only checksum-protected", release.TagName, sigName)
 		return nil
 	}
 	sigRaw, err := downloadSmall(httpClient, sigURL, 8<<10)
 	if err != nil {
 		return fmt.Errorf("download release signature: %w", err)
 	}
-	if err := verifyMinisignSignature(build.ReleaseSigningPubKey, sumsRaw, sigRaw); err != nil {
+	trustedComment, err := verifyMinisignSignature(build.ReleaseSigningPubKey, sumsRaw, sigRaw)
+	if err != nil {
 		return fmt.Errorf("release %s signature verification FAILED: %w — refusing to install", release.TagName, err)
+	}
+	if want := "gopher release " + release.TagName; trustedComment != want {
+		return fmt.Errorf("release %s signature names %q, want %q — a valid signature for the wrong release is a rollback replay; refusing to install", release.TagName, trustedComment, want)
 	}
 	return nil
 }

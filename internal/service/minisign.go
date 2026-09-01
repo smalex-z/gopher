@@ -21,8 +21,8 @@ const (
 	// ed25519 public key / signature.
 	msAlgLen   = 2
 	msKeyIDLen = 8
-	msPubLen   = msAlgLen + msKeyIDLen + ed25519.PublicKeySize  // 42
-	msSigLen   = msAlgLen + msKeyIDLen + ed25519.SignatureSize  // 74
+	msPubLen   = msAlgLen + msKeyIDLen + ed25519.PublicKeySize // 42
+	msSigLen   = msAlgLen + msKeyIDLen + ed25519.SignatureSize // 74
 )
 
 // minisignPubKey is the decoded form of the base64 public-key line.
@@ -49,15 +49,23 @@ func parseMinisignPubKey(b64 string) (*minisignPubKey, error) {
 
 // verifyMinisignSignature checks a .minisig file (sigFile) over message
 // against the given base64 public key. It verifies BOTH signatures the format
-// carries: the file signature (over the message — prehashed with blake2b-512
-// for the modern "ED" algorithm, raw for legacy "Ed") and the global
-// signature (over file-signature || trusted comment), so the trusted comment
-// can't be swapped either. Returns nil only on a full match with the same key
-// ID the public key declares.
-func verifyMinisignSignature(pubKeyB64 string, message, sigFile []byte) error {
+// carries: the file signature (over the blake2b-512 prehash of the message —
+// the "ED" algorithm minisign has emitted by default since 0.6) and the
+// global signature (over file-signature || trusted comment), so the trusted
+// comment can't be swapped either. Legacy pure-ed25519 "Ed" signatures are
+// rejected: the 2-byte algorithm tag is covered by neither signature, so
+// accepting both algorithms lets an attacker flip a genuine "ED" signature to
+// "Ed" and validly verify a message the key holder never signed (the raw
+// blake2b hash bytes). Our signer (scripts/sign-release.sh) only ever
+// produces "ED".
+//
+// On success it returns the authenticated trusted comment so callers can bind
+// the signature to a specific release — the comment is authenticated, but
+// WHAT it must say is caller policy.
+func verifyMinisignSignature(pubKeyB64 string, message, sigFile []byte) (string, error) {
 	pub, err := parseMinisignPubKey(pubKeyB64)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// Signature file layout:
@@ -82,45 +90,38 @@ func verifyMinisignSignature(pubKeyB64 string, message, sigFile []byte) error {
 		}
 	}
 	if sigB64 == "" || globalB64 == "" {
-		return fmt.Errorf("malformed signature file: missing signature lines")
+		return "", fmt.Errorf("malformed signature file: missing signature lines")
 	}
 
 	rawSig, err := base64.StdEncoding.DecodeString(sigB64)
 	if err != nil {
-		return fmt.Errorf("signature is not valid base64: %w", err)
+		return "", fmt.Errorf("signature is not valid base64: %w", err)
 	}
 	if len(rawSig) != msSigLen {
-		return fmt.Errorf("signature has %d bytes, want %d", len(rawSig), msSigLen)
+		return "", fmt.Errorf("signature has %d bytes, want %d", len(rawSig), msSigLen)
 	}
-	alg := string(rawSig[:msAlgLen])
+	if alg := string(rawSig[:msAlgLen]); alg != "ED" {
+		return "", fmt.Errorf("unsupported signature algorithm %q (only minisign prehashed \"ED\" signatures are accepted)", alg)
+	}
 	if !bytes.Equal(rawSig[msAlgLen:msAlgLen+msKeyIDLen], pub.keyID[:]) {
-		return fmt.Errorf("signature was made with a different key ID than the trusted public key")
+		return "", fmt.Errorf("signature was made with a different key ID than the trusted public key")
 	}
 	sig := rawSig[msAlgLen+msKeyIDLen:]
 
-	var signed []byte
-	switch alg {
-	case "ED": // prehashed (minisign default since 0.6)
-		h := blake2b.Sum512(message)
-		signed = h[:]
-	case "Ed": // legacy pure ed25519 over the raw message
-		signed = message
-	default:
-		return fmt.Errorf("unsupported signature algorithm %q", alg)
-	}
-	if !ed25519.Verify(pub.key, signed, sig) {
-		return fmt.Errorf("signature does not verify — file was not signed by the trusted key, or was modified")
+	h := blake2b.Sum512(message)
+	if !ed25519.Verify(pub.key, h[:], sig) {
+		return "", fmt.Errorf("signature does not verify — file was not signed by the trusted key, or was modified")
 	}
 
 	globalSig, err := base64.StdEncoding.DecodeString(globalB64)
 	if err != nil {
-		return fmt.Errorf("global signature is not valid base64: %w", err)
+		return "", fmt.Errorf("global signature is not valid base64: %w", err)
 	}
 	if len(globalSig) != ed25519.SignatureSize {
-		return fmt.Errorf("global signature has %d bytes, want %d", len(globalSig), ed25519.SignatureSize)
+		return "", fmt.Errorf("global signature has %d bytes, want %d", len(globalSig), ed25519.SignatureSize)
 	}
 	if !ed25519.Verify(pub.key, append(append([]byte{}, sig...), []byte(trustedComment)...), globalSig) {
-		return fmt.Errorf("trusted-comment signature does not verify")
+		return "", fmt.Errorf("trusted-comment signature does not verify")
 	}
-	return nil
+	return trustedComment, nil
 }
