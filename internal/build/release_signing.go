@@ -13,10 +13,14 @@ package build
 //
 // Empty = verification disabled (pre-signing builds keep today's behavior).
 // Once a release ships with this set, every later stable release MUST be
-// signed (scripts/sign-release.sh — one command after the CI publish) or
-// updaters will refuse it. Prerelease channels (alpha/beta) verify the
-// signature when present but tolerate its absence, so dev velocity is
-// unaffected.
+// signed or updaters will refuse it. The repo has immutable releases enabled
+// (a published release's assets freeze instantly), so CI creates stable
+// releases as DRAFTS and scripts/sign-release.sh signs the draft and
+// publishes it as its final step — the signature is always inside before the
+// freeze, and updaters never see a stable release unsigned. Prerelease
+// channels (alpha/beta) publish directly from CI, unsigned; the updater
+// verifies a signature when present but tolerates its absence there, so dev
+// velocity is unaffected.
 //
 // Losing the secret key means edges running signature-checking builds cannot
 // auto-update to anything you can no longer sign — back the key file up (it
