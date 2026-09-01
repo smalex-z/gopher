@@ -100,10 +100,13 @@ chmod 0440 "$SUDOERS_FILE"
 
 # ── 3. Download agent binary ────────────────────────────────────────────────
 ARCH=$(uname -m)
+# AGENT_PIN: sha256 of the agent binary, injected by the edge at render time.
+# It rode the TLS-verified fetch of this script, so it stays authoritative
+# even when the download below falls back to --insecure. Empty on dev builds.
 case "$ARCH" in
-  x86_64)         ARCH_TAG=linux-amd64 ;;
-  aarch64|arm64)  ARCH_TAG=linux-arm64 ;;
-  armv7l|armv7)   ARCH_TAG=linux-armv7 ;;
+  x86_64)         ARCH_TAG=linux-amd64; AGENT_PIN="{{.AgentSHAAmd64}}" ;;
+  aarch64|arm64)  ARCH_TAG=linux-arm64; AGENT_PIN="{{.AgentSHAArm64}}" ;;
+  armv7l|armv7)   ARCH_TAG=linux-armv7; AGENT_PIN="{{.AgentSHAArmv7}}" ;;
   *) echo "ERROR: unsupported arch $ARCH" >&2; exit 1 ;;
 esac
 
@@ -125,6 +128,22 @@ elif command -v wget >/dev/null 2>&1; then
 else
   echo "ERROR: neither curl nor wget is available" >&2
   exit 1
+fi
+# Verify against the pinned checksum before the root-owned install — the
+# download above may have used the --insecure fallback, so the pin (delivered
+# with this script over verified TLS) is what makes it trustworthy. Installing
+# the agent is this script's entire job, so a failed check is fatal.
+if [ -n "$AGENT_PIN" ]; then
+  if ! command -v sha256sum >/dev/null 2>&1; then
+    echo "ERROR: sha256sum not found — cannot verify agent download (install coreutils and re-run)" >&2
+    rm -f "$AGENT_TMP"; exit 1
+  fi
+  GOT_SUM=$(sha256sum "$AGENT_TMP" | awk '{print $1}')
+  if [ "$GOT_SUM" != "$AGENT_PIN" ]; then
+    echo "ERROR: agent checksum mismatch (expected $AGENT_PIN, got $GOT_SUM) — refusing to install" >&2
+    rm -f "$AGENT_TMP"; exit 1
+  fi
+  echo "agent checksum verified"
 fi
 install -m 0755 -o root -g root "$AGENT_TMP" /usr/local/bin/gopher-agent
 rm -f "$AGENT_TMP"

@@ -176,8 +176,8 @@ func TestReleaseAssetNamingContract(t *testing.T) {
 	if got := findAssetURL(&r); got != "https://x/"+releaseAssetName() {
 		t.Errorf("findAssetURL = %q, want the %s asset", got, releaseAssetName())
 	}
-	if got := findChecksumsURL(&r); got != "https://x/SHA256SUMS.txt" {
-		t.Errorf("findChecksumsURL = %q, want the SHA256SUMS.txt asset", got)
+	if name, got := findChecksumsAsset(&r); got != "https://x/SHA256SUMS.txt" || name != "SHA256SUMS.txt" {
+		t.Errorf("findChecksumsAsset = (%q, %q), want the SHA256SUMS.txt asset", name, got)
 	}
 }
 

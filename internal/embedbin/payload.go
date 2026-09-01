@@ -1,7 +1,10 @@
 package embedbin
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
+	"sync"
 
 	"github.com/smalex-z/gopher/internal/build"
 )
@@ -54,4 +57,33 @@ func RatholeForOrigin(uname string) ([]byte, bool) {
 		return nil, false
 	}
 	return read("rathole-" + t.Name)
+}
+
+var (
+	ratholeSumsOnce sync.Once
+	ratholeSums     map[string]string
+)
+
+// RatholeSHA256ByTarget returns target Name ("x86_64", "aarch64", "armv7") →
+// hex sha256 of the embedded rathole binary for that origin arch. Injected
+// into the rendered bootstrap script so the origin verifies its rathole
+// download against a value that rode the operator's TLS-verified script fetch
+// rather than the same channel as the binary. Empty entries are simply absent
+// (dev builds without staged binaries). Computed once — the embedded payload
+// is immutable for the life of the process.
+func RatholeSHA256ByTarget() map[string]string {
+	ratholeSumsOnce.Do(func() {
+		ratholeSums = map[string]string{}
+		for _, t := range build.RatholeTargets {
+			if d, ok := read("rathole-" + t.Name); ok {
+				sum := sha256.Sum256(d)
+				ratholeSums[t.Name] = hex.EncodeToString(sum[:])
+			}
+		}
+	})
+	cp := make(map[string]string, len(ratholeSums))
+	for k, v := range ratholeSums {
+		cp[k] = v
+	}
+	return cp
 }

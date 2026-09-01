@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smalex-z/gopher/internal/agentdist"
 	"github.com/smalex-z/gopher/internal/db"
 )
 
@@ -115,7 +116,19 @@ func (i *AgentInstaller) UpgradeAgent(machine *db.Machine) error {
 	if err != nil {
 		return err
 	}
-	payload, _ := json.Marshal(map[string]string{"base_url": baseURL, "version": targetAgentVersion})
+	// Carry the expected binary hashes IN the trigger: this request rides the
+	// noise-encrypted rathole back-channel with the per-machine bearer token,
+	// while the agent's actual download of the binary goes over a channel it
+	// can't fully trust (TLS verification is skipped for IP/self-signed edge
+	// certs). With the hash delivered here, the download path needs zero
+	// trust — see cmd/agent/selfupdate.go. Keyed by arch because the edge
+	// doesn't know the origin's arch; the agent picks its own entry. Empty on
+	// dev builds → omitted → the agent falls back to the legacy sidecar.
+	trigger := map[string]any{"base_url": baseURL, "version": targetAgentVersion}
+	if sums := agentdist.All(); len(sums) > 0 {
+		trigger["sha256_by_arch"] = sums
+	}
+	payload, _ := json.Marshal(trigger)
 	url := fmt.Sprintf("http://127.0.0.1:%d/self-update", machine.AgentRemotePort)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {

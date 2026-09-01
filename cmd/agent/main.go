@@ -102,6 +102,12 @@ const (
 	// non-managed [client.services.*] sections instead of "whatever survives
 	// stripping", which was re-appending corruption debris to the rebuilt
 	// config and costing an extra refetch cycle. protocolVersion unchanged.
+	// 0.2.10: self-update verifies the downloaded binary against a checksum
+	// carried IN the bearer-authed trigger body (sha256_by_arch), which rides
+	// the noise-encrypted back-channel — closing the MITM window where both
+	// the binary and its .sha256 sidecar came over the same
+	// TLS-verification-skipped download channel. Sidecar remains the fallback
+	// for edges that don't send hashes yet. protocolVersion unchanged.
 	agentVersion = build.AgentVersion
 
 	// protocolVersion is the wire-compatibility contract between server and

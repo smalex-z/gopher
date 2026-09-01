@@ -10,9 +10,11 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/smalex-z/gopher/internal/agentdist"
 	"github.com/smalex-z/gopher/internal/api/response"
 	"github.com/smalex-z/gopher/internal/build"
 	"github.com/smalex-z/gopher/internal/db"
+	"github.com/smalex-z/gopher/internal/embedbin"
 	apperrors "github.com/smalex-z/gopher/internal/errors"
 	"github.com/smalex-z/gopher/internal/service"
 )
@@ -205,7 +207,7 @@ func (h *BootstrapHandler) ServeMigrateScript(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var buf strings.Builder
-	if err := tmpl.Execute(&buf, struct{ HostURL string }{HostURL: hostURL(r)}); err != nil {
+	if err := tmpl.Execute(&buf, scriptDataFor(hostURL(r))); err != nil {
 		http.Error(w, "migrate template error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -271,6 +273,38 @@ func (h *BootstrapHandler) Migrate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// scriptTemplateData is the render context for bootstrap.sh / migrate.sh.
+// Besides the callback URL it carries the authoritative sha256 of every
+// binary the script will download from the edge. The script itself is fetched
+// by the operator over verified TLS, so hashes embedded in its text are
+// trustworthy even though the script's own download steps keep their
+// cert-tolerant fallbacks (--insecure retry for old CA bundles). Empty hash
+// fields (dev builds without staged binaries) make the scripts fall back to
+// the legacy same-channel .sha256 sidecars.
+type scriptTemplateData struct {
+	HostURL           string
+	AgentSHAAmd64     string
+	AgentSHAArm64     string
+	AgentSHAArmv7     string
+	RatholeSHAX8664   string
+	RatholeSHAAarch64 string
+	RatholeSHAArmv7   string
+}
+
+func scriptDataFor(hostURL string) scriptTemplateData {
+	a := agentdist.All()
+	r := embedbin.RatholeSHA256ByTarget()
+	return scriptTemplateData{
+		HostURL:           hostURL,
+		AgentSHAAmd64:     a["amd64"],
+		AgentSHAArm64:     a["arm64"],
+		AgentSHAArmv7:     a["armv7"],
+		RatholeSHAX8664:   r["x86_64"],
+		RatholeSHAAarch64: r["aarch64"],
+		RatholeSHAArmv7:   r["armv7"],
+	}
+}
+
 func generateBootstrapScript(hostURL string) string {
 	tmpl, err := template.New("bootstrap").Delims("{{", "}}").Parse(bootstrapScriptTmpl)
 	if err != nil {
@@ -278,7 +312,7 @@ func generateBootstrapScript(hostURL string) string {
 		panic("bootstrap template parse error: " + err.Error())
 	}
 	var buf strings.Builder
-	if err := tmpl.Execute(&buf, struct{ HostURL string }{HostURL: hostURL}); err != nil {
+	if err := tmpl.Execute(&buf, scriptDataFor(hostURL)); err != nil {
 		panic("bootstrap template execute error: " + err.Error())
 	}
 	return buf.String()
