@@ -459,7 +459,7 @@ export default function FirewallPage() {
 
       {/* Mode switch dialog */}
       {showModeDialog && (
-        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
+        <div className="fixed inset-0 !mt-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg">
             <div className="p-4 border-b">
               <h2 className="text-lg font-semibold text-gray-900">Change Firewall Mode</h2>

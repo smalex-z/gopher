@@ -49,7 +49,7 @@ export default function AddPrivateKeyButton({ id, name, className, children }: A
         {children ?? <KeyRound size={14} />}
       </button>
       {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+        <div className="fixed inset-0 !mt-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 space-y-4">
             <div className="flex items-center gap-2 text-gray-700">
               <KeyRound size={16} />

@@ -690,7 +690,7 @@ export default function MachinesPage() {
       {/* Bootstrap Config Modal */}
       {/* Bootstrap New Machine — combined config + command modal */}
       {bootstrapModal.isOpen && (
-        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
+        <div className="fixed inset-0 !mt-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl">
             <div className="flex items-center justify-between p-4 border-b">
               <h2 className="text-lg font-semibold">Bootstrap New Machine</h2>
@@ -864,7 +864,7 @@ export default function MachinesPage() {
           Closes automatically once HealthService detects the agent is up
           (Machine.agent_installed flips true via the health poll loop). */}
       {agentInstallModal.open && (
-        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
+        <div className="fixed inset-0 !mt-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl">
             <div className="flex items-center justify-between p-4 border-b">
               <h2 className="text-lg font-semibold">Install agent on {agentInstallModal.machineName}</h2>
