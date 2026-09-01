@@ -49,11 +49,11 @@ func checkWSOrigin(r *http.Request) bool {
 	if strings.EqualFold(u.Host, r.Host) {
 		return true
 	}
-	if settings, err := db.GetSettings(); err == nil && settings.Domain != "" {
-		if strings.EqualFold(u.Host, settings.Domain) {
-			return true
-		}
-	}
+	// No allowance for the bare apex domain: the dashboard is never served
+	// there (Caddy routes only router.<domain> and tunnel subdomains), and the
+	// apex frequently hosts an unrelated site on other infrastructure — a page
+	// there is exactly the kind of cross-origin caller this check exists to
+	// refuse. The old allowance was a leftover from the apex-dashboard era.
 	return false
 }
 

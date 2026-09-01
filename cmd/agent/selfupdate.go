@@ -21,6 +21,16 @@ const maxAgentBinaryBytes = 64 << 20 // 64 MiB cap on the downloaded binary
 type selfUpdateRequest struct {
 	BaseURL string `json:"base_url"` // edge URL the origin can reach, e.g. https://router.example.com
 	Version string `json:"version"`  // target version — for logging + same-version no-op
+	// SHA256ByArch maps release arch tag ("amd64", "arm64", "armv7") → expected
+	// hex sha256 of the agent binary the edge serves. It arrives over THIS
+	// request — bearer-authed, riding the noise-encrypted rathole back-channel
+	// — which makes it the trust anchor for the download below: the binary
+	// fetch itself skips TLS verification (IP/self-signed edge certs), so
+	// without a trigger-carried hash an on-path attacker could substitute both
+	// the binary and its same-channel .sha256 sidecar. When this map is
+	// present, the sidecar is not consulted at all. Absent (older edge) →
+	// legacy sidecar behavior.
+	SHA256ByArch map[string]string `json:"sha256_by_arch,omitempty"`
 }
 
 // handleSelfUpdate is the stable, bearer-authed HTTP control endpoint that rolls
@@ -80,19 +90,32 @@ func (s *agentServer) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, http.StatusBadGateway, map[string]string{"error": "download binary: " + err.Error()})
 		return
 	}
-	wantSum, err := download(binURL+".sha256", 4096)
-	if err != nil {
-		httpJSON(w, http.StatusBadGateway, map[string]string{"error": "download checksum: " + err.Error()})
-		return
+	// Resolve the expected checksum. Preferred source: the trigger body itself
+	// (see SHA256ByArch) — authenticated end-to-end, so a MITM on the download
+	// channel can't forge it. Legacy fallback (edge predating trigger-carried
+	// hashes): the .sha256 sidecar from the same channel as the binary, which
+	// only guards against corruption (truncated/half-written downloads), not
+	// substitution.
+	var want string
+	if len(req.SHA256ByArch) > 0 {
+		want = req.SHA256ByArch[archTag]
+		if want == "" {
+			httpJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": "edge provided checksums but none for arch " + archTag + " — refusing unverifiable update",
+			})
+			return
+		}
+	} else {
+		wantSum, err := download(binURL+".sha256", 4096)
+		if err != nil {
+			httpJSON(w, http.StatusBadGateway, map[string]string{"error": "download checksum: " + err.Error()})
+			return
+		}
+		want = firstField(string(wantSum))
 	}
-	// The .sha256 is fetched from the same edge over the same channel, so it
-	// guards integrity-against-corruption (truncated/half-written downloads —
-	// the disk-full class of failure we've hit before), not MITM. The trust
-	// root is the edge plus the per-machine bearer token, same model as
-	// migrate.sh.
 	sum := sha256.Sum256(bin)
 	got := hex.EncodeToString(sum[:])
-	if want := firstField(string(wantSum)); !strings.EqualFold(want, got) {
+	if !strings.EqualFold(want, got) {
 		httpJSON(w, http.StatusUnprocessableEntity, map[string]string{
 			"error": fmt.Sprintf("checksum mismatch: got %s want %s", got, want),
 		})
@@ -140,8 +163,9 @@ func (s *agentServer) httpBearerOK(r *http.Request) bool {
 
 // download fetches up to max bytes from url. TLS verification is skipped to
 // match migrate.sh's curl --insecure (the edge may present an IP/early-boot
-// cert); integrity is enforced by the sha256 check on the binary, and the
-// trigger itself is bearer-authenticated.
+// cert). This channel is therefore untrusted by design: authenticity of a
+// downloaded binary comes from the sha256 carried in the bearer-authed
+// trigger body (SHA256ByArch), never from this transport.
 func download(url string, max int64) ([]byte, error) {
 	client := &http.Client{
 		Timeout: 60 * time.Second,

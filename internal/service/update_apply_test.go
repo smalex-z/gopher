@@ -37,9 +37,14 @@ func releaseAssetName() string {
 
 // startFakeGitHub serves the two API shapes update.go hits plus asset
 // downloads. binary is the fake release binary; sumsLine the SHA256SUMS.txt
-// body ("" = omit the sums asset entirely).
-func startFakeGitHub(t *testing.T, tag string, prerelease bool, binary []byte, sums string) *httptest.Server {
+// body ("" = omit the sums asset entirely). An optional trailing argument is
+// the SHA256SUMS.txt.minisig body ("" / absent = no signature asset).
+func startFakeGitHub(t *testing.T, tag string, prerelease bool, binary []byte, sums string, minisig ...string) *httptest.Server {
 	t.Helper()
+	sig := ""
+	if len(minisig) > 0 {
+		sig = minisig[0]
+	}
 	mux := http.NewServeMux()
 	var srv *httptest.Server
 	release := func() fakeRelease {
@@ -47,6 +52,9 @@ func startFakeGitHub(t *testing.T, tag string, prerelease bool, binary []byte, s
 		r.Assets = append(r.Assets, fakeAsset{Name: releaseAssetName(), URL: srv.URL + "/dl/" + releaseAssetName()})
 		if sums != "" {
 			r.Assets = append(r.Assets, fakeAsset{Name: "SHA256SUMS.txt", URL: srv.URL + "/dl/SHA256SUMS.txt"})
+		}
+		if sig != "" {
+			r.Assets = append(r.Assets, fakeAsset{Name: "SHA256SUMS.txt.minisig", URL: srv.URL + "/dl/SHA256SUMS.txt.minisig"})
 		}
 		return r
 	}
@@ -58,6 +66,8 @@ func startFakeGitHub(t *testing.T, tag string, prerelease bool, binary []byte, s
 	})
 	mux.HandleFunc("/dl/", func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case strings.HasSuffix(r.URL.Path, ".minisig"):
+			fmt.Fprint(w, sig)
 		case strings.HasSuffix(r.URL.Path, "SHA256SUMS.txt"):
 			fmt.Fprint(w, sums)
 		default:
@@ -176,8 +186,8 @@ func TestReleaseAssetNamingContract(t *testing.T) {
 	if got := findAssetURL(&r); got != "https://x/"+releaseAssetName() {
 		t.Errorf("findAssetURL = %q, want the %s asset", got, releaseAssetName())
 	}
-	if got := findChecksumsURL(&r); got != "https://x/SHA256SUMS.txt" {
-		t.Errorf("findChecksumsURL = %q, want the SHA256SUMS.txt asset", got)
+	if name, got := findChecksumsAsset(&r); got != "https://x/SHA256SUMS.txt" || name != "SHA256SUMS.txt" {
+		t.Errorf("findChecksumsAsset = (%q, %q), want the SHA256SUMS.txt asset", name, got)
 	}
 }
 
@@ -242,6 +252,10 @@ func TestUpdateApply_RefusesSameVersionReinstall(t *testing.T) {
 
 func TestUpdateApply_ChecksumMismatchAborts(t *testing.T) {
 	initTestDB(t)
+	// Blank the (possibly baked-in) release key: this test exercises the
+	// checksum path in isolation, and with a key set the unsigned fake
+	// release is refused before the checksum is ever compared.
+	setSigningKey(t, "")
 	sums := fmt.Sprintf("%064d  dist/%s\n", 0, releaseAssetName())
 	srv := startFakeGitHub(t, "v0.2.0", false, []byte("real binary bytes"), sums)
 	pointUpdatesAt(t, srv, "v0.1.0")
@@ -261,8 +275,29 @@ func TestUpdateApply_ChecksumMismatchAborts(t *testing.T) {
 	}
 }
 
+// downloadSmall must reject a response that exceeds its cap rather than
+// silently truncating it — a truncated sums file misdiagnoses later as a
+// signature failure or missing checksum entry.
+func TestDownloadSmall_RefusesOversizedResponse(t *testing.T) {
+	body := strings.Repeat("a", 100)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, err := downloadSmall(srv.Client(), srv.URL, 99); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("downloadSmall over cap = %v, want size-limit error", err)
+	}
+	if data, err := downloadSmall(srv.Client(), srv.URL, 100); err != nil || len(data) != 100 {
+		t.Fatalf("downloadSmall at exactly the cap = (%d bytes, %v), want the full body", len(data), err)
+	}
+}
+
 func TestUpdateApply_VerifiedDownloadReachesInstall(t *testing.T) {
 	initTestDB(t)
+	// Checksum-only path — see TestUpdateApply_ChecksumMismatchAborts.
+	// TestUpdateApply_SignedStableInstalls covers the signed equivalent.
+	setSigningKey(t, "")
 	binary := []byte("the new gopher binary")
 	sum := sha256.Sum256(binary)
 	// Same two-column, dist/-prefixed layout release.yml's sha256sum step emits.

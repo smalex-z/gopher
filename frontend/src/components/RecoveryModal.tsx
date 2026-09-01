@@ -48,7 +48,7 @@ export default function RecoveryModal({ isOpen, onClose, machineID, machineName,
   }
 
   return (
-    <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto">
+    <div className="fixed inset-0 !mt-0 bg-black/60 z-50 overflow-y-auto">
       <div className="flex min-h-full items-center justify-center p-4">
         <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl">
           <div className="flex items-center justify-between p-4 border-b">

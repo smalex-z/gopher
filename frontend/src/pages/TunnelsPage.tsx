@@ -50,7 +50,7 @@ function allowIPDisplay(json: string): string {
 
 export default function TunnelsPage() {
   const qc = useQueryClient()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [modal, setModal] = useState<ModalState>({ isOpen: false })
   const [form, setForm] = useState<FormState>(defaultForm)
   const [nextPortLoading, setNextPortLoading] = useState(false)
@@ -155,11 +155,19 @@ export default function TunnelsPage() {
         setForm({ ...defaultForm, machine_id: machineId })
       })
       .finally(() => {
-        if (!cancelled) setNextPortLoading(false)
+        if (cancelled) return
+        setNextPortLoading(false)
+        // Consume the param (replace, not push) so a reload or back-nav
+        // doesn't reopen the modal. Must happen after the prefill above:
+        // changing the search params re-runs this effect, and the cleanup
+        // would cancel a nextPort() fetch still in flight.
+        const next = new URLSearchParams(searchParams)
+        next.delete('machine')
+        setSearchParams(next, { replace: true })
       })
     setModal({ isOpen: true })
     return () => { cancelled = true }
-  }, [searchParams])
+  }, [searchParams, setSearchParams])
 
   const createMutation = useMutation({
     mutationFn: (d: Partial<FormState>) => tunnelsApi.create(d),
@@ -510,7 +518,7 @@ export default function TunnelsPage() {
       )}
 
       {modal.isOpen && (
-        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
+        <div className="fixed inset-0 !mt-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg">
             <div className="flex items-center justify-between p-4 border-b">
               <h2 className="text-lg font-semibold">{modal.editTunnel ? 'Edit Tunnel' : 'Add Tunnel'}</h2>

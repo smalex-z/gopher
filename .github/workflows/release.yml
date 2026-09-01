@@ -15,8 +15,12 @@ on:
         required: true
         type: string
 
+# Default every job to read-only; only the release job below gets
+# contents:write (it must publish the release). The gate jobs run tests on a
+# GITHUB_TOKEN that cannot touch the repo, so a compromised test dependency
+# or action can't publish or modify anything.
 permissions:
-  contents: write
+  contents: read
 
 env:
   TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -26,7 +30,7 @@ jobs:
     name: Gate / Go tests (-race) + vet
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: Checkout release tag (manual run)
@@ -34,7 +38,7 @@ jobs:
         run: |
           git fetch --tags --force
           git checkout "tags/${TAG}"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
@@ -49,7 +53,7 @@ jobs:
     name: Gate / frontend lint + typecheck + build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: Checkout release tag (manual run)
@@ -57,7 +61,7 @@ jobs:
         run: |
           git fetch --tags --force
           git checkout "tags/${TAG}"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
           cache: 'npm'
@@ -76,7 +80,7 @@ jobs:
     name: Gate / shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: Checkout release tag (manual run)
@@ -96,7 +100,7 @@ jobs:
     name: Gate / integration tests on full artifact
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: Checkout release tag (manual run)
@@ -104,11 +108,11 @@ jobs:
         run: |
           git fetch --tags --force
           git checkout "tags/${TAG}"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
           cache: 'npm'
@@ -136,9 +140,11 @@ jobs:
     name: Build and Release
     needs: [gate-go, gate-frontend, gate-shell, gate-integration]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # publish the GitHub release; every other job stays read-only
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -153,13 +159,13 @@ jobs:
         run: git checkout "tags/${TAG}"
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
           cache: 'npm'
@@ -218,7 +224,7 @@ jobs:
           fi
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ env.TAG }}
           name: ${{ env.TAG }}

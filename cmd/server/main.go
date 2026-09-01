@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/smalex-z/gopher/internal/agentdist"
 	"github.com/smalex-z/gopher/internal/api"
 	"github.com/smalex-z/gopher/internal/api/handlers"
 	"github.com/smalex-z/gopher/internal/build"
@@ -99,6 +100,12 @@ func runServer(args []string) {
 	// no transition can fire while the hook is nil.
 	statusHub := service.NewStatusHub()
 	db.OnStatusChange = statusHub.Publish
+
+	// Publish the embedded agent binaries' hashes before any consumer runs:
+	// the self-update trigger and the bootstrap/migrate script renderers hand
+	// these out over authenticated channels so origins can verify downloads
+	// that otherwise ride cert-tolerant transports.
+	agentdist.SetHashes(computeAgentHashes())
 
 	deploySvc := service.NewDeployService()
 	localSvc := service.NewLocalSetupService(deploySvc.Hub)

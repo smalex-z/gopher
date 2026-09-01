@@ -2,6 +2,18 @@
 
 HOST_URL="{{.HostURL}}"
 
+# Pinned checksums, injected by the edge at render time. They rode the
+# operator's TLS-verified fetch of this script, so they stay authoritative
+# even when the binary downloads below use their cert-tolerant fallbacks
+# (--insecure retry for old CA bundles). Empty on dev builds without staged
+# binaries — the download steps then fall back to the .sha256 sidecars.
+RATHOLE_SHA256_X86_64="{{.RatholeSHAX8664}}"
+RATHOLE_SHA256_AARCH64="{{.RatholeSHAAarch64}}"
+RATHOLE_SHA256_ARMV7="{{.RatholeSHAArmv7}}"
+AGENT_SHA256_AMD64="{{.AgentSHAAmd64}}"
+AGENT_SHA256_ARM64="{{.AgentSHAArm64}}"
+AGENT_SHA256_ARMV7="{{.AgentSHAArmv7}}"
+
 # Parse args: the bootstrap token plus optional flags. --no-ssh provisions an
 # agent-only machine — no SSH back-tunnel, no authorized_keys entry; control runs
 # entirely over the agent. The flag is authoritative: the server honors it
@@ -218,14 +230,29 @@ if ! command -v rathole &>/dev/null && [ ! -f "$HOME/.local/bin/rathole" ]; then
   # instead of downloading a zip from GitHub. The edge serves a raw binary plus a
   # ".sha256" sidecar we verify (no unzip dependency).
   RATHOLE_URL="$HOST_URL/static/rathole/${ARCH}"
+  # Prefer the pinned checksum from the script header (authenticated by the
+  # operator's TLS-verified script fetch); the same-channel .sha256 sidecar is
+  # only a corruption guard and is used only when no pin was injected.
+  case "$ARCH" in
+    x86_64)  RATHOLE_PIN="$RATHOLE_SHA256_X86_64" ;;
+    aarch64) RATHOLE_PIN="$RATHOLE_SHA256_AARCH64" ;;
+    armv7l)  RATHOLE_PIN="$RATHOLE_SHA256_ARMV7" ;;
+    *)       RATHOLE_PIN="" ;;
+  esac
   echo "  Downloading rathole from $RATHOLE_URL ..."
   rm -f /tmp/rathole-dl
   if command -v curl &>/dev/null; then
     curl -fsSL "$RATHOLE_URL" -o /tmp/rathole-dl || { echo "ERROR: rathole download failed"; exit 1; }
-    EXPECTED_SUM=$(curl -fsSL "${RATHOLE_URL}.sha256" 2>/dev/null | awk '{print $1}')
+    EXPECTED_SUM="${RATHOLE_PIN:-$(curl -fsSL "${RATHOLE_URL}.sha256" 2>/dev/null | awk '{print $1}')}"
   else
     wget -q "$RATHOLE_URL" -O /tmp/rathole-dl || { echo "ERROR: rathole download failed"; exit 1; }
-    EXPECTED_SUM=$(wget -qO- "${RATHOLE_URL}.sha256" 2>/dev/null | awk '{print $1}')
+    EXPECTED_SUM="${RATHOLE_PIN:-$(wget -qO- "${RATHOLE_URL}.sha256" 2>/dev/null | awk '{print $1}')}"
+  fi
+  if [ -n "$RATHOLE_PIN" ] && ! command -v sha256sum &>/dev/null; then
+    # A pin exists but we can't check it — fail closed rather than install an
+    # unverifiable binary that a tampered download could have replaced.
+    echo "ERROR: sha256sum not found — cannot verify the rathole download (install coreutils and re-run)"
+    rm -f /tmp/rathole-dl; exit 1
   fi
   if [ -n "$EXPECTED_SUM" ] && command -v sha256sum &>/dev/null; then
     ACTUAL_SUM=$(sha256sum /tmp/rathole-dl | awk '{print $1}')
@@ -345,10 +372,11 @@ echo "  Service installed (system). Check: systemctl status rathole-client"
 if [ -n "$AGENT_TOKEN" ] && [ "$AGENT_TOKEN" != "null" ] && [ -n "$AGENT_PORT" ] && [ "$AGENT_PORT" != "null" ]; then
   echo "Installing gopher-agent..."
   AGENT_ARCH_TAG="linux-amd64"
+  AGENT_PIN=""
   case "$(uname -m)" in
-    x86_64)         AGENT_ARCH_TAG="linux-amd64" ;;
-    aarch64|arm64)  AGENT_ARCH_TAG="linux-arm64" ;;
-    armv7l|armv7)   AGENT_ARCH_TAG="linux-armv7" ;;
+    x86_64)         AGENT_ARCH_TAG="linux-amd64"; AGENT_PIN="$AGENT_SHA256_AMD64" ;;
+    aarch64|arm64)  AGENT_ARCH_TAG="linux-arm64"; AGENT_PIN="$AGENT_SHA256_ARM64" ;;
+    armv7l|armv7)   AGENT_ARCH_TAG="linux-armv7"; AGENT_PIN="$AGENT_SHA256_ARMV7" ;;
     *)
       echo "  WARN: unsupported arch $(uname -m); skipping agent install"
       AGENT_ARCH_TAG=""
@@ -412,6 +440,21 @@ EOF
     if [ ! -s "$AGENT_TMP" ]; then
       echo "  WARN: agent download failed — dashboard's migration tool can finish the install later (token stored at $AGENT_CFG)"
       rm -f "$AGENT_TMP"
+    fi
+    # Verify against the pinned checksum from the script header before the
+    # root-owned install — required because the download above may have used
+    # the cert-tolerant retry. Never install an unverifiable binary when a
+    # pin exists; the dashboard's migration tool remains the recovery path.
+    if [ -s "$AGENT_TMP" ] && [ -n "$AGENT_PIN" ]; then
+      if ! command -v sha256sum >/dev/null 2>&1; then
+        echo "  WARN: sha256sum not found — cannot verify agent download; skipping agent install"
+        rm -f "$AGENT_TMP"
+      elif [ "$(sha256sum "$AGENT_TMP" | awk '{print $1}')" != "$AGENT_PIN" ]; then
+        echo "  WARN: agent checksum mismatch — refusing to install (tampered or partial download)"
+        rm -f "$AGENT_TMP"
+      else
+        echo "  agent checksum verified"
+      fi
     fi
     if [ -s "$AGENT_TMP" ]; then
       $SUDO install -m 0755 -o root -g root "$AGENT_TMP" /usr/local/bin/gopher-agent
