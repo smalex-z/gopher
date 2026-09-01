@@ -224,11 +224,19 @@ jobs:
           fi
 
       - name: Publish GitHub release
+        # Stable tags are created as DRAFTS: the repo has immutable releases
+        # enabled, so a release freezes (assets locked, undeletable) the moment
+        # it is published — the offline minisign signature must therefore be
+        # attached BEFORE publish. scripts/sign-release.sh signs the draft and
+        # flips it live as its final step. Prereleases (alpha/beta) publish
+        # directly, unsigned — the updater tolerates that on those channels,
+        # and immutability freezes them as-is.
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ env.TAG }}
           name: ${{ env.TAG }}
           prerelease: ${{ steps.release_meta.outputs.prerelease }}
+          draft: ${{ steps.release_meta.outputs.prerelease == 'false' }}
           files: |
             dist/gopher-linux-amd64
             dist/gopher-linux-arm64
