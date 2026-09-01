@@ -28,4 +28,4 @@ package build
 // production edge. Tests inject a throwaway keypair here; production code
 // never assigns it. scripts/sign-release.sh greps this assignment for its
 // pre-upload sanity verify — keep the `ReleaseSigningPubKey = "..."` shape.
-var ReleaseSigningPubKey = ""
+var ReleaseSigningPubKey = "RWSWPp2QiyIyyl9oVckRlaysVm0aQGZpZrPd5cqEFjQwx6TX6FhDE50l"
