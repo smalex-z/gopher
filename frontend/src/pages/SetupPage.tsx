@@ -222,7 +222,7 @@ function WildcardDNSHelp({ serverIP }: { serverIP: string }) {
       <ol className="list-decimal px-3 pb-3 pl-8 pt-1 space-y-1.5 text-xs text-gray-600 leading-relaxed border-t border-gray-100">
         <li>Open your DNS provider (where your domain's DNS is hosted).</li>
         <li>Add an <strong>A</strong> record — Name <code>*</code>, Value <code>{ip}</code>, TTL auto.</li>
-        <li>Add a second <strong>A</strong> record — Name <code>@</code>, same value — so the bare domain resolves too.</li>
+        <li>The bare domain (<code>@</code>) is <strong>not</strong> used — leave it pointing wherever your main site lives. Gopher only needs <code>router.</code> and tunnel subdomains, and the wildcard covers both.</li>
         <li>If the record is proxied (e.g. Cloudflare's orange cloud), switch it to “DNS only”.</li>
       </ol>
     </details>

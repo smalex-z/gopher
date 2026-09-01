@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -19,20 +20,27 @@ import (
 // not just "DNS not found." Each check returns a pass/warn/fail/skip status
 // and a human-readable message; the frontend renders them as a checklist.
 //
-// Five checks run in parallel:
+// Six checks run in parallel:
 //
-//  1. wildcard       — query a random subdomain to prove `*.<domain>` exists
+//  1. authoritative  — query router.<domain> + the wildcard probe directly
+//                       against the domain's own nameservers: cache-free
+//                       ground truth. A just-created record is visible here
+//                       instantly, while every cache in the chain can serve a
+//                       stale pre-creation "no such host" for the zone's
+//                       negative TTL (~30 min); those cases are downgraded to
+//                       caches-settling warnings via reconcileCachedNegatives
+//  2. wildcard       — query a random subdomain to prove `*.<domain>` exists
 //                       (vs. router. being an explicit record that happens to
 //                       work while the wildcard itself is broken)
-//  2. router         — query router.<domain> directly via the system resolver
-//  3. propagation    — query router.<domain> against 1.1.1.1, 8.8.8.8, 9.9.9.9
+//  3. router         — query router.<domain> directly via the system resolver
+//  4. propagation    — query router.<domain> against 1.1.1.1, 8.8.8.8, 9.9.9.9
 //                       in parallel and check for cross-resolver consensus —
 //                       catches the "DNS still propagating" case where the
 //                       local cache is correct but public users see stale data
-//  4. ip_match       — when the caller provides an expected_ip, confirm the
+//  5. ip_match       — when the caller provides an expected_ip, confirm the
 //                       resolved IPs include it (catches parking-page IPs and
 //                       stale records pointing at the wrong host)
-//  5. caa            — raw CAA query to see if the domain has restrictive CAA
+//  6. caa            — raw CAA query to see if the domain has restrictive CAA
 //                       records that would block Let's Encrypt issuance
 //                       (the cause of the Dynadot wildcard cert failure)
 
@@ -83,14 +91,15 @@ func RunDNSPreflight(ctx context.Context, domain, expectedIP string) DNSPrefligh
 	probeHost := probePrefix + randomProbeLabel() + "." + domain
 
 	var (
-		wg                          sync.WaitGroup
-		wildcardCheck, routerCheck  DNSCheck
-		propagationCheck, caaCheck  DNSCheck
-		wildcardIPs, routerIPs      []string
-		resolverResults             map[string][]string
+		wg                         sync.WaitGroup
+		wildcardCheck, routerCheck DNSCheck
+		propagationCheck, caaCheck DNSCheck
+		wildcardIPs, routerIPs     []string
+		resolverResults            map[string][]string
+		auth                       authoritativeResult
 	)
 
-	wg.Add(4)
+	wg.Add(5)
 	go func() {
 		defer wg.Done()
 		wildcardCheck, wildcardIPs = checkWildcardA(ctx, probeHost, domain)
@@ -107,16 +116,35 @@ func RunDNSPreflight(ctx context.Context, domain, expectedIP string) DNSPrefligh
 		defer wg.Done()
 		caaCheck = checkCAA(ctx, domain)
 	}()
+	go func() {
+		defer wg.Done()
+		auth = checkAuthoritative(ctx, domain, routerHost, probeHost)
+	}()
 	wg.Wait()
 
+	// The authoritative check is cache-free ground truth: a just-created
+	// record is visible there instantly, while every cache in the chain (the
+	// box's own stub, the cloud provider's recursive resolver, public anycast
+	// shards) can keep serving a pre-creation "no such host" for the zone's
+	// negative TTL (~30 min). Those used to read as hard failures and made
+	// brand-new installs look broken for half an hour — reclassify them as
+	// caches-settling warnings when the records provably exist.
+	wildcardCheck, routerCheck, propagationCheck = reconcileCachedNegatives(
+		wildcardCheck, routerCheck, propagationCheck, auth)
+
 	// IP-match check derives from already-resolved data; build it last.
+	// Authoritative answers outrank cached local ones as the comparison source.
 	resolvedIPs := routerIPs
+	if len(resolvedIPs) == 0 {
+		resolvedIPs = auth.routerIPs
+	}
 	if len(resolvedIPs) == 0 {
 		resolvedIPs = wildcardIPs
 	}
 	ipMatchCheck := buildIPMatchCheck(resolvedIPs, expectedIP, resolverResults)
 
 	checks := []DNSCheck{
+		auth.check,
 		wildcardCheck,
 		routerCheck,
 		propagationCheck,
@@ -124,11 +152,12 @@ func RunDNSPreflight(ctx context.Context, domain, expectedIP string) DNSPrefligh
 		caaCheck,
 	}
 
-	// Overall ok: wildcard must resolve AND router must resolve AND no
-	// fail-status check that would block cert issuance later (CAA / IP mismatch).
-	// Propagation warnings don't block — the user can wait it out.
-	ok := wildcardCheck.Status == DNSCheckPass &&
-		routerCheck.Status == DNSCheckPass &&
+	// Overall ok: the records must exist (authoritative truth counts even
+	// while local caches are stale — cert issuance and visitors don't depend
+	// on this box's resolver) AND nothing that would block cert issuance
+	// later (CAA / IP mismatch) may be failing.
+	ok := (wildcardCheck.Status == DNSCheckPass || auth.wildcardOK) &&
+		(routerCheck.Status == DNSCheckPass || auth.routerOK) &&
 		caaCheck.Status != DNSCheckFail &&
 		ipMatchCheck.Status != DNSCheckFail
 
@@ -141,6 +170,8 @@ func RunDNSPreflight(ctx context.Context, domain, expectedIP string) DNSPrefligh
 	// existing terse-banner code path still has something to show.
 	msg := ""
 	switch {
+	case auth.check.Status == DNSCheckFail:
+		msg = auth.check.Message
 	case routerCheck.Status == DNSCheckFail:
 		msg = routerCheck.Message
 	case wildcardCheck.Status == DNSCheckFail:
@@ -159,6 +190,117 @@ func RunDNSPreflight(ctx context.Context, domain, expectedIP string) DNSPrefligh
 		Message:    msg,
 		Checks:     checks,
 	}
+}
+
+// authoritativeResult carries what the domain's own nameservers say — the
+// cache-free ground truth the other checks are reconciled against.
+type authoritativeResult struct {
+	check      DNSCheck
+	routerOK   bool
+	wildcardOK bool
+	routerIPs  []string
+}
+
+// checkAuthoritative queries router.<domain> and the wildcard probe directly
+// against the domain's authoritative nameservers (discovered via a public
+// resolver — NS delegations are long-lived and effectively never freshly
+// negative-cached). Answers here are immune to the stale-"no such host"
+// problem entirely.
+func checkAuthoritative(ctx context.Context, domain, routerHost, probeHost string) authoritativeResult {
+	skip := func(msg string) authoritativeResult {
+		return authoritativeResult{check: DNSCheck{
+			Name:    "authoritative",
+			Label:   "Records at your DNS provider",
+			Status:  DNSCheckSkip,
+			Message: msg,
+		}}
+	}
+
+	nsCtx, cancel := context.WithTimeout(ctx, dnsCheckTimeout)
+	defer cancel()
+	nss, err := resolverAt("1.1.1.1").LookupNS(nsCtx, domain)
+	if err != nil || len(nss) == 0 {
+		return skip("Could not determine the domain's nameservers — skipping the authoritative check.")
+	}
+	if len(nss) > 2 {
+		nss = nss[:2] // two independent NS answers are plenty
+	}
+
+	res := authoritativeResult{}
+	definitiveRouterNX, definitiveProbeNX := false, false
+	var nsNames []string
+	for _, ns := range nss {
+		nsHost := strings.TrimSuffix(ns.Host, ".")
+		nsIPs := resolveAt(ctx, nsHost, "1.1.1.1")
+		if len(nsIPs) == 0 {
+			continue
+		}
+		nsNames = append(nsNames, nsHost)
+		if ips, rerr := resolveAtErr(ctx, routerHost, nsIPs[0]); len(ips) > 0 {
+			res.routerOK = true
+			if len(res.routerIPs) == 0 {
+				res.routerIPs = ips
+			}
+		} else if isDNSNotFound(rerr) {
+			definitiveRouterNX = true
+		}
+		if ips, perr := resolveAtErr(ctx, probeHost, nsIPs[0]); len(ips) > 0 {
+			res.wildcardOK = true
+		} else if isDNSNotFound(perr) {
+			definitiveProbeNX = true
+		}
+	}
+
+	switch {
+	case res.routerOK && res.wildcardOK:
+		res.check = DNSCheck{
+			Name:    "authoritative",
+			Label:   "Records at your DNS provider",
+			Status:  DNSCheckPass,
+			Message: fmt.Sprintf("Your nameservers (%s) serve the wildcard record — DNS is set up correctly.", strings.Join(nsNames, ", ")),
+		}
+	case res.routerOK || res.wildcardOK:
+		res.check = DNSCheck{
+			Name:    "authoritative",
+			Label:   "Records at your DNS provider",
+			Status:  DNSCheckWarn,
+			Message: "Your nameservers serve some but not all expected records — check that the *.-wildcard A record exists.",
+		}
+	case definitiveRouterNX && definitiveProbeNX:
+		res.check = DNSCheck{
+			Name:    "authoritative",
+			Label:   "Records at your DNS provider",
+			Status:  DNSCheckFail,
+			Message: fmt.Sprintf("Your nameservers (%s) have no record for *.%s yet — add the wildcard A record at your DNS provider.", strings.Join(nsNames, ", "), domain),
+		}
+	default:
+		return skip("Could not query the domain's nameservers directly — skipping the authoritative check.")
+	}
+	return res
+}
+
+// reconcileCachedNegatives downgrades stale-cache failures to informational
+// warnings when the authoritative check proves the records exist. Field case
+// (2026-09-01, an OCI install): a record created minutes earlier was already
+// perfect at the nameservers, but the box's stub, Oracle's VCN resolver, and
+// scattered public anycast shards kept serving the pre-creation "no such
+// host" for the zone's negative TTL — half an hour of red errors and flapping
+// counts over a working setup, which is exactly how an installer gives up.
+func reconcileCachedNegatives(wildcard, router, propagation DNSCheck, auth authoritativeResult) (DNSCheck, DNSCheck, DNSCheck) {
+	const settling = "This clears on its own (typically within ~30 minutes) and does not block setup — certificates and visitors don't use this server's DNS cache."
+	if auth.wildcardOK && wildcard.Status == DNSCheckFail {
+		wildcard.Status = DNSCheckWarn
+		wildcard.Message = "Your DNS provider serves the wildcard, but this server's resolver still has a cached “no such host” from before the record existed. " + settling
+	}
+	if auth.routerOK && router.Status == DNSCheckFail {
+		router.Status = DNSCheckWarn
+		router.Message = "Your DNS provider serves this record, but this server's resolver still has a cached “no such host” from before the record existed. " + settling
+	}
+	if auth.routerOK && propagation.Status != DNSCheckPass {
+		propagation.Status = DNSCheckWarn
+		propagation.Message = "The record is live at your DNS provider; some public resolver caches are still settling (they cached “no such host” before the record existed, so this count can fluctuate). " + settling
+	}
+	return wildcard, router, propagation
 }
 
 func randomProbeLabel() string {
@@ -410,24 +552,39 @@ func checkCAA(ctx context.Context, domain string) DNSCheck {
 
 // ---- helpers ----------------------------------------------------------------
 
+// resolverAt returns a resolver pinned to one upstream server (a public
+// resolver, or an authoritative nameserver's IP).
+func resolverAt(addr string) *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			d := net.Dialer{Timeout: dnsCheckTimeout}
+			return d.DialContext(ctx, network, net.JoinHostPort(addr, "53"))
+		},
+	}
+}
+
 // resolveAt queries a specific upstream resolver for A records. Returns nil
 // on error (callers use len() to detect failure — caller doesn't care about
 // the error type, just whether an answer came back).
 func resolveAt(ctx context.Context, host, resolverAddr string) []string {
-	r := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			d := net.Dialer{Timeout: dnsCheckTimeout}
-			return d.DialContext(ctx, network, net.JoinHostPort(resolverAddr, "53"))
-		},
-	}
+	ips, _ := resolveAtErr(ctx, host, resolverAddr)
+	return ips
+}
+
+// resolveAtErr is resolveAt with the error preserved, for callers that must
+// tell a definitive NXDOMAIN apart from a timeout or network failure.
+func resolveAtErr(ctx context.Context, host, resolverAddr string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, dnsCheckTimeout)
 	defer cancel()
-	ips, err := r.LookupHost(ctx, host)
-	if err != nil {
-		return nil
-	}
-	return ips
+	return resolverAt(resolverAddr).LookupHost(ctx, host)
+}
+
+// isDNSNotFound reports a definitive "this name does not exist" answer, as
+// opposed to a resolver that couldn't be asked.
+func isDNSNotFound(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
 }
 
 func sameIPSet(a, b []string) bool {
