@@ -94,7 +94,9 @@ export default function TunnelsPage() {
       rathole_port: t.rathole_port,
       transport: t.transport ?? 'tcp',
       no_tls: t.no_tls ?? false,
-      private: t.private ?? false,
+      // Legacy Proxied-UDP rows (created before the form pinned UDP to
+      // Direct) normalize on their next edit-save.
+      private: (t.transport ?? 'tcp') === 'udp' ? false : (t.private ?? false),
       tls_skip_verify: t.tls_skip_verify ?? false,
       bot_protection_enabled: t.bot_protection_enabled ?? false,
       bot_protection_ttl: t.bot_protection_ttl ?? 0,
@@ -451,8 +453,8 @@ export default function TunnelsPage() {
                                 {t.kind !== 'machine-agent' && (
                                 <button
                                   onClick={() => togglePrivate(t)}
-                                  disabled={updateMutation.isPending || t.bot_protection_enabled || t.auth_enabled}
-                                  title={(t.bot_protection_enabled || t.auth_enabled) ? 'Gated tunnels must stay Proxied — use Edit to change visibility' : (isPrivate ? 'Switch to Direct (open a raw port)' : 'Switch to Proxied (Caddy/localhost only)')}
+                                  disabled={updateMutation.isPending || t.bot_protection_enabled || t.auth_enabled || t.transport === 'udp'}
+                                  title={t.transport === 'udp' ? 'UDP tunnels are always Direct — Caddy routes HTTP/HTTPS only' : (t.bot_protection_enabled || t.auth_enabled) ? 'Gated tunnels must stay Proxied — use Edit to change visibility' : (isPrivate ? 'Switch to Direct (open a raw port)' : 'Switch to Proxied (Caddy/localhost only)')}
                                   className={`p-1.5 rounded border disabled:opacity-40 disabled:cursor-not-allowed ${isPrivate
                                     ? 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
                                     : 'bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-gray-600'}`}
@@ -543,7 +545,7 @@ export default function TunnelsPage() {
                 <div className="flex gap-2">
                   {(['tcp', 'udp'] as const).map(t => (
                     <button key={t} type="button"
-                      onClick={() => setForm(f => ({ ...f, transport: t, ...(t === 'udp' ? { subdomain: '', no_tls: false } : {}) }))}
+                      onClick={() => setForm(f => ({ ...f, transport: t, ...(t === 'udp' ? { subdomain: '', no_tls: false, private: false, bot_protection_enabled: false, auth_enabled: false } : {}) }))}
                       className={`px-4 py-1.5 rounded-lg text-sm font-semibold border transition-colors ${
                         form.transport === t
                           ? t === 'udp' ? 'bg-purple-600 text-white border-purple-600' : 'bg-blue-600 text-white border-blue-600'
@@ -601,7 +603,19 @@ export default function TunnelsPage() {
                 </>
               )}
 
-              {/* Visibility — editable in both create AND edit (privacy can change post-creation) */}
+              {/* Visibility — editable in both create AND edit (privacy can change post-creation).
+                  UDP is pinned to Direct: Proxied means "bind 127.0.0.1, reach it through
+                  Caddy", and Caddy routes HTTP/HTTPS only — a Proxied UDP port would be
+                  reachable from nowhere but the VPS itself. */}
+              {form.transport === 'udp' ? (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Visibility</label>
+                  <p className="flex items-start gap-1.5 text-xs text-gray-500">
+                    <Globe size={13} className="mt-0.5 shrink-0 text-gray-400" />
+                    UDP tunnels are always Direct — a raw port open on all interfaces. Proxied needs Caddy, which routes HTTP/HTTPS only.
+                  </p>
+                </div>
+              ) : (
               <div>
                 <div className="flex items-center gap-1 mb-2">
                   <label className="block text-sm font-medium text-gray-700">Visibility</label>
@@ -630,6 +644,7 @@ export default function TunnelsPage() {
                   ))}
                 </div>
               </div>
+              )}
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>

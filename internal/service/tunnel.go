@@ -269,6 +269,12 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 	// otherwise they're trivially bypassed by hitting the rathole port directly.
 	// Both imply (and enforce) private.
 	private := req.Private || botProtection || authProtection
+	// UDP is always Direct: "private" means the rathole port binds 127.0.0.1
+	// and the tunnel is served through Caddy — which routes HTTP/HTTPS only,
+	// so a private UDP tunnel would be reachable from nowhere but the VPS.
+	if transport == "udp" {
+		private = false
+	}
 
 	// A newly-enabled password gate must be given a password.
 	authHash := ""
@@ -443,6 +449,11 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 	tunnel.Name = req.Name
 	tunnel.LocalPort = req.LocalPort
 	tunnel.Private = req.Private
+	// UDP is always Direct — same coercion as Create: Caddy can't serve a
+	// loopback-bound UDP port, so private would mean unreachable.
+	if tunnel.Transport == "udp" {
+		tunnel.Private = false
+	}
 	// Private tunnels KEEP their subdomain — "private" means the rathole port
 	// binds to 127.0.0.1 (no raw public port), but the tunnel is still served
 	// via its Caddy subdomain (reverse-proxy-only). Clearing the subdomain here
