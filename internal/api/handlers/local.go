@@ -285,7 +285,7 @@ func (h *LocalHandler) DownloadSSHKey(w http.ResponseWriter, r *http.Request) {
 	// Audit-log the successful download so the operator can see exactly which
 	// key was pulled and from where, alongside the failed attempts (logged
 	// inside VerifySensitiveOp).
-	h.auth.LogAuditEvent("SSH_KEY_DOWNLOADED", fmt.Sprintf("%s key=%s", ip, id))
+	h.auth.LogAuditEvent("SSH_KEY_DOWNLOADED", ip+" "+sshKeyAuditRef(id))
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="gopher_id_rsa"`)
@@ -328,12 +328,25 @@ func (h *LocalHandler) DeletePrivateKey(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := chi.URLParam(r, "id")
+	// Resolve the ref before mutating so the event carries the name even if
+	// the record's lifecycle changes underneath us.
+	keyRef := sshKeyAuditRef(id)
 	if err := h.svc.DeletePrivateKey(id); err != nil {
 		response.BadRequest(w, err.Error())
 		return
 	}
-	h.auth.LogAuditEvent("SSH_KEY_PRIVATE_DELETED", fmt.Sprintf("%s key=%s", ip, id))
+	h.auth.LogAuditEvent("SSH_KEY_PRIVATE_DELETED", ip+" "+keyRef)
 	response.Success(w, map[string]string{"message": "private key deleted; public key kept"})
+}
+
+// sshKeyAuditRef renders `key=<id> name="<name>"` for audit-event details.
+// The name is resolved at emission time, not display time — audit events
+// outlive key records, and a bare ID is unreadable once the row is deleted.
+func sshKeyAuditRef(id string) string {
+	if k, err := db.GetSSHKey(id); err == nil && k != nil {
+		return fmt.Sprintf("key=%s name=%q", id, k.Name)
+	}
+	return "key=" + id
 }
 
 // GET /api/local/ssh-keys/challenge-info — tells the dashboard which credential

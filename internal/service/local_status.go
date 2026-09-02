@@ -1042,6 +1042,29 @@ func detectHostIPs() []string {
 	return ips
 }
 
+// hostHasIP reports whether the target IP is assigned to any local interface
+// (loopback included — deliberately: binding everything to 127.0.0.1 is a
+// legitimate "nothing public" configuration).
+func hostHasIP(target net.IP) bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return true // can't enumerate — don't lock the operator out over a lookup failure
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip != nil && ip.Equal(target) {
+			return true
+		}
+	}
+	return false
+}
+
 // SetBindIP persists the bind IP, immediately reconciles rathole + Caddy, and
 // schedules a self-restart so the HTTP server rebinds (0.0.0.0 ↔ 127.0.0.1).
 func (s *LocalSetupService) SetBindIP(bindIP string) error {
@@ -1055,6 +1078,18 @@ func (s *LocalSetupService) SetBindIP(bindIP string) error {
 		// rathole reconcile. Only IPv4 bind addresses are supported.
 		if ip.To4() == nil {
 			return fmt.Errorf("bind IP must be IPv4: %q is IPv6, which rathole bind_addr does not support here", bindIP)
+		}
+		// The IP must actually be assigned to an interface. On cloud VPSes the
+		// public IP is often 1:1 NAT and NOT on the NIC — binding it fails, and
+		// the failure mode is a full lockout: rathole and Caddy can't bind
+		// (every tunnel down) while the dashboard retreats to 127.0.0.1, and
+		// undoing it needs SSH. Refuse up front and name the real choices.
+		if !hostHasIP(ip) {
+			hint := "check `ip addr` on the VPS"
+			if ips := detectHostIPs(); len(ips) > 0 {
+				hint = "this host has: " + strings.Join(ips, ", ")
+			}
+			return fmt.Errorf("IP %s is not assigned to any interface on this host, so nothing could bind to it (cloud public IPs are often 1:1 NAT — use the interface IP; %s)", bindIP, hint)
 		}
 	}
 	if err := db.MutateSettings(func(s *db.AppSettings) error {

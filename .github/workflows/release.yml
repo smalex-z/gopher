@@ -237,6 +237,11 @@ jobs:
           name: ${{ env.TAG }}
           prerelease: ${{ steps.release_meta.outputs.prerelease }}
           draft: ${{ steps.release_meta.outputs.prerelease == 'false' }}
+          # Stable drafts carry a one-line banner against publishing from the
+          # UI — doing so would freeze the release unsigned (immutable
+          # releases), permanently refused by every updater, burning the
+          # version number. sign-release.sh strips the line when it publishes.
+          body: ${{ steps.release_meta.outputs.prerelease == 'false' && '⚠️ DO NOT publish this draft from the GitHub UI — immutable releases freeze on publish, and an unsigned stable release is permanently refused by every updater. Run scripts/sign-release.sh instead; it signs and publishes atomically.' || '' }}
           files: |
             dist/gopher-linux-amd64
             dist/gopher-linux-arm64

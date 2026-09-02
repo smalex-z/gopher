@@ -109,7 +109,12 @@ gh release upload "$TAG" "$TMP/SHA256SUMS.txt.minisig" --repo "$REPO" --clobber
 
 if [ "$IS_DRAFT" = "true" ]; then
   echo "→ Publishing $TAG (release becomes immutable now)..."
-  gh release edit "$TAG" --repo "$REPO" --draft=false
+  # Drop the do-not-publish banner the workflow put on the draft — it has
+  # served its purpose once we are the ones publishing. Notes stay editable
+  # on immutable releases, but leave them clean from the start.
+  BODY="$(gh release view "$TAG" --repo "$REPO" --json body --jq .body)"
+  CLEANED="$(printf '%s\n' "$BODY" | grep -v '^⚠️ DO NOT publish this draft' || true)"
+  gh release edit "$TAG" --repo "$REPO" --draft=false --notes-file - <<<"$CLEANED"
   echo "✓ Release $TAG signed and published."
 else
   echo "✓ Signature uploaded to already-published $TAG."

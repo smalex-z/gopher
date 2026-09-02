@@ -5,6 +5,7 @@ import { Network, ChevronDown, ChevronRight, ClipboardCopy, ArrowRight, Globe, L
 import { tunnelsApi } from '../api/tunnels'
 import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
+import ServerPortInput, { type PortCheck } from '../components/ServerPortInput'
 import StatusBadge from '../components/StatusBadge'
 import TunnelHealthCell from '../components/TunnelHealthCell'
 import { toast } from '../lib/toast'
@@ -57,18 +58,13 @@ export default function TunnelsPage() {
   const [searchTerm, setSearchTerm] = useState('')
   const [botAdvancedOpen, setBotAdvancedOpen] = useState(false)   // collapsed by default (defaults are fine)
   const [authAdvancedOpen, setAuthAdvancedOpen] = useState(false)
-  // Live server-port availability from the backend (DB + OS probe). The browser
-  // can't probe the VPS itself, so we ask the API as the operator types — this
-  // catches ports held by a process (rathole's 2333, Caddy, the dashboard) that
-  // the client-side DB check can't see, and blocks Create before submit.
-  const [portCheck, setPortCheck] = useState<{ port: number; available: boolean; reason: string } | null>(null)
+  // Live server-port availability, mirrored up from ServerPortInput's
+  // debounced /tunnels/check-port probe via onCheck — kept in page state
+  // because Create's submit gate needs it, not just the input's styling.
+  const [portCheck, setPortCheck] = useState<PortCheck | null>(null)
   // Ports openAddModal / the deep-link effect already got from nextPort() —
-  // the backend's own allocator — so the debounced check below can skip
-  // re-verifying them until the operator actually changes the value. A ref,
-  // not state: it must be readable inside the debounce effect without being
-  // a dependency (adding portCheck itself there would re-fire the effect
-  // every time a check resolves, looping forever whenever a port turns out
-  // unavailable).
+  // the backend's own allocator — passed to ServerPortInput as skipCheckFor
+  // so it doesn't re-ask about a port the server itself just handed out.
   const verifiedPortRef = useRef<number | null>(null)
 
   const openAddModal = async (machineId?: string) => {
@@ -98,7 +94,9 @@ export default function TunnelsPage() {
       rathole_port: t.rathole_port,
       transport: t.transport ?? 'tcp',
       no_tls: t.no_tls ?? false,
-      private: t.private ?? false,
+      // Legacy Proxied-UDP rows (created before the form pinned UDP to
+      // Direct) normalize on their next edit-save.
+      private: (t.transport ?? 'tcp') === 'udp' ? false : (t.private ?? false),
       tls_skip_verify: t.tls_skip_verify ?? false,
       bot_protection_enabled: t.bot_protection_enabled ?? false,
       bot_protection_ttl: t.bot_protection_ttl ?? 0,
@@ -178,38 +176,6 @@ export default function TunnelsPage() {
     },
     onError: (e: Error) => toast.error(e.message),
   })
-
-  // Debounced server-port availability check. Only while adding (not editing —
-  // rathole_port isn't editable) and for an in-range port. Re-runs as the port
-  // changes; the stale-guard prevents an old response from clobbering a newer one.
-  //
-  // Also stops once the create mutation is in flight: Create() commits the
-  // tunnel's DB row (claiming the port) before pushing client.toml to the
-  // origin and reloading Caddy — real network I/O that can easily outlast
-  // this 350ms debounce. Without this guard, a check fires mid-submission,
-  // correctly sees the port as taken (by this very submission), and flashes
-  // "port in use" a moment before the create's own success response arrives.
-  //
-  // Also skips re-checking a port openAddModal/the deep-link effect already
-  // marked available: both prefill rathole_port from nextPort(), the
-  // backend's own allocator, which means this effect would otherwise fire on
-  // *every* add — re-asking about a port the server just said was free,
-  // seconds earlier. That redundant round-trip can only ever repeat "yes,
-  // still free" or flash a spurious conflict on the operator's own suggested
-  // port; it never carries new information unless the operator changes it.
-  useEffect(() => {
-    if (!modal.isOpen || modal.editTunnel || createMutation.isPending) { setPortCheck(null); return }
-    const port = form.rathole_port
-    if (!port || port < 1024 || port > 65535) { setPortCheck(null); return }
-    if (verifiedPortRef.current === port) return
-    let cancelled = false
-    const timer = setTimeout(() => {
-      tunnelsApi.checkPort(port)
-        .then(res => { if (!cancelled) setPortCheck({ port, available: res.available, reason: res.reason }) })
-        .catch(() => { if (!cancelled) setPortCheck(null) })
-    }, 350)
-    return () => { cancelled = true; clearTimeout(timer) }
-  }, [form.rathole_port, modal.isOpen, modal.editTunnel, createMutation.isPending])
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => tunnelsApi.delete(id),
@@ -487,8 +453,8 @@ export default function TunnelsPage() {
                                 {t.kind !== 'machine-agent' && (
                                 <button
                                   onClick={() => togglePrivate(t)}
-                                  disabled={updateMutation.isPending || t.bot_protection_enabled || t.auth_enabled}
-                                  title={(t.bot_protection_enabled || t.auth_enabled) ? 'Gated tunnels must stay Proxied — use Edit to change visibility' : (isPrivate ? 'Switch to Direct (open a raw port)' : 'Switch to Proxied (Caddy/localhost only)')}
+                                  disabled={updateMutation.isPending || t.bot_protection_enabled || t.auth_enabled || t.transport === 'udp'}
+                                  title={t.transport === 'udp' ? 'UDP tunnels are always Direct — Caddy routes HTTP/HTTPS only' : (t.bot_protection_enabled || t.auth_enabled) ? 'Gated tunnels must stay Proxied — use Edit to change visibility' : (isPrivate ? 'Switch to Direct (open a raw port)' : 'Switch to Proxied (Caddy/localhost only)')}
                                   className={`p-1.5 rounded border disabled:opacity-40 disabled:cursor-not-allowed ${isPrivate
                                     ? 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
                                     : 'bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-gray-600'}`}
@@ -535,9 +501,6 @@ export default function TunnelsPage() {
               const serverPortOSConflict = !isEdit && portCheck !== null &&
                 portCheck.port === form.rathole_port && !portCheck.available
               const serverPortConflict = serverPortDbConflict || serverPortOSConflict
-              const serverPortMessage = serverPortDbConflict
-                ? `Port ${form.rathole_port} is already in use by another tunnel.`
-                : (serverPortOSConflict ? portCheck!.reason : '')
               const localPortConflict = !isEdit && form.local_port > 0 && form.machine_id !== '' &&
                 tunnels.some(t => t.machine_id === form.machine_id && t.local_port === form.local_port)
               // Password protection needs a password: either one already exists
@@ -582,7 +545,7 @@ export default function TunnelsPage() {
                 <div className="flex gap-2">
                   {(['tcp', 'udp'] as const).map(t => (
                     <button key={t} type="button"
-                      onClick={() => setForm(f => ({ ...f, transport: t, ...(t === 'udp' ? { subdomain: '', no_tls: false } : {}) }))}
+                      onClick={() => setForm(f => ({ ...f, transport: t, ...(t === 'udp' ? { subdomain: '', no_tls: false, private: false, bot_protection_enabled: false, auth_enabled: false } : {}) }))}
                       className={`px-4 py-1.5 rounded-lg text-sm font-semibold border transition-colors ${
                         form.transport === t
                           ? t === 'udp' ? 'bg-purple-600 text-white border-purple-600' : 'bg-blue-600 text-white border-blue-600'
@@ -623,31 +586,36 @@ export default function TunnelsPage() {
                   Server Port
                   <span className="ml-1 font-normal text-gray-400 text-xs">(port on your VPS — 1024–65535)</span>
                 </label>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-500 font-mono shrink-0 truncate max-w-[160px]" title={displayHost ?? 'server'}>{displayHost ?? 'server'}:</span>
-                  <input
-                    type="number"
-                    min={1024}
-                    max={65535}
-                    value={form.rathole_port || ''}
-                    onChange={e => setForm(f => ({ ...f, rathole_port: Number(e.target.value) }))}
-                    className={`flex-1 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 border ${
-                      serverPortConflict
-                        ? 'border-red-400 focus:ring-red-400 bg-red-50'
-                        : 'border-gray-300 focus:ring-blue-500'
-                    }`}
-                  />
-                </div>
-                {serverPortConflict && (
-                  <p className="text-xs text-red-600 mt-1 flex items-center gap-1">
-                    ⚠ {serverPortMessage}
-                  </p>
-                )}
+                {/* paused during the create mutation: Create() claims the port
+                    in the DB before its network I/O finishes, so a check firing
+                    mid-submission would flash "port in use" against our own
+                    in-flight request. */}
+                <ServerPortInput
+                  prefix={displayHost ?? 'server'}
+                  value={form.rathole_port || null}
+                  onChange={p => setForm(f => ({ ...f, rathole_port: p ?? 0 }))}
+                  paused={createMutation.isPending}
+                  skipCheckFor={verifiedPortRef.current}
+                  externalConflict={serverPortDbConflict ? `Port ${form.rathole_port} is already in use by another tunnel.` : undefined}
+                  onCheck={setPortCheck}
+                />
               </div>
                 </>
               )}
 
-              {/* Visibility — editable in both create AND edit (privacy can change post-creation) */}
+              {/* Visibility — editable in both create AND edit (privacy can change post-creation).
+                  UDP is pinned to Direct: Proxied means "bind 127.0.0.1, reach it through
+                  Caddy", and Caddy routes HTTP/HTTPS only — a Proxied UDP port would be
+                  reachable from nowhere but the VPS itself. */}
+              {form.transport === 'udp' ? (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Visibility</label>
+                  <p className="flex items-start gap-1.5 text-xs text-gray-500">
+                    <Globe size={13} className="mt-0.5 shrink-0 text-gray-400" />
+                    UDP tunnels are always Direct — a raw port open on all interfaces. Proxied needs Caddy, which routes HTTP/HTTPS only.
+                  </p>
+                </div>
+              ) : (
               <div>
                 <div className="flex items-center gap-1 mb-2">
                   <label className="block text-sm font-medium text-gray-700">Visibility</label>
@@ -676,6 +644,7 @@ export default function TunnelsPage() {
                   ))}
                 </div>
               </div>
+              )}
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
