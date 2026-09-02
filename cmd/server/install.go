@@ -229,8 +229,15 @@ func runInstall(args []string) error {
 		fmt.Printf("  http://<server-ip>:%d\n", defaultDashboardPort)
 	}
 	fmt.Println()
-	fmt.Println("If your VPS sits behind a cloud firewall (AWS SG, GCP, etc.),")
-	fmt.Printf("  also allow inbound tcp/%d there before opening the URL.\n", defaultDashboardPort)
+	fmt.Println("Cloud firewalls (AWS Security Groups, OCI Security Lists, GCP rules)")
+	fmt.Println("  are a second layer in front of this server that Gopher cannot manage.")
+	fmt.Printf("  Allow inbound tcp/%d there now to reach setup.\n", defaultDashboardPort)
+	fmt.Println()
+	fmt.Println("Simplest long-term: allow ALL inbound TCP at the cloud layer and let")
+	fmt.Println("  Gopher's own firewall (set up in the wizard) do the enforcement —")
+	fmt.Println("  tunnel ports are assigned dynamically, so per-port cloud rules will")
+	fmt.Println("  fight you on every new tunnel. This assumes the VPS is dedicated to")
+	fmt.Println("  Gopher: Docker-published ports bypass the OS firewall entirely.")
 	return nil
 }
 
