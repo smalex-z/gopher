@@ -871,7 +871,10 @@ function BackupSection() {
       <div className="flex items-start gap-3">
         <Database className="w-5 h-5 text-indigo-600 mt-0.5 shrink-0" />
         <div>
-          <h2 className="font-semibold text-gray-900">Backup & restore</h2>
+          <h2 className="font-semibold text-gray-900 flex items-center gap-2">
+            Backup & restore
+            <span className="bg-amber-100 text-amber-700 text-[11px] font-semibold px-1.5 py-0.5 rounded shrink-0">Alpha</span>
+          </h2>
           <p className="text-sm text-gray-500 mt-0.5">
             Download a snapshot of <code className="font-mono text-xs">gopher.db</code> or restore from a previous backup.
             Backups contain SSH private keys and TOTP secrets — store them like you'd store a private key.
