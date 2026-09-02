@@ -102,7 +102,10 @@ func NewRouter(
 				r.Post("/fail2ban/whitelist", securityH.AddWhitelistIP)
 				r.Delete("/fail2ban/whitelist/{ip}", securityH.RemoveWhitelistIP)
 				r.Get("/backup/download", backupH.Download)
-				r.Post("/backup/restore", backupH.Restore)
+				// Restore is disabled for now: a rename-based swap under the live
+				// WAL connection reverts on restart (stale -wal/-shm). Needs a
+				// startup-time swap before re-enabling. Handler kept + guarded.
+				// r.Post("/backup/restore", backupH.Restore)
 			})
 
 			r.Route("/auth/2fa", func(r chi.Router) {
