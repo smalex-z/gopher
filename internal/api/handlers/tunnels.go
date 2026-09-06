@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,14 @@ func (h *TunnelHandler) NextPort(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.Success(w, map[string]int{"port": port})
+}
+
+// CheckPort reports whether an explicit server port is free (DB + live OS
+// probe), so the tunnel form can warn and block submit before Create.
+func (h *TunnelHandler) CheckPort(w http.ResponseWriter, r *http.Request) {
+	port, _ := strconv.Atoi(r.URL.Query().Get("port"))
+	available, reason := h.svc.CheckServerPort(port)
+	response.Success(w, map[string]any{"available": available, "reason": reason})
 }
 
 func (h *TunnelHandler) Create(w http.ResponseWriter, r *http.Request) {

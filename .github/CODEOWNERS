@@ -1,0 +1,4 @@
+# Every path requires review from the repo owner. Combined with the
+# protect-main ruleset's "require code owner review", this makes PR approval
+# from @smalex-z mandatory for all contributors (repo admins bypass).
+* @smalex-z

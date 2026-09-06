@@ -8,23 +8,18 @@ set -euo pipefail
 GOPHER_PORT=8181
 GOPHER_DB="test-config.db"
 COOKIE_JAR=""
+# shellcheck disable=SC2034  # set here, consumed by sourced lib.sh
 GOPHER_PID=""
+GOPHER_LOG=""
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m'
 
-pass() { echo -e "${GREEN}✅ $1${NC}"; }
+# shellcheck disable=SC1091
+source "$(dirname "$0")/lib.sh"
+
 skip() { echo -e "${YELLOW}⚠️  $1${NC}"; }
-fail() { echo -e "${RED}❌ $1${NC}"; exit 1; }
 
-cleanup() {
-    [[ -n "$GOPHER_PID" ]] && kill "$GOPHER_PID" 2>/dev/null || true
-    [[ -n "$COOKIE_JAR" ]] && rm -f "$COOKIE_JAR"
-    rm -f "$GOPHER_DB"
-}
-trap cleanup EXIT
+trap cleanup_gopher_artefacts EXIT
 
 echo "🧪 Config Validation Tests"
 echo "=========================="
@@ -36,23 +31,14 @@ fi
 command -v jq >/dev/null 2>&1 || fail "jq is required but not installed"
 command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 is required but not installed"
 
-rm -f "$GOPHER_DB"
 COOKIE_JAR=$(mktemp /tmp/gopher-cookies.XXXXX)
+# shellcheck disable=SC2034  # set here, consumed by sourced lib.sh
+GOPHER_LOG=$(mktemp /tmp/gopher-stderr.XXXXX)
 
 # ── Start Server ───────────────────────────────────────────────────────────────
 echo ""
 echo "1. Starting Gopher on port $GOPHER_PORT..."
-./gopher --db "$GOPHER_DB" --port "$GOPHER_PORT" >/dev/null 2>&1 &
-GOPHER_PID=$!
-
-for i in $(seq 1 30); do
-    if curl -sf "http://localhost:$GOPHER_PORT/api/status" >/dev/null 2>&1; then
-        pass "Server ready"
-        break
-    fi
-    sleep 0.5
-    [[ $i -eq 30 ]] && fail "Server did not start within 15 seconds"
-done
+start_gopher_with_retry
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 echo ""
@@ -65,15 +51,17 @@ echo "$RESP" | jq -e '.success == true' >/dev/null \
     || fail "Auth setup failed — response: $RESP"
 pass "Auth configured"
 
-# ── Set Domain via local/skip ─────────────────────────────────────────────────
+# ── Set Domain directly ───────────────────────────────────────────────────────
+# The POST /api/local/skip endpoint was removed with the setup-wizard skip flow;
+# the domain is now set only during the full install, which can't run in CI.
+# Write it straight to the settings row (created by the auth-setup step above) —
+# the server reads AppSettings fresh from the DB on every config operation, so a
+# direct update is picked up. busy_timeout waits out the running server's writer.
 echo ""
-echo "3. Configuring domain via local/skip..."
-RESP=$(curl -sf -b "$COOKIE_JAR" \
-    -X POST "http://localhost:$GOPHER_PORT/api/local/skip" \
-    -H "Content-Type: application/json" \
-    -d '{"domain":"example.com"}')
-echo "$RESP" | jq -e '.success == true' >/dev/null \
-    || fail "local/skip failed — response: $RESP"
+echo "3. Configuring domain (example.com)..."
+sqlite3 "$GOPHER_DB" "PRAGMA busy_timeout=5000; UPDATE app_settings SET domain='example.com' WHERE id='singleton';"
+DOMAIN_SET=$(sqlite3 "$GOPHER_DB" "SELECT domain FROM app_settings WHERE id='singleton';")
+[[ "$DOMAIN_SET" == "example.com" ]] || fail "Domain set failed — got: '$DOMAIN_SET'"
 pass "Domain set to example.com"
 
 # ── Create Machine + Tunnel ───────────────────────────────────────────────────
@@ -117,18 +105,21 @@ echo "$CADDYFILE" | grep -q "BEGIN CUSTOM CONFIGURATION" \
     || fail "Caddyfile missing custom configuration sentinel"
 pass "Caddyfile has custom configuration sentinel"
 
-# Optional: validate with caddy if installed
-if command -v caddy >/dev/null 2>&1; then
+# Optional: validate with caddy. Prefer the bundled binary the edge supervises
+# (/opt/gopher/bin/caddy); fall back to a caddy on PATH for legacy installs.
+CADDY_BIN=$(command -v caddy 2>/dev/null || true)
+[ -z "$CADDY_BIN" ] && [ -x /opt/gopher/bin/caddy ] && CADDY_BIN=/opt/gopher/bin/caddy
+if [ -n "$CADDY_BIN" ]; then
     TMPFILE=$(mktemp /tmp/test-XXXXX.Caddyfile)
     echo "$CADDYFILE" > "$TMPFILE"
-    if caddy validate --config "$TMPFILE" >/dev/null 2>&1; then
+    if "$CADDY_BIN" validate --config "$TMPFILE" --adapter caddyfile >/dev/null 2>&1; then
         pass "Caddyfile syntax valid (caddy validate)"
     else
         fail "Caddyfile syntax invalid (caddy validate)"
     fi
     rm -f "$TMPFILE"
 else
-    skip "caddy not installed — skipping syntax validation"
+    skip "caddy binary not found — skipping syntax validation"
 fi
 
 # ── Rathole Server Config Test ────────────────────────────────────────────────

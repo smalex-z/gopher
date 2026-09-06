@@ -22,6 +22,7 @@ func NewRouter(
 	backupSvc *service.BackupService,
 	agentInstaller *service.AgentInstaller,
 	healthSvc *service.HealthService,
+	statusHub *service.StatusHub,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -45,6 +46,7 @@ func NewRouter(
 	backupH := handlers.NewBackupHandler(backupSvc)
 	agentH := handlers.NewAgentHandler(agentInstaller, healthSvc)
 	eventsH := handlers.NewEventsHandler()
+	statusWSH := handlers.NewStatusWSHandler(statusHub)
 
 	// Public: bootstrap script download and machine self-registration
 	r.Get("/static/bootstrap.sh", bootstrapH.ServeScript)
@@ -52,6 +54,9 @@ func NewRouter(
 	r.Get("/static/migrate.sh", bootstrapH.ServeMigrateScript)
 	r.Post("/api/bootstrap", bootstrapH.Register)
 	r.Post("/api/migrate", bootstrapH.Migrate)
+	// Agent dial-home recovery: bearer-authed by the per-machine agent token,
+	// rate-limited per IP like the other public bootstrap endpoints.
+	r.Post("/api/agent/recover-config", bootstrapH.RecoverConfig)
 	// Self-delete: gopher-uninstall on the client posts here with its
 	// per-machine bearer token before tearing down so the dashboard's
 	// machine record disappears alongside the local cleanup.
@@ -94,9 +99,11 @@ func NewRouter(
 		r.Post("/auth/setup", authH.Setup)
 		r.Post("/auth/login", authH.Login)
 		r.Post("/auth/login/2fa", authH.LoginTOTP)
-		r.Get("/local/status", localH.Status)
+		// Boolean-only wizard gating; the full /local/status (host IPs, OS
+		// users, ports, SSH pubkey) moved behind auth — it was a free
+		// recon payload on the public dashboard port.
+		r.Get("/local/setup-state", localH.SetupState)
 		r.Post("/local/install", localH.Install)
-		r.Post("/local/skip", localH.Skip)
 		r.Get("/local/logs/ws", logsH.WebSocketDuringSetup)
 		r.Get("/local/check-dns", localH.CheckDNS)
 		r.Get("/local/resolve-ip", localH.ResolveIP)
@@ -111,6 +118,10 @@ func NewRouter(
 			r.Post("/auth/logout", authH.Logout)
 
 			r.Get("/events", eventsH.List)
+			// Push channel for status badges — machine/tunnel status
+			// transitions stream here so the dashboard doesn't wait out
+			// its poll interval.
+			r.Get("/status/ws", statusWSH.WebSocket)
 
 			r.Route("/security", func(r chi.Router) {
 				r.Get("/stale-tokens", securityH.StaleTokenAttempts)
@@ -122,7 +133,10 @@ func NewRouter(
 				r.Post("/fail2ban/whitelist", securityH.AddWhitelistIP)
 				r.Delete("/fail2ban/whitelist/{ip}", securityH.RemoveWhitelistIP)
 				r.Get("/backup/download", backupH.Download)
-				r.Post("/backup/restore", backupH.Restore)
+				// Restore is disabled for now: a rename-based swap under the live
+				// WAL connection reverts on restart (stale -wal/-shm). Needs a
+				// startup-time swap before re-enabling. Handler kept + guarded.
+				// r.Post("/backup/restore", backupH.Restore)
 			})
 
 			r.Route("/auth/2fa", func(r chi.Router) {
@@ -137,17 +151,21 @@ func NewRouter(
 			r.Post("/bootstrap/token", bootstrapH.GenerateToken)
 
 			r.Route("/local", func(r chi.Router) {
+				r.Get("/status", localH.Status)
 				r.Get("/activity", localH.Activity)
 				r.Post("/reconcile", localH.Reconcile)
 				r.Post("/setup-fail2ban", localH.SetupFail2ban)
+				r.Post("/skip-fail2ban", localH.SkipFail2ban)
 				r.Put("/server-ports", localH.SetServerPorts)
 				r.Put("/bind-ip", localH.SetBindIP)
+				r.Post("/dismiss-custom-services-warning", localH.DismissCustomServicesWarning)
 				r.Route("/firewall", func(r chi.Router) {
 					r.Get("/overview", firewallH.Overview)
 					r.Post("/rules", firewallH.CreateRule)
 					r.Delete("/rules/{id}", firewallH.DeleteRule)
 					r.Get("/live", firewallH.LiveRules)
 					r.Post("/reload", firewallH.Reload)
+					r.Post("/mode", firewallH.SwitchMode)
 				})
 				r.Route("/ssh-keys", func(r chi.Router) {
 					r.Get("/", localH.ListSSHKeys)
@@ -159,6 +177,8 @@ func NewRouter(
 					// of GET so the request body can carry the credential.
 					r.Get("/challenge-info", localH.SSHKeyChallengeInfo)
 					r.Post("/{id}/download", localH.DownloadSSHKey)
+					r.Post("/{id}/delete-private", localH.DeletePrivateKey)
+					r.Post("/{id}/private", localH.AddPrivateKey)
 				})
 				r.Get("/external-api", localH.GetExternalAPIConfig)
 				r.Post("/external-api/rotate", localH.RotateExternalAPIKey)
@@ -167,11 +187,6 @@ func NewRouter(
 
 			r.Route("/vps", func(r chi.Router) {
 				r.Get("/", vpsH.Get)
-				r.Post("/setup", vpsH.Create)
-				r.Put("/", vpsH.Update)
-				r.Delete("/", vpsH.Delete)
-				r.Post("/bootstrap", vpsH.Bootstrap)
-				r.Get("/status", vpsH.Status)
 			})
 
 			r.Route("/machines", func(r chi.Router) {
@@ -183,6 +198,8 @@ func NewRouter(
 				r.Post("/{id}/deploy", machineH.Deploy)
 				r.Get("/{id}/status", machineH.Status)
 				r.Get("/{id}/network-info", machineH.NetworkInfo)
+				r.Get("/{id}/rathole-config", machineH.RatholeConfig)
+				r.Post("/{id}/recover", machineH.Recover)
 				r.Put("/{id}/ssh-key", machineH.ReassignSSHKey)
 				// Agent migration / health
 				r.Get("/agent/pending", agentH.PendingMigrations)
@@ -195,6 +212,7 @@ func NewRouter(
 			r.Route("/tunnels", func(r chi.Router) {
 				r.Get("/", tunnelH.List)
 				r.Get("/next-port", tunnelH.NextPort)
+				r.Get("/port-check", tunnelH.CheckPort)
 				r.Post("/", tunnelH.Create)
 				r.Get("/{id}", tunnelH.Get)
 				r.Put("/{id}", tunnelH.Update)

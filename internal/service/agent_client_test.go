@@ -2,35 +2,68 @@ package service
 
 import (
 	"context"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
+	"net"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+
+	agentpb "github.com/smalex-z/gopher/internal/agentpb"
 	"github.com/smalex-z/gopher/internal/db"
 )
 
-// agentTestServer wires an httptest.Server to a mock machine such that
-// AgentClient.baseURL() points at the test server. The test server's port
-// becomes the machine's AgentRemotePort.
-func agentTestServer(t *testing.T, handler http.Handler) (*httptest.Server, *db.Machine) {
-	t.Helper()
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
+// fakeAgent is a configurable in-process AgentControl gRPC server. Each RPC the
+// tests care about is backed by a closure; unset RPCs return Unimplemented.
+type fakeAgent struct {
+	agentpb.UnimplementedAgentControlServer
+	getConfig func(context.Context, *agentpb.GetRatholeConfigRequest) (*agentpb.RatholeConfig, error)
+	putConfig func(context.Context, *agentpb.RatholeConfig) (*agentpb.PutRatholeConfigResponse, error)
+	uninstall func(context.Context, *agentpb.UninstallRequest) (*agentpb.UninstallResponse, error)
+}
 
-	u, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("parse test server URL: %v", err)
+func (f *fakeAgent) GetRatholeConfig(ctx context.Context, in *agentpb.GetRatholeConfigRequest) (*agentpb.RatholeConfig, error) {
+	if f.getConfig == nil {
+		return nil, status.Error(codes.Unimplemented, "getConfig")
 	}
-	port, err := strconv.Atoi(u.Port())
-	if err != nil {
-		t.Fatalf("parse port: %v", err)
+	return f.getConfig(ctx, in)
+}
+
+func (f *fakeAgent) PutRatholeConfig(ctx context.Context, in *agentpb.RatholeConfig) (*agentpb.PutRatholeConfigResponse, error) {
+	if f.putConfig == nil {
+		return nil, status.Error(codes.Unimplemented, "putConfig")
 	}
-	return srv, &db.Machine{
+	return f.putConfig(ctx, in)
+}
+
+func (f *fakeAgent) Uninstall(ctx context.Context, in *agentpb.UninstallRequest) (*agentpb.UninstallResponse, error) {
+	if f.uninstall == nil {
+		return nil, status.Error(codes.Unimplemented, "uninstall")
+	}
+	return f.uninstall(ctx, in)
+}
+
+// startFakeAgent runs impl on a real loopback gRPC server and returns a machine
+// whose AgentRemotePort points at it (mirroring the rathole back-channel the
+// AgentClient dials in production).
+func startFakeAgent(t *testing.T, impl agentpb.AgentControlServer) *db.Machine {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := grpc.NewServer()
+	agentpb.RegisterAgentControlServer(srv, impl)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	_, portStr, _ := net.SplitHostPort(lis.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+	return &db.Machine{
 		ID:              "test",
 		AgentInstalled:  true,
 		AgentRemotePort: port,
@@ -38,22 +71,29 @@ func agentTestServer(t *testing.T, handler http.Handler) (*httptest.Server, *db.
 	}
 }
 
+// authToken extracts the bearer token from incoming gRPC metadata.
+func authToken(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	vals := md.Get("authorization")
+	if len(vals) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(vals[0], "Bearer ")
+}
+
 func TestAgentClient_GetRatholeConfig_Success(t *testing.T) {
 	const body = "[client]\nremote_addr = \"router:2333\"\n"
-	srv, machine := agentTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/rathole-config" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		if r.Method != http.MethodGet {
-			t.Errorf("expected GET, got %s", r.Method)
-		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-			t.Errorf("missing/wrong bearer header: %q", got)
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = io.WriteString(w, body)
-	}))
-	_ = srv
+	machine := startFakeAgent(t, &fakeAgent{
+		getConfig: func(ctx context.Context, _ *agentpb.GetRatholeConfigRequest) (*agentpb.RatholeConfig, error) {
+			if got := authToken(ctx); got != "test-token" {
+				t.Errorf("missing/wrong bearer token: %q", got)
+			}
+			return &agentpb.RatholeConfig{Toml: body}, nil
+		},
+	})
 
 	got, err := NewAgentClient(machine).GetRatholeConfig(context.Background())
 	if err != nil {
@@ -65,37 +105,33 @@ func TestAgentClient_GetRatholeConfig_Success(t *testing.T) {
 }
 
 func TestAgentClient_GetRatholeConfig_NonOK(t *testing.T) {
-	srv, machine := agentTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"error":"no client.toml"}`)
-	}))
-	_ = srv
+	machine := startFakeAgent(t, &fakeAgent{
+		getConfig: func(context.Context, *agentpb.GetRatholeConfigRequest) (*agentpb.RatholeConfig, error) {
+			return nil, status.Error(codes.NotFound, "no client.toml")
+		},
+	})
 
 	_, err := NewAgentClient(machine).GetRatholeConfig(context.Background())
 	if err == nil {
-		t.Fatal("expected error on 404")
+		t.Fatal("expected error on NotFound")
 	}
-	if !strings.Contains(err.Error(), "404") {
-		t.Errorf("error should mention 404: %v", err)
+	if !strings.Contains(err.Error(), "no client.toml") {
+		t.Errorf("error should surface server detail: %v", err)
 	}
 }
 
 func TestAgentClient_PutRatholeConfig_SendsBodyAndAuth(t *testing.T) {
 	const newConfig = "[client]\nremote_addr = \"router:2333\"\n[client.services.tunnel-x]\n"
 	var seen string
-	srv, machine := agentTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-			t.Errorf("missing/wrong bearer header: %q", got)
-		}
-		b, _ := io.ReadAll(r.Body)
-		seen = string(b)
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"written":true}`)
-	}))
-	_ = srv
+	machine := startFakeAgent(t, &fakeAgent{
+		putConfig: func(ctx context.Context, in *agentpb.RatholeConfig) (*agentpb.PutRatholeConfigResponse, error) {
+			if got := authToken(ctx); got != "test-token" {
+				t.Errorf("missing/wrong bearer token: %q", got)
+			}
+			seen = in.GetToml()
+			return &agentpb.PutRatholeConfigResponse{Written: true}, nil
+		},
+	})
 
 	if err := NewAgentClient(machine).PutRatholeConfig(context.Background(), newConfig); err != nil {
 		t.Fatalf("PutRatholeConfig: %v", err)
@@ -106,15 +142,15 @@ func TestAgentClient_PutRatholeConfig_SendsBodyAndAuth(t *testing.T) {
 }
 
 func TestAgentClient_PutRatholeConfig_NonOK(t *testing.T) {
-	srv, machine := agentTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = io.WriteString(w, `{"error":"disk full"}`)
-	}))
-	_ = srv
+	machine := startFakeAgent(t, &fakeAgent{
+		putConfig: func(context.Context, *agentpb.RatholeConfig) (*agentpb.PutRatholeConfigResponse, error) {
+			return nil, status.Error(codes.Internal, "disk full")
+		},
+	})
 
 	err := NewAgentClient(machine).PutRatholeConfig(context.Background(), "anything")
 	if err == nil {
-		t.Fatal("expected error on 500")
+		t.Fatal("expected error on Internal")
 	}
 	if !strings.Contains(err.Error(), "disk full") {
 		t.Errorf("error should surface server detail: %v", err)
@@ -122,23 +158,21 @@ func TestAgentClient_PutRatholeConfig_NonOK(t *testing.T) {
 }
 
 // updateClientTomlViaAgent runs the read-transform-write loop against a real
-// HTTP test server, exercising the agent path end-to-end on the VPS side.
+// gRPC test server, exercising the agent path end-to-end on the VPS side.
 func TestUpdateClientTomlViaAgent_HappyPath(t *testing.T) {
 	current := "[client]\nremote_addr = \"router:2333\"\n"
 	expected := current + "[client.services.tunnel-new]\n"
 
 	var got string
-	srv, machine := agentTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			_, _ = io.WriteString(w, current)
-		case http.MethodPost:
-			b, _ := io.ReadAll(r.Body)
-			got = string(b)
-			_, _ = io.WriteString(w, `{"written":true}`)
-		}
-	}))
-	_ = srv
+	machine := startFakeAgent(t, &fakeAgent{
+		getConfig: func(context.Context, *agentpb.GetRatholeConfigRequest) (*agentpb.RatholeConfig, error) {
+			return &agentpb.RatholeConfig{Toml: current}, nil
+		},
+		putConfig: func(_ context.Context, in *agentpb.RatholeConfig) (*agentpb.PutRatholeConfigResponse, error) {
+			got = in.GetToml()
+			return &agentpb.PutRatholeConfigResponse{Written: true}, nil
+		},
+	})
 
 	s := &LocalSetupService{}
 	err := s.updateClientTomlViaAgent(machine, func(existing string) (string, error) {
@@ -159,16 +193,15 @@ func TestUpdateClientTomlViaAgent_NoOpSkipsWrite(t *testing.T) {
 	current := "[client]\nremote_addr = \"router:2333\"\n"
 
 	postCalled := false
-	srv, machine := agentTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			_, _ = io.WriteString(w, current)
-		case http.MethodPost:
+	machine := startFakeAgent(t, &fakeAgent{
+		getConfig: func(context.Context, *agentpb.GetRatholeConfigRequest) (*agentpb.RatholeConfig, error) {
+			return &agentpb.RatholeConfig{Toml: current}, nil
+		},
+		putConfig: func(context.Context, *agentpb.RatholeConfig) (*agentpb.PutRatholeConfigResponse, error) {
 			postCalled = true
-			_, _ = io.WriteString(w, `{"written":true}`)
-		}
-	}))
-	_ = srv
+			return &agentpb.PutRatholeConfigResponse{Written: true}, nil
+		},
+	})
 
 	s := &LocalSetupService{}
 	err := s.updateClientTomlViaAgent(machine, func(existing string) (string, error) {
@@ -178,25 +211,19 @@ func TestUpdateClientTomlViaAgent_NoOpSkipsWrite(t *testing.T) {
 		t.Fatalf("updateClientTomlViaAgent: %v", err)
 	}
 	if postCalled {
-		t.Errorf("expected no POST when transform returns identical content")
+		t.Errorf("expected no Put when transform returns identical content")
 	}
 }
 
-func TestAgentClient_Uninstall_Accepts202(t *testing.T) {
-	srv, machine := agentTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if r.URL.Path != "/uninstall" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-			t.Errorf("missing/wrong bearer header: %q", got)
-		}
-		w.WriteHeader(http.StatusAccepted)
-		_, _ = io.WriteString(w, `{"queued":true}`)
-	}))
-	_ = srv
+func TestAgentClient_Uninstall_Success(t *testing.T) {
+	machine := startFakeAgent(t, &fakeAgent{
+		uninstall: func(ctx context.Context, _ *agentpb.UninstallRequest) (*agentpb.UninstallResponse, error) {
+			if got := authToken(ctx); got != "test-token" {
+				t.Errorf("missing/wrong bearer token: %q", got)
+			}
+			return &agentpb.UninstallResponse{Queued: true}, nil
+		},
+	})
 
 	if err := NewAgentClient(machine).Uninstall(context.Background()); err != nil {
 		t.Fatalf("Uninstall: %v", err)
@@ -204,15 +231,15 @@ func TestAgentClient_Uninstall_Accepts202(t *testing.T) {
 }
 
 func TestAgentClient_Uninstall_BubblesError(t *testing.T) {
-	srv, machine := agentTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = io.WriteString(w, `{"error":"missing /usr/local/bin/gopher-uninstall"}`)
-	}))
-	_ = srv
+	machine := startFakeAgent(t, &fakeAgent{
+		uninstall: func(context.Context, *agentpb.UninstallRequest) (*agentpb.UninstallResponse, error) {
+			return nil, status.Error(codes.FailedPrecondition, "missing /usr/local/bin/gopher-uninstall")
+		},
+	})
 
 	err := NewAgentClient(machine).Uninstall(context.Background())
 	if err == nil {
-		t.Fatal("expected error on 500")
+		t.Fatal("expected error")
 	}
 	if !strings.Contains(err.Error(), "missing") {
 		t.Errorf("error should surface server detail: %v", err)
@@ -221,15 +248,18 @@ func TestAgentClient_Uninstall_BubblesError(t *testing.T) {
 
 // Ensure context cancellation propagates so a stuck agent doesn't block forever.
 func TestAgentClient_GetRatholeConfig_RespectsContext(t *testing.T) {
-	srv, machine := agentTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-r.Context().Done():
-		case <-time.After(2 * time.Second):
-		}
-	}))
-	_ = srv
+	machine := startFakeAgent(t, &fakeAgent{
+		getConfig: func(ctx context.Context, _ *agentpb.GetRatholeConfigRequest) (*agentpb.RatholeConfig, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(2 * time.Second):
+				return &agentpb.RatholeConfig{}, nil
+			}
+		},
+	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	_, err := NewAgentClient(machine).GetRatholeConfig(ctx)
 	if err == nil {

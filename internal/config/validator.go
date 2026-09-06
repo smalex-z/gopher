@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/smalex-z/gopher/internal/db"
 )
@@ -10,9 +11,20 @@ import (
 var subdomainRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?$`)
 
 // ValidateSubdomain checks if a string is a valid subdomain
+// reservedSubdomains are labels gopher provisions for itself. Without this
+// check a tunnel named "router" shadows the dashboard's own router.<domain>
+// Caddy block AND gets matched by the gate proxy's tunnel resolution —
+// locking the operator out of their dashboard with no error anywhere.
+var reservedSubdomains = map[string]bool{
+	"router": true, // dashboard vhost (gopher-router.caddy)
+}
+
 func ValidateSubdomain(s string) error {
 	if !subdomainRegex.MatchString(s) {
 		return fmt.Errorf("invalid subdomain: must be lowercase alphanumeric and hyphens only")
+	}
+	if reservedSubdomains[s] {
+		return fmt.Errorf("subdomain %q is reserved for the gopher dashboard", s)
 	}
 	return nil
 }
@@ -128,6 +140,13 @@ func ValidateRatholeConfig(configContent string, expectedMachines []db.Machine, 
 				result.Valid = false
 				result.Errors = append(result.Errors, fmt.Sprintf("Port mismatch for machine %s", id))
 			}
+			// Defense-in-depth: a private machine SSH tunnel must bind loopback.
+			// If a future edit inverted a bind, this catches the public exposure
+			// before the config is written.
+			if !machine.PublicSSH && !strings.HasPrefix(entry.BindAddr, "127.0.0.1:") {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("Private machine %s must bind loopback, got %q", id, entry.BindAddr))
+			}
 		}
 	}
 	for id, machine := range expectedAgentMachineIDs {
@@ -156,7 +175,40 @@ func ValidateRatholeConfig(configContent string, expectedMachines []db.Machine, 
 				result.Valid = false
 				result.Errors = append(result.Errors, fmt.Sprintf("Port mismatch for tunnel %s", id))
 			}
+			if tunnel.Private && !strings.HasPrefix(entry.BindAddr, "127.0.0.1:") {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("Private tunnel %s must bind loopback, got %q", id, entry.BindAddr))
+			}
 		}
+	}
+
+	// Duplicate-listener detection. DB uniqueness is per-column-per-table, so a
+	// tunnel's rathole_port can collide with a machine's tunnel_port or
+	// agent_remote_port across tables — the app-level check races, and rathole
+	// would then silently fail to bind the second listener. gopher only ever
+	// binds a given port on one host (127.0.0.1, 0.0.0.0, or the single bind_ip),
+	// so a shared port always means a real conflict; catch it before writing.
+	seenPort := map[int]string{}
+	checkPort := func(label, bindAddr string) {
+		p := extractPortFromBindAddr(bindAddr)
+		if p == 0 {
+			return
+		}
+		if prev, dup := seenPort[p]; dup {
+			result.Valid = false
+			result.Errors = append(result.Errors, fmt.Sprintf("Duplicate rathole port %d: %s collides with %s", p, label, prev))
+		} else {
+			seenPort[p] = label
+		}
+	}
+	for id, e := range parsed.Machines {
+		checkPort("machine-"+id, e.BindAddr)
+	}
+	for id, e := range parsed.MachineAgents {
+		checkPort("machine-agent-"+id, e.BindAddr)
+	}
+	for id, e := range parsed.Tunnels {
+		checkPort("tunnel-"+id, e.BindAddr)
 	}
 
 	return result

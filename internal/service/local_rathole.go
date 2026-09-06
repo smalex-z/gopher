@@ -10,6 +10,7 @@ import (
 
 	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
+	"github.com/smalex-z/gopher/internal/paths"
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
@@ -23,8 +24,30 @@ func (s *LocalSetupService) AddMachineSSHTunnel(machine *db.Machine) error {
 // Gopher-managed entries (machine SSH tunnels, service tunnels) are placed
 // ABOVE the custom section. The custom section is user-owned and never
 // overwritten — it is the right place for pre-existing or user-added services.
+//
+// Serialized via reconcileMu: this is called concurrently from tunnel/machine
+// create, update, delete, bootstrap, and agent-install with no other
+// coordination between callers. Each call re-reads the full DB state and
+// rewrites the whole file from scratch, so two overlapping calls can
+// interleave such that the one that started first finishes writing last —
+// with a DB snapshot that's now stale relative to the other call's changes.
+// The lock makes every call fully sequential: whichever call runs last
+// always re-reads current state, so the file on disk converges to the truth
+// no matter how many calls raced to get here.
+//
+// MigrateRatholeNoise needs a WIDER hold on this same lock — see its comment
+// — so the actual work lives in reconcileServerConfigLocked, callable by a
+// caller that already holds reconcileMu, without deadlocking on a second Lock.
 func (s *LocalSetupService) ReconcileServerConfig() error {
-	const configPath = "/etc/rathole/server.toml"
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	return s.reconcileServerConfigLocked()
+}
+
+// reconcileServerConfigLocked is ReconcileServerConfig's body, assuming the
+// caller already holds reconcileMu. Do not call this directly unless you do.
+func (s *LocalSetupService) reconcileServerConfigLocked() error {
+	configPath := paths.RatholeConfig
 	const beginMarker = "# ===== BEGIN CUSTOM CONFIGURATION ====="
 	const endMarker = "# ===== END CUSTOM CONFIGURATION ====="
 
@@ -34,21 +57,7 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	}
 
 	content := string(existing)
-
-	// Extract the user-owned custom section.
-	userBody := ""
-	if bIdx := strings.Index(content, beginMarker); bIdx != -1 {
-		below := content[bIdx+len(beginMarker):]
-		if eIdx := strings.Index(below, endMarker); eIdx != -1 {
-			userBody = below[:eIdx]
-		} else {
-			userBody = below
-		}
-	}
-
-	// Strip any gopher-managed entries that old versions may have placed inside
-	// the custom section, then normalise whitespace.
-	userBody = strings.TrimSpace(stripGopherServiceSections(userBody))
+	userBody := extractCustomBody(content, beginMarker, endMarker)
 
 	machines, err := db.GetMachines()
 	if err != nil {
@@ -62,10 +71,12 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 	// Rebuild gopher-managed config from DB using the canonical generator.
 	settings, _ := db.GetSettings()
 	bindIP := ""
+	noisePriv := ""
 	if settings != nil {
 		bindIP = settings.BindIP
+		noisePriv = settings.RatholeNoisePrivKey
 	}
-	managedConfig := config.GenerateRatholeServerConfig(machines, tunnels, bindIP)
+	managedConfig := config.GenerateRatholeServerConfig(machines, tunnels, bindIP, noisePriv)
 
 	// Guardrail: never write a generated config that fails self-validation.
 	validation := config.ValidateRatholeConfig(managedConfig, machines, tunnels)
@@ -96,14 +107,56 @@ func (s *LocalSetupService) ReconcileServerConfig() error {
 		return fmt.Errorf("failed to write %s: %w", configPath, err)
 	}
 
-	// systemctl start is a no-op on an active unit; covers the "not
-	// running" case without forcing a restart on healthy ones. Logged
-	// (not propagated) because the on-disk config IS updated — only the
-	// runtime kick failed, and the next reconcile cycle picks it up.
-	if err := systemctlStart("rathole-server"); err != nil {
-		log.Printf("rathole-server start (post-reconcile) failed: %v", err)
-	}
+	// No restart/start kick: rathole hot-reloads the rewritten server.toml in
+	// place via its inotify notify watcher, and liveness is owned by gopher's
+	// supervisor (which restarts it if it ever exits). We never restart rathole —
+	// that would drop every live tunnel.
 	return nil
+}
+
+// legacyCustomMarkers pairs older wordings of the custom-section banner with
+// the current one. The wrapper text has changed at least once across
+// released versions; a reconcile that only recognises the CURRENT literal
+// string treats a file using older wording as having NO custom section at
+// all — silently dropping any user-added entries (e.g. a hand-added
+// `[server.services.x]` block) on the next rewrite. extractCustomBody falls
+// back through this list so old installs keep their custom content; the
+// caller then re-writes the file under the current marker, which
+// self-heals the convention on this same reconcile pass.
+var legacyCustomMarkers = []struct{ begin, end string }{
+	{"# Add your own rathole service entries here. Gopher will not modify this section.", ""},
+}
+
+// extractCustomBody pulls the user-owned custom section out of an existing
+// server.toml. Tries the current marker first, then falls back through
+// legacyCustomMarkers so a config file predating a marker-wording change
+// doesn't lose its custom content — see legacyCustomMarkers for why this
+// matters. Returns "" (nothing to preserve) only when no marker, current or
+// legacy, is found at all.
+func extractCustomBody(content, beginMarker, endMarker string) string {
+	if bIdx := strings.Index(content, beginMarker); bIdx != -1 {
+		below := content[bIdx+len(beginMarker):]
+		body := below
+		if eIdx := strings.Index(below, endMarker); eIdx != -1 {
+			body = below[:eIdx]
+		}
+		return strings.TrimSpace(stripGopherServiceSections(body))
+	}
+	for _, m := range legacyCustomMarkers {
+		bIdx := strings.Index(content, m.begin)
+		if bIdx == -1 {
+			continue
+		}
+		below := content[bIdx+len(m.begin):]
+		body := below
+		if m.end != "" {
+			if eIdx := strings.Index(below, m.end); eIdx != -1 {
+				body = below[:eIdx]
+			}
+		}
+		return strings.TrimSpace(stripGopherServiceSections(body))
+	}
+	return ""
 }
 
 // stripGopherServiceSections removes only marker-delimited Gopher-managed
@@ -117,11 +170,13 @@ func stripGopherServiceSections(content string) string {
 	for _, line := range strings.Split(content, "\n") {
 		stripped := strings.TrimSpace(line)
 		if strings.HasPrefix(stripped, "# gopher-machine-start:") ||
+			strings.HasPrefix(stripped, "# gopher-machine-agent-start:") ||
 			strings.HasPrefix(stripped, "# gopher-tunnel-start:") {
 			skip = true
 			continue
 		}
 		if strings.HasPrefix(stripped, "# gopher-machine-end:") ||
+			strings.HasPrefix(stripped, "# gopher-machine-agent-end:") ||
 			strings.HasPrefix(stripped, "# gopher-tunnel-end:") {
 			skip = false
 			continue
@@ -159,8 +214,9 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		return fmt.Errorf("failed to load machine tunnels: %w", err)
 	}
 	ratholeHost := ratholeHostFromSettings(settings)
+	noisePub := settings.RatholeNoisePubKey
 	transformer := func(existing string) (string, error) {
-		return mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost)
+		return mergeClientManagedConfig(existing, machine, machineTunnels, ratholeHost, noisePub)
 	}
 	if err := s.updateClientToml(machine, transformer); err != nil {
 		return fmt.Errorf("failed to write client.toml on machine: %w", err)
@@ -171,8 +227,11 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		return fmt.Errorf("failed to update server.toml: %w", err)
 	}
 
-	// --- 3. Update managed Caddy entry if subdomain is set (TCP only; UDP/private have no HTTP routing) ---
-	if tunnel.Subdomain != "" && settings.Domain != "" && tunnel.Transport != "udp" && !tunnel.Private {
+	// --- 3. Update managed Caddy entry if subdomain is set. Private tunnels
+	// still get a Caddy block — they're reverse-proxy-only (Caddy reaches their
+	// 127.0.0.1-bound rathole port), they just have no raw public port. Only
+	// UDP has no HTTP routing. ---
+	if tunnel.Subdomain != "" && settings.Domain != "" && tunnel.Transport != "udp" {
 		if err := ensureManagedCaddyLayout(); err != nil {
 			return fmt.Errorf("failed to prepare Caddy managed layout: %w", err)
 		}
@@ -180,7 +239,7 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 			return fmt.Errorf("failed to write router Caddy file: %w", err)
 		}
 		managedPath := managedTunnelCaddyPath(tunnel.ID)
-		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, settings.BindIP, tunnel.TLSSkipVerify)
+		block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled || tunnel.AuthEnabled, settings.BindIP, tunnel.TLSSkipVerify, tunnel.Private)
 		if err := writeLocalFile(managedPath, block); err != nil {
 			return fmt.Errorf("failed to write tunnel Caddy file %s: %w", managedPath, err)
 		}
@@ -188,7 +247,7 @@ func (s *LocalSetupService) AddServiceTunnel(tunnel *db.Tunnel, machine *db.Mach
 		// custom-config block fails here and the new tunnel never routes.
 		// Propagate so the API returns the failure rather than reporting
 		// success while the subdomain 502s.
-		if err := systemctlReload("caddy"); err != nil {
+		if err := caddyReload(); err != nil {
 			return fmt.Errorf("caddy reload failed: %w", err)
 		}
 	}
@@ -219,18 +278,76 @@ func (s *LocalSetupService) updateClientToml(machine *db.Machine, transform func
 		return fmt.Errorf("nil machine")
 	}
 
+	var pushErr error
 	if machine.AgentInstalled && machine.AgentRemotePort > 0 {
-		if err := s.updateClientTomlViaAgent(machine, transform); err == nil {
+		if pushErr = s.updateClientTomlViaAgent(machine, transform); pushErr == nil {
+			clearConfigPushPending(machine)
 			return nil
-		} else {
-			// Agent failed (network, timeout, permission). Fall back to SSH so
-			// the operation still completes; log so we can spot persistent
-			// agent issues that should be debugged.
-			log.Printf("agent client.toml push failed for machine %s (%s): %v — falling back to SSH", machine.ID, machine.Name, err)
 		}
+		// Agent failed (network, timeout, permission). Fall back to SSH so
+		// the operation still completes; log so we can spot persistent
+		// agent issues that should be debugged.
+		log.Printf("agent client.toml push failed for machine %s (%s): %v — falling back to SSH", machine.ID, machine.Name, pushErr)
 	}
 
-	return s.updateClientTomlViaSSH(machine, transform)
+	// SSH fallback only when a usable private key is stored. When the operator
+	// has deleted the private key (public-only), there's no SSH transport — the
+	// agent is the sole path. Flag ConfigPushPending here (not the caller — no
+	// caller does) so HealthService.maybeRetryConfigPush re-pushes via the agent
+	// once it reconnects; otherwise a transient agent outage during a tunnel
+	// change would leave the origin's client.toml stale forever.
+	if !machineHasSSHPrivateKey(machine) {
+		if err := db.SetMachineConfigPushPending(machine.ID, true); err != nil {
+			log.Printf("mark config_push_pending for %s (%s): %v", machine.ID, machine.Name, err)
+		}
+		if pushErr == nil {
+			pushErr = fmt.Errorf("no agent and no stored SSH private key for %s — config push deferred", machine.Name)
+		}
+		return pushErr
+	}
+
+	if pushErr = s.updateClientTomlViaSSH(machine, transform); pushErr == nil {
+		clearConfigPushPending(machine)
+		return nil
+	}
+	// Both transports failed (agent unreachable or absent, SSH failed too) —
+	// flag the machine so HealthService.maybeRetryConfigPush replays this push
+	// once the machine reports reachable again. Without this, a transient
+	// outage during a tunnel change left client.toml stale forever: the flag
+	// was only ever set in the no-private-key branch above, so machines WITH a
+	// stored key had no retry path at all.
+	if err := db.SetMachineConfigPushPending(machine.ID, true); err != nil {
+		log.Printf("mark config_push_pending for %s (%s): %v", machine.ID, machine.Name, err)
+	}
+	return pushErr
+}
+
+// machineHasSSHPrivateKey reports whether the server holds a usable SSH private
+// key for this machine — i.e. it can still act as an SSH client into the origin.
+// False when no key is assigned or the operator deleted the private half
+// (public-only). Server→origin control runs over the agent; SSH is an optional
+// fallback, so callers gate on this rather than attempting a doomed SSH dial.
+func machineHasSSHPrivateKey(machine *db.Machine) bool {
+	if machine == nil {
+		return false
+	}
+	key, err := db.GetSSHKeyForMachine(machine)
+	return err == nil && key != nil && key.PrivateKey != ""
+}
+
+// clearConfigPushPending is the success-hook for any client.toml push path.
+// Centralised here (not in each push variant) so the agent and SSH transports
+// share the same flag-clear semantics: a config push that lands successfully
+// means the machine is current, regardless of how it got there.
+func clearConfigPushPending(machine *db.Machine) {
+	if machine == nil || !machine.ConfigPushPending {
+		return // fast-path: nothing to clear
+	}
+	if err := db.SetMachineConfigPushPending(machine.ID, false); err != nil {
+		log.Printf("clear config_push_pending for %s (%s): %v", machine.ID, machine.Name, err)
+		return
+	}
+	machine.ConfigPushPending = false
 }
 
 func (s *LocalSetupService) updateClientTomlViaAgent(machine *db.Machine, transform func(existing string) (string, error)) error {
@@ -261,6 +378,12 @@ func (s *LocalSetupService) updateClientTomlViaSSH(machine *db.Machine, transfor
 	if sshKeyErr != nil {
 		return fmt.Errorf("no server SSH key available; machine may need to be re-bootstrapped")
 	}
+	// Don't even attempt SSH without a stored private key — dialing with an empty
+	// key can only fail, and the retry loop below would burn 30s doing it. The
+	// agent is the transport for public-only machines.
+	if sshKey.PrivateKey == "" {
+		return fmt.Errorf("no stored SSH private key (public-only) — config push runs via the agent")
+	}
 	var sshClient *sshpkg.SSHClient
 	var sshDialErr error
 	for attempt := 0; attempt < 6; attempt++ {
@@ -277,7 +400,7 @@ func (s *LocalSetupService) updateClientTomlViaSSH(machine *db.Machine, transfor
 	}
 	defer sshClient.Close()
 
-	existing, err := sshClient.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
+	existing, err := sshClient.Execute("cat " + paths.RatholeClientConfig + " 2>/dev/null || cat " + paths.LegacyRatholeClientConfig + " 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
 	if err != nil {
 		existing = ""
 	}
@@ -286,16 +409,23 @@ func (s *LocalSetupService) updateClientTomlViaSSH(machine *db.Machine, transfor
 		return err
 	}
 
-	// Resolve absolute config path (SFTP cannot expand $HOME).
-	configPath := "/etc/rathole/client.toml"
-	if _, err2 := sshClient.Execute("test -f /etc/rathole/client.toml"); err2 != nil {
-		homeDir, _ := sshClient.Execute("echo $HOME")
-		homeDir = strings.TrimSpace(homeDir)
-		if homeDir == "" {
-			homeDir = "/home/" + machine.Username
+	// Resolve absolute config path (SFTP cannot expand $HOME). Prefer the
+	// consolidated /etc/gopher path (agent-migrated machines), fall back to the
+	// legacy /etc/rathole path (machines without the migrated agent), then the
+	// user-level config for rootless/no-systemd boxes.
+	configPath := paths.RatholeClientConfig
+	if _, err2 := sshClient.Execute("test -f " + paths.RatholeClientConfig); err2 != nil {
+		if _, err3 := sshClient.Execute("test -f " + paths.LegacyRatholeClientConfig); err3 == nil {
+			configPath = paths.LegacyRatholeClientConfig
+		} else {
+			homeDir, _ := sshClient.Execute("echo $HOME")
+			homeDir = strings.TrimSpace(homeDir)
+			if homeDir == "" {
+				homeDir = "/home/" + machine.Username
+			}
+			configPath = homeDir + "/.config/rathole/client.toml"
+			_, _ = sshClient.Execute("mkdir -p " + homeDir + "/.config/rathole")
 		}
-		configPath = homeDir + "/.config/rathole/client.toml"
-		_, _ = sshClient.Execute("mkdir -p " + homeDir + "/.config/rathole")
 	}
 
 	// In-place write: rathole's notify watcher subscribes to the inode of
@@ -333,8 +463,32 @@ func (s *LocalSetupService) RemoveServiceTunnelCaddy(tunnel *db.Tunnel) error {
 			log.Printf("sudo rm of caddy file %s failed: %v", managedPath, err)
 		}
 	}
-	if err := systemctlReload("caddy"); err != nil {
+	if err := caddyReload(); err != nil {
 		log.Printf("caddy reload (post tunnel-remove) failed: %v", err)
+	}
+	return nil
+}
+
+// WriteServiceTunnelCaddy (re)writes the managed conf.d/<id>.caddy block for a
+// tunnel from its current state and reloads Caddy. Mirror of
+// RemoveServiceTunnelCaddy. The caller decides *when* to call it (subdomain set,
+// HTTP, not private); this renders the tunnel as it stands and no-ops when there
+// is no subdomain or no configured domain to route under.
+func (s *LocalSetupService) WriteServiceTunnelCaddy(tunnel *db.Tunnel) error {
+	if tunnel == nil || tunnel.Subdomain == "" {
+		return nil
+	}
+	settings, err := db.GetSettings()
+	if err != nil || settings.Domain == "" {
+		return nil
+	}
+	managedPath := managedTunnelCaddyPath(tunnel.ID)
+	block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled || tunnel.AuthEnabled, settings.BindIP, tunnel.TLSSkipVerify, tunnel.Private)
+	if err := writeLocalFile(managedPath, block); err != nil {
+		return fmt.Errorf("write caddy block for %s: %w", tunnel.ID, err)
+	}
+	if err := caddyReload(); err != nil {
+		return fmt.Errorf("caddy reload failed: %w", err)
 	}
 	return nil
 }
@@ -399,6 +553,9 @@ func (s *LocalSetupService) removeMachineClientViaSSH(machine *db.Machine) error
 	if err != nil {
 		return fmt.Errorf("no server SSH key available")
 	}
+	if sshKey.PrivateKey == "" {
+		return fmt.Errorf("no stored SSH private key (public-only) — client teardown runs via the agent")
+	}
 
 	sshClient, err := sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 	if err != nil {
@@ -414,7 +571,7 @@ func (s *LocalSetupService) removeMachineClientViaSSH(machine *db.Machine) error
 	// Precheck 2: passwordless sudo for the script. `sudo -nl <cmd>` exits 0
 	// only when the user has a NOPASSWD entry for that exact path; otherwise
 	// it prints "a password is required" or "may not run" to stderr and exits
-	// non-zero. Capture that for the operator-visible error message.
+	// non-zero. Capture that for the oper ator-visible error message.
 	if out, perr := sshClient.Execute("sudo -nl /usr/local/bin/gopher-uninstall 2>&1"); perr != nil {
 		return fmt.Errorf("client lacks NOPASSWD sudo for gopher-uninstall (re-run bootstrap to refresh /etc/sudoers.d/gopher; %s): %w", strings.TrimSpace(out), perr)
 	}
@@ -514,7 +671,7 @@ local_addr = "127.0.0.1:%d"
 `, machine.ID, machine.ID, machine.AgentRatholeToken, machine.AgentLocalPort, machine.ID)
 }
 
-func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db.Tunnel, ratholeHost string) (string, error) {
+func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db.Tunnel, ratholeHost, noisePubKey string) (string, error) {
 	base := strings.TrimSpace(existing)
 	if base == "" {
 		ratholeHost = strings.TrimSpace(ratholeHost)
@@ -525,14 +682,31 @@ func mergeClientManagedConfig(existing string, machine *db.Machine, tunnels []db
 	}
 
 	machineSection := strings.TrimSpace(buildClientMachineSection(machine))
-	if machineSection == "" {
+	// An SSH-enabled machine must have its SSH section — a missing token there
+	// means an incomplete bootstrap. But an agent-only machine (no SSH tunnel,
+	// TunnelPort 0) legitimately has no SSH section; its agent back-channel +
+	// service tunnels below carry the config. Only error for the former.
+	if machineSection == "" && machine != nil && machine.TunnelPort != 0 {
 		return "", fmt.Errorf("machine is missing SSH tunnel token; bootstrap the machine again")
 	}
 
+	// Synchronise the [client.transport] block with what the server currently
+	// expects. Without this step, a machine that was bootstrapped before
+	// noise was enabled keeps its plaintext-only client.toml across config
+	// pushes and silently fails to reconnect the moment the server flips to
+	// noise. Strip any stale block and re-emit from the canonical key.
+	base = stripClientTransportSection(base)
+
 	cleaned := stripClientManagedSections(base)
 	updated := strings.TrimRight(cleaned, "\n")
+	if block := strings.TrimRight(config.RenderClientNoiseTransport(noisePubKey), "\n"); block != "" {
+		updated += "\n\n" + block
+	}
 
-	sections := []string{machineSection}
+	sections := []string{}
+	if machineSection != "" {
+		sections = append(sections, machineSection)
+	}
 	if agentSection := strings.TrimSpace(buildClientMachineAgentSection(machine)); agentSection != "" {
 		sections = append(sections, agentSection)
 	}
@@ -565,6 +739,17 @@ func stripClientManagedSections(content string) string {
 	stripped = removeTomlSectionsWithPrefix(stripped, "client.services.tunnel-")
 	stripped = removeTomlSectionsWithPrefix(stripped, "client.services.machine-")
 	return stripped
+}
+
+// stripClientTransportSection removes the [client.transport] header and its
+// [client.transport.noise] subsection. Used during config merges so the
+// canonical transport block can be re-emitted from the current server pubkey
+// — if we only stripped the [client.transport] header, the orphan
+// [client.transport.noise] section below it would cause rathole to error.
+func stripClientTransportSection(content string) string {
+	content = removeTomlSection(content, "client.transport")
+	content = removeTomlSection(content, "client.transport.noise")
+	return content
 }
 
 func stripClientManagedMarkerBlocks(content string) string {

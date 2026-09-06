@@ -1,0 +1,18 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # Internal control contract — pragmatic over ceremonial:
+    # we intentionally reuse RatholeConfig for the get-reply/put-request and
+    # StatusInfo for GetStatus/WatchStatus, and don't suffix the service with
+    # "Service". These rules fight that without adding value here.
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - SERVICE_SUFFIX
+breaking:
+  use:
+    - FILE

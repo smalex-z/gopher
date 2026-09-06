@@ -3,7 +3,6 @@ package service
 import (
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -46,9 +45,22 @@ type Fail2banStatus struct {
 
 // ─── SecurityService ─────────────────────────────────────────────────────────
 
-type SecurityService struct{}
+type SecurityService struct {
+	// Caches for the two expensive, frontend-polled, shell-out-backed read
+	// endpoints. Short TTL: the data is diagnostic (ban lists, stale-token
+	// attempts) and a few seconds of staleness is invisible to an operator,
+	// but it's the difference between one bounded shell-out per ~10s and one
+	// per poll per client — the latter is what self-DoS'd the box.
+	statusCache *ttlCache[*Fail2banStatus]
+	staleCache  *ttlCache[[]StaleTokenAttempt]
+}
 
-func NewSecurityService() *SecurityService { return &SecurityService{} }
+func NewSecurityService() *SecurityService {
+	return &SecurityService{
+		statusCache: newTTLCache[*Fail2banStatus](10 * time.Second),
+		staleCache:  newTTLCache[[]StaleTokenAttempt](15 * time.Second),
+	}
+}
 
 // SyncFail2banConfig writes the latest filter files and jail config if fail2ban
 // is installed, then reloads it. Called on startup and after updates so every
@@ -145,7 +157,17 @@ func (s *SecurityService) RemoveIgnoreIP(ip string) error {
 
 // Fail2banStatus queries fail2ban-client for status of all managed jails.
 // If fail2ban is installed but not running, it is started automatically.
+//
+// Cached + single-flighted: the frontend Security page polls this on a timer,
+// and each uncached call shells out to `fail2ban-client status` once per jail.
+// On a busy box those calls stack up and were part of the CPU saturation that
+// took the dashboard down; the cache collapses concurrent polls to one refresh
+// per TTL window.
 func (s *SecurityService) Fail2banStatus() (*Fail2banStatus, error) {
+	return s.statusCache.get(s.fetchFail2banStatus)
+}
+
+func (s *SecurityService) fetchFail2banStatus() (*Fail2banStatus, error) {
 	result := &Fail2banStatus{}
 	if !isCommandAvailable("fail2ban-client") {
 		return result, nil
@@ -182,10 +204,12 @@ func (s *SecurityService) Fail2banStatus() (*Fail2banStatus, error) {
 }
 
 // isFail2banActive returns true when the fail2ban systemd unit is active.
+// Bounded: reached from the polled Fail2banStatus handler, so a hung
+// systemctl must not wedge the request goroutine.
 func isFail2banActive() bool {
 	prefix := privilegedCmdPrefix()
 	args := append(prefix, "systemctl", "is-active", "--quiet", "fail2ban")
-	err := exec.Command(args[0], args[1:]...).Run() // #nosec G204
+	_, err := runOutputCtx(defaultCmdTimeout, args[0], args[1:]...)
 	return err == nil
 }
 
@@ -195,13 +219,16 @@ func (s *SecurityService) UnbanIP(jail, ip string) error {
 	return err
 }
 
-// StartFail2ban enables and starts the fail2ban service.
+// StartFail2ban enables and starts the fail2ban service. Bounded (reached from
+// the polled Fail2banStatus handler when the unit is down); `enable --now`
+// legitimately takes a couple seconds, hence a slightly longer budget than a
+// plain status query.
 func (s *SecurityService) StartFail2ban() error {
 	sudo := privilegedCmdPrefix()
 	cmd := append(sudo, "systemctl", "enable", "--now", "fail2ban")
-	out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput() // #nosec G204
+	out, err := runOutputCtx(15*time.Second, cmd[0], cmd[1:]...)
 	if err != nil {
-		return fmt.Errorf("failed to start fail2ban: %w: %s", err, string(out))
+		return fmt.Errorf("failed to start fail2ban: %w: %s", err, out)
 	}
 	return nil
 }
@@ -213,10 +240,11 @@ func (s *SecurityService) rewriteJailConfig(cfg *Fail2banConfig) error {
 	if err := writeLocalFile("/etc/fail2ban/jail.d/gopher.conf", content); err != nil {
 		return fmt.Errorf("failed to write fail2ban jail: %w", err)
 	}
-	// Reload fail2ban to pick up the changes.
+	// Reload fail2ban to pick up the changes. Bounded so a wedged
+	// fail2ban-client can't hang the config-save request.
 	sudo := privilegedCmdPrefix()
 	cmd := append(sudo, "fail2ban-client", "reload")
-	_ = exec.Command(cmd[0], cmd[1:]...).Run() // #nosec G204 — args are hardcoded
+	_, _ = runOutputCtx(defaultCmdTimeout, cmd[0], cmd[1:]...)
 	return nil
 }
 
@@ -257,11 +285,22 @@ var staleTokenRe = regexp.MustCompile(`(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.
 // errors and returns them grouped by (token, ip), sorted by last seen descending.
 // Returns an empty slice if journalctl is unavailable or the unit has no logs.
 func (s *SecurityService) StaleTokenAttempts() ([]StaleTokenAttempt, error) {
+	return s.staleCache.get(s.fetchStaleTokenAttempts)
+}
+
+// fetchStaleTokenAttempts is the uncached body, called at most once per TTL
+// window (and never concurrently) via staleCache. The journalctl scan below
+// is the exact call that took 8–15s on a scanner-flooded box and, being
+// unbounded and re-run on every poll, took the dashboard down — it is now
+// both time-bounded (runOutputCtx) and cached (see StaleTokenAttempts).
+func (s *SecurityService) fetchStaleTokenAttempts() ([]StaleTokenAttempt, error) {
 	prefix := privilegedCmdPrefix()
 	args := append(prefix, "journalctl", "-u", "rathole-server", "--no-pager", "-n", "2000", "--output=short-iso")
-	out, err := exec.Command(args[0], args[1:]...).CombinedOutput() // #nosec G204
+	out, err := runOutputCtx(defaultCmdTimeout, args[0], args[1:]...)
 	if err != nil {
-		// journalctl exits non-zero when the unit doesn't exist yet — treat as empty
+		// journalctl exits non-zero when the unit doesn't exist yet, or times
+		// out on a huge journal — treat as empty rather than surfacing an error
+		// (this is a best-effort diagnostic panel, not core functionality).
 		return []StaleTokenAttempt{}, nil
 	}
 
@@ -357,11 +396,13 @@ func parseJailStatus(name, out string) JailStatus {
 	return js
 }
 
-// runPrivilegedOutput runs a command with sudo if needed and returns combined output.
+// runPrivilegedOutput runs a command with sudo if needed and returns combined
+// output, bounded by defaultCmdTimeout. This is reached from HTTP handlers
+// (fail2ban status polling), so it MUST NOT be able to block a request
+// goroutine indefinitely — see runOutputCtx / the outage note there.
 func runPrivilegedOutput(name string, args ...string) (string, error) {
 	prefix := privilegedCmdPrefix()
 	fullArgs := append(prefix, name)
 	fullArgs = append(fullArgs, args...)
-	out, err := exec.Command(fullArgs[0], fullArgs[1:]...).CombinedOutput() // #nosec G204
-	return string(out), err
+	return runOutputCtx(defaultCmdTimeout, fullArgs[0], fullArgs[1:]...)
 }

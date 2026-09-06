@@ -12,7 +12,14 @@ type CreateTunnelRequest struct {
 	BotProtectionEnabled bool   `json:"bot_protection_enabled"`
 	BotProtectionTTL     int    `json:"bot_protection_ttl"`      // seconds; 0 = default (86400)
 	BotProtectionAllowIP string `json:"bot_protection_allow_ip"` // JSON array of CIDR/IP strings
-	TLSSkipVerify        bool   `json:"tls_skip_verify"`
+	// Password auth (separate from the dashboard login). AuthPassword is plaintext
+	// on the wire, hashed (bcrypt) before storage; empty = leave the existing
+	// password unchanged.
+	AuthEnabled   bool   `json:"auth_enabled"`
+	AuthPassword  string `json:"auth_password"`
+	AuthTTL       int    `json:"auth_ttl"`
+	AuthAllowIP   string `json:"auth_allow_ip"`
+	TLSSkipVerify bool   `json:"tls_skip_verify"`
 }
 
 type UpdateTunnelRequest struct {
@@ -23,5 +30,9 @@ type UpdateTunnelRequest struct {
 	BotProtectionEnabled bool   `json:"bot_protection_enabled"`
 	BotProtectionTTL     int    `json:"bot_protection_ttl"`
 	BotProtectionAllowIP string `json:"bot_protection_allow_ip"`
+	AuthEnabled          bool   `json:"auth_enabled"`
+	AuthPassword         string `json:"auth_password"` // empty = keep existing
+	AuthTTL              int    `json:"auth_ttl"`
+	AuthAllowIP          string `json:"auth_allow_ip"`
 	TLSSkipVerify        bool   `json:"tls_skip_verify"`
 }

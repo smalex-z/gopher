@@ -168,7 +168,8 @@ const openAPISpec = `{
                 "type": "object",
                 "properties": {
                   "public_ssh": { "type": "boolean", "default": false, "description": "Expose SSH back-tunnel publicly" },
-                  "ssh_key_id": { "type": "string", "description": "SSH key ID to use (defaults to server default). Upload a keypair first via POST /ssh-keys if the VM has its own key." }
+                  "ssh_key_id": { "type": "string", "description": "SSH key ID to use (defaults to server default). Upload a keypair first via POST /ssh-keys if the VM has its own key. Ignored when ssh_enabled=false." },
+                  "ssh_enabled": { "type": "boolean", "default": true, "description": "Provision an SSH back-tunnel. false = agent-only machine (no SSH exposure, no SSH key required)." }
                 }
               }
             }

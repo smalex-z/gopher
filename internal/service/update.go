@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,9 +19,14 @@ import (
 
 	"github.com/smalex-z/gopher/internal/build"
 	"github.com/smalex-z/gopher/internal/db"
+	"github.com/smalex-z/gopher/internal/embedbin"
 )
 
 const githubRepo = "smalex-z/gopher"
+
+// githubAPIBaseURL is a var so tests can point release lookups at an
+// httptest server. Production never changes it.
+var githubAPIBaseURL = "https://api.github.com"
 
 type UpdateService struct{}
 
@@ -29,7 +35,19 @@ type UpdateInfo struct {
 	LatestVersion   string `json:"latest_version"`
 	UpdateAvailable bool   `json:"update_available"`
 	Channel         string `json:"channel"`
+	// CheckError is a human-readable note when the release lookup couldn't
+	// complete (channel has nothing published, GitHub unreachable/rate-limited).
+	// The check is advisory, so these are reported in-band rather than as an
+	// HTTP error — a 500 here used to unmount the dashboard's whole version
+	// card, channel picker included, leaving no UI path to switch channels back.
+	CheckError string `json:"check_error,omitempty"`
 }
+
+// errNoReleaseForChannel means the channel simply has nothing published — a
+// legitimate state, not a failure: the stable channel is empty until the first
+// non-prerelease ships (GitHub's /releases/latest 404s), and beta/alpha can be
+// empty on a repo that has only cut stable tags.
+var errNoReleaseForChannel = errors.New("no release published for channel")
 
 type githubRelease struct {
 	TagName    string `json:"tag_name"`
@@ -96,7 +114,14 @@ func (s *UpdateService) Check() (*UpdateInfo, error) {
 
 	release, err := fetchLatestReleaseForChannel(channel)
 	if err != nil {
-		return nil, err
+		// Advisory failure: report it in-band and keep the response 200 so the
+		// version card (and its channel picker) stays rendered.
+		if errors.Is(err, errNoReleaseForChannel) {
+			info.CheckError = fmt.Sprintf("no %s release published yet", channel)
+		} else {
+			info.CheckError = "update check failed: " + err.Error()
+		}
+		return info, nil
 	}
 
 	info.LatestVersion = release.TagName
@@ -105,9 +130,22 @@ func (s *UpdateService) Check() (*UpdateInfo, error) {
 }
 
 func (s *UpdateService) Apply() error {
-	release, err := fetchLatestReleaseForChannel(settingsChannel())
+	channel := settingsChannel()
+	release, err := fetchLatestReleaseForChannel(channel)
 	if err != nil {
 		return err
+	}
+
+	// Enforce the forward-only rule Check() advertises by. Check only gates
+	// the UI button; Apply is reachable directly (curl, scripts), and without
+	// this a channel whose latest is older than the running build would
+	// install as a silent downgrade — untested against a DB schema that only
+	// migrates forward. Same-version reinstalls are refused too: the running
+	// process proves the installed binary works, so there's nothing to repair
+	// that a re-download would fix. ("dev" builds parse as no version at all
+	// and any real release counts as newer, so local builds can still apply.)
+	if !isNewer(release.TagName, build.Version) {
+		return fmt.Errorf("channel's latest release %s is not newer than running %s; refusing to downgrade (install an older binary manually if you really need one)", release.TagName, build.Version)
 	}
 
 	downloadURL := findAssetURL(release)
@@ -116,18 +154,36 @@ func (s *UpdateService) Apply() error {
 	}
 
 	// Locate the SHA256SUMS asset in the same release. We refuse to apply an
-	// update without one — the previous "trust GitHub HTTPS" stance lets a
-	// compromised release process push a malicious binary that every
-	// dashboard auto-installs on next Apply(). The sums asset must be
-	// generated and uploaded by the release pipeline alongside the binary.
-	sumsURL := findChecksumsURL(release)
+	// update without one. The sums file alone guards against corruption and
+	// swapped-binary mistakes, NOT against a compromised GitHub account or
+	// release pipeline (it lives in the same release the attacker would be
+	// editing) — that is what the minisign signature over it is for: see
+	// verifyReleaseSignature below and build.ReleaseSigningPubKey.
+	sumsName, sumsURL := findChecksumsAsset(release)
 	if sumsURL == "" {
 		return fmt.Errorf("release %s has no SHA256SUMS asset; refusing to update without a verifiable checksum (publish a SHA256SUMS file alongside the binary)", release.TagName)
 	}
 
 	httpClient := &http.Client{Timeout: 5 * time.Minute}
 
-	// Download to a temp file
+	// Fetch the published checksums file and authenticate it against the
+	// offline release-signing key (when configured) BEFORE pulling the
+	// multi-MB binary: an unsigned/tampered release, or a sums file with no
+	// entry for this build, aborts the update for the cost of two small
+	// requests, and the expected hash is known up front.
+	sumsRaw, err := downloadSmall(httpClient, sumsURL, 1<<20)
+	if err != nil {
+		return fmt.Errorf("checksum download failed: %w", err)
+	}
+	if err := verifyReleaseSignature(httpClient, release, sumsName, sumsRaw); err != nil {
+		return err
+	}
+	wantHash, err := checksumFromSums(sumsRaw, downloadURL)
+	if err != nil {
+		return fmt.Errorf("checksum lookup failed: %w", err)
+	}
+
+	// Download the binary to a temp file, hashing as it streams.
 	tmpFile, err := os.CreateTemp("", "gopher-update-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
@@ -148,7 +204,6 @@ func (s *UpdateService) Apply() error {
 		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
 
-	// Stream into the temp file while computing SHA256 in parallel.
 	hasher := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(tmpFile, hasher), resp.Body); err != nil {
 		tmpFile.Close()
@@ -158,12 +213,6 @@ func (s *UpdateService) Apply() error {
 	tmpFile.Close()
 	gotHash := hex.EncodeToString(hasher.Sum(nil))
 
-	// Verify against the published checksums file.
-	wantHash, err := fetchExpectedChecksum(httpClient, sumsURL, downloadURL)
-	if err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("checksum lookup failed: %w", err)
-	}
 	if !strings.EqualFold(gotHash, wantHash) {
 		os.Remove(tmpPath)
 		return fmt.Errorf("checksum mismatch — got %s, want %s — refusing to install", gotHash, wantHash)
@@ -174,6 +223,16 @@ func (s *UpdateService) Apply() error {
 		return fmt.Errorf("failed to chmod update binary: %w", err)
 	}
 
+	// Everything above is pure download + verification; everything below
+	// mutates the system. The split is a test seam: tests stub
+	// installVerifiedBinary so the checksum-gated download path is covered
+	// without a sudo mv over the running binary or a systemd restart.
+	return installVerifiedBinary(tmpPath)
+}
+
+// installVerifiedBinary swaps the checksum-verified binary at tmpPath over the
+// running executable and restarts the service. Test-swappable var — see Apply.
+var installVerifiedBinary = func(tmpPath string) error {
 	// Find current binary path
 	binaryPath, err := os.Executable()
 	if err != nil {
@@ -193,6 +252,29 @@ func (s *UpdateService) Apply() error {
 	// Failures are non-fatal — the update still proceeds.
 	if err := patchSudoers(); err != nil {
 		log.Printf("WARN: could not patch sudoers: %v", err)
+	}
+
+	// Ensure the systemd unit carries GOPHER_MANAGED=1. `gopher install`
+	// writes this unconditionally (buildServiceUnit), but self-update never
+	// touched the unit file at all — any install that predates the embedded
+	// caddy/rathole supervisor (i.e. every pre-v0.1.0 beta) upgrades its
+	// binary here without ever gaining the env var. The new binary still
+	// unconditionally writes config to /etc/gopher/... (paths.ConfigDir has
+	// no such gate), but without GOPHER_MANAGED it never runs the
+	// legacy-layout migration or supervises caddy/rathole — so a
+	// pre-existing rathole-server/caddy.service unit keeps running forever
+	// against the OLD config paths gopher no longer writes to. Existing
+	// tunnels (already baked into the old file) keep working, masking the
+	// break completely; every NEW machine/tunnel silently never connects —
+	// registration succeeds, the client gets "no such service", and nothing
+	// anywhere logs an error. Failures here are non-fatal for the same
+	// reason as patchSudoers: don't block the binary swap over it, but this
+	// one is worth escalating past a log line since a silent no-op leaves
+	// the install in exactly the broken state this exists to fix.
+	if embedbin.Embedded() {
+		if err := patchSystemdManagedEnv(); err != nil {
+			log.Printf("WARN: could not enable managed mode on the systemd unit (new tunnels/machines may not connect until this is fixed manually): %v", err)
+		}
 	}
 
 	// Refresh fail2ban filter files so new jails/filters from this release are
@@ -248,6 +330,59 @@ func patchSudoers() error {
 	return nil
 }
 
+// systemdUnitPath is a var so tests can redirect it to a tempfile.
+var systemdUnitPath = "/etc/systemd/system/gopher.service"
+
+// patchSystemdManagedEnv ensures the gopher systemd unit's [Service] section
+// carries Environment=GOPHER_MANAGED=1, then daemon-reloads so the pending
+// restart (scheduled by the caller) picks it up. No-ops if already present —
+// safe to call on every Apply().
+func patchSystemdManagedEnv() error {
+	content, err := os.ReadFile(systemdUnitPath)
+	if err != nil {
+		return fmt.Errorf("read unit file: %w", err)
+	}
+	patched, changed := ensureManagedEnvLine(string(content))
+	if !changed {
+		return nil
+	}
+
+	cmd := exec.Command("sudo", "-n", "tee", systemdUnitPath) // #nosec G204
+	cmd.Stdin = strings.NewReader(patched)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("write unit file: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("sudo", "-n", "systemctl", "daemon-reload").CombinedOutput(); err != nil { // #nosec G204
+		return fmt.Errorf("daemon-reload: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// ensureManagedEnvLine inserts "Environment=GOPHER_MANAGED=1" into a systemd
+// unit's [Service] section if no GOPHER_MANAGED assignment exists yet. Pure
+// string transform — no filesystem/sudo — so the insertion logic is testable
+// independent of patchSystemdManagedEnv's I/O.
+func ensureManagedEnvLine(unit string) (result string, changed bool) {
+	if strings.Contains(unit, "GOPHER_MANAGED=") {
+		return unit, false
+	}
+	idx := strings.Index(unit, "[Service]")
+	if idx == -1 {
+		// Not a unit we understand well enough to patch safely; leave it alone
+		// rather than guess where to insert.
+		return unit, false
+	}
+	insertAt := idx + len("[Service]")
+	// Land right after the section header's newline, ahead of the existing
+	// directives, rather than fussing over exact placement among them.
+	nl := strings.Index(unit[insertAt:], "\n")
+	if nl == -1 {
+		return unit, false
+	}
+	insertAt += nl + 1
+	return unit[:insertAt] + "Environment=GOPHER_MANAGED=1\n" + unit[insertAt:], true
+}
+
 // buildServiceSudoers returns the sudoers content for the service user. We
 // grant full passwordless sudo to match the client-side model — a separate
 // patch per binary was security theatre when /bin/bash was already in the
@@ -288,7 +423,7 @@ func releaseMatchesChannel(r *githubRelease, channel string) bool {
 // for beta/alpha it pages through recent releases and filters client-side.
 func fetchLatestReleaseForChannel(channel string) (*githubRelease, error) {
 	if channel == "stable" {
-		url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo)
+		url := fmt.Sprintf("%s/repos/%s/releases/latest", githubAPIBaseURL, githubRepo)
 		req, _ := http.NewRequest("GET", url, nil)
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("User-Agent", "gopher/"+build.Version)
@@ -300,6 +435,11 @@ func fetchLatestReleaseForChannel(channel string) (*githubRelease, error) {
 		}
 		defer resp.Body.Close()
 
+		if resp.StatusCode == http.StatusNotFound {
+			// /releases/latest serves only non-prereleases; 404 = the repo has
+			// never cut a stable release, not an API failure.
+			return nil, fmt.Errorf("%w %q", errNoReleaseForChannel, channel)
+		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
 		}
@@ -311,7 +451,7 @@ func fetchLatestReleaseForChannel(channel string) (*githubRelease, error) {
 	}
 
 	// beta / alpha — fetch list and pick the best matching release
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=30", githubRepo)
+	url := fmt.Sprintf("%s/repos/%s/releases?per_page=30", githubAPIBaseURL, githubRepo)
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "gopher/"+build.Version)
@@ -344,48 +484,118 @@ func fetchLatestReleaseForChannel(channel string) (*githubRelease, error) {
 	}
 
 	if best == nil {
-		return nil, fmt.Errorf("no releases found for channel %q", channel)
+		return nil, fmt.Errorf("%w %q", errNoReleaseForChannel, channel)
 	}
 	return best, nil
 }
 
-// findChecksumsURL looks for a SHA256SUMS-style asset in the release. We
-// accept several common filenames so the release pipeline isn't pinned to
-// one convention.
-func findChecksumsURL(release *githubRelease) string {
+// findChecksumsAsset looks for a SHA256SUMS-style asset in the release and
+// returns its (name, url). We accept several common filenames so the release
+// pipeline isn't pinned to one convention. Name is needed alongside the URL
+// so the signature check can locate the matching "<name>.minisig" asset.
+func findChecksumsAsset(release *githubRelease) (string, string) {
 	want := []string{"sha256sums", "sha256sums.txt", "checksums.txt", "checksums.sha256"}
 	for _, asset := range release.Assets {
 		lower := strings.ToLower(asset.Name)
 		for _, w := range want {
 			if lower == w {
-				return asset.BrowserDownloadURL
+				return asset.Name, asset.BrowserDownloadURL
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
-// fetchExpectedChecksum downloads the SHA256SUMS file and returns the hash
-// for the asset referenced by binaryURL. The sums file is the standard
+// downloadSmall fetches up to max bytes from url — used for the checksums
+// file and its detached signature, never the binary itself. A response larger
+// than max is an error, not a silent truncation: a truncated sums file would
+// otherwise surface later as a baffling "signature FAILED" or "no entry"
+// pointing away from the real cause.
+func downloadSmall(httpClient *http.Client, url string, max int64) ([]byte, error) {
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("response exceeds the %d-byte limit for this file", max)
+	}
+	return data, nil
+}
+
+// verifyReleaseSignature authenticates the raw SHA256SUMS content against the
+// offline release-signing key (build.ReleaseSigningPubKey) via the release's
+// "<sums>.minisig" asset. This is the piece that makes the checksums worth
+// trusting: without it they come from the same release object an attacker
+// with GitHub write access would be editing.
+//
+// Policy: no configured pubkey → no-op (pre-signing builds). Pubkey set:
+// stable releases — and anything whose tag doesn't parse — require a valid
+// signature no matter which channel selected them. The decision deliberately
+// keys on the RELEASE, not the channel string: the channel is user/DB input
+// that releaseMatchesChannel treats as stable when unrecognized, and the
+// beta/alpha channels legitimately serve stable releases too — gating on the
+// channel would let either path install a stable artifact unsigned.
+// Prereleases tolerate a MISSING .minisig (dev velocity), but a
+// present-and-invalid signature always fails.
+//
+// The signature's trusted comment ("gopher release <tag>", written by
+// scripts/sign-release.sh) must name the release being installed. Without
+// that binding, a still-valid signature copied verbatim from an older release
+// alongside its old sums+binary would verify under a new tag — a signed
+// rollback replay that also slips past the forward-only isNewer gate.
+func verifyReleaseSignature(httpClient *http.Client, release *githubRelease, sumsName string, sumsRaw []byte) error {
+	if build.ReleaseSigningPubKey == "" {
+		return nil
+	}
+	sv := parseSemver(release.TagName)
+	isPrerelease := sv != nil && sv.prerelease != ""
+	sigName := strings.ToLower(sumsName) + ".minisig"
+	sigURL := ""
+	for _, asset := range release.Assets {
+		if strings.ToLower(asset.Name) == sigName {
+			sigURL = asset.BrowserDownloadURL
+			break
+		}
+	}
+	if sigURL == "" {
+		if !isPrerelease {
+			return fmt.Errorf("release %s is not signed (%s missing) — stable releases must carry a signature from the offline release key (scripts/sign-release.sh); refusing to install", release.TagName, sigName)
+		}
+		log.Printf("WARN: prerelease %s has no %s — allowed for prereleases, but the download is only checksum-protected", release.TagName, sigName)
+		return nil
+	}
+	sigRaw, err := downloadSmall(httpClient, sigURL, 8<<10)
+	if err != nil {
+		return fmt.Errorf("download release signature: %w", err)
+	}
+	trustedComment, err := verifyMinisignSignature(build.ReleaseSigningPubKey, sumsRaw, sigRaw)
+	if err != nil {
+		return fmt.Errorf("release %s signature verification FAILED: %w — refusing to install", release.TagName, err)
+	}
+	if want := "gopher release " + release.TagName; trustedComment != want {
+		return fmt.Errorf("release %s signature names %q, want %q — a valid signature for the wrong release is a rollback replay; refusing to install", release.TagName, trustedComment, want)
+	}
+	return nil
+}
+
+// checksumFromSums returns the hash for the asset referenced by binaryURL
+// from raw SHA256SUMS content (already signature-verified by the caller when
+// signing is configured). The sums file is the standard
 // `<hex-sha256>  <filename>` format, two columns separated by whitespace.
 // Lines starting with "#" are skipped. We match by the basename of the
 // binary's URL — release tooling that includes path components would need
 // adjustment.
-func fetchExpectedChecksum(httpClient *http.Client, sumsURL, binaryURL string) (string, error) {
-	resp, err := httpClient.Get(sumsURL)
-	if err != nil {
-		return "", fmt.Errorf("download SHA256SUMS: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("SHA256SUMS HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap on the sums file
-	if err != nil {
-		return "", fmt.Errorf("read SHA256SUMS: %w", err)
-	}
+func checksumFromSums(sums []byte, binaryURL string) (string, error) {
 	target := path.Base(binaryURL)
-	for _, line := range strings.Split(string(body), "\n") {
+	for _, line := range strings.Split(string(sums), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -581,4 +791,3 @@ func parseNumericIdentifier(s string) (int, bool) {
 	}
 	return n, true
 }
-

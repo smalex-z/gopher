@@ -62,6 +62,9 @@ func buildBootstrapSudoers(username string) string {
 	} else if p, err := exec.LookPath("yum"); err == nil {
 		pkgMgrLine = p
 	}
+	// No shells, no downloaders: a "narrow" list containing bash or curl is
+	// root-equivalent. SETENV on the package manager lets the firewall
+	// takeover pass DEBIAN_FRONTEND=noninteractive on the sudo command line.
 	return fmt.Sprintf(`# Gopher rathole bootstrap - limited sudo access
 %s ALL=(ALL:ALL) NOPASSWD: /bin/mkdir, /usr/bin/mkdir
 %s ALL=(ALL:ALL) NOPASSWD: /bin/systemctl, /usr/bin/systemctl
@@ -70,11 +73,9 @@ func buildBootstrapSudoers(username string) string {
 %s ALL=(ALL:ALL) NOPASSWD: /usr/bin/chown, /bin/chown
 %s ALL=(ALL:ALL) NOPASSWD: /usr/bin/tee, /bin/tee
 %s ALL=(ALL:ALL) NOPASSWD: /bin/chmod, /usr/bin/chmod
-%s ALL=(ALL:ALL) NOPASSWD: `+pkgMgrLine+`
-%s ALL=(ALL:ALL) NOPASSWD: /bin/bash, /usr/bin/bash
-%s ALL=(ALL:ALL) NOPASSWD: /usr/bin/curl, /bin/curl
+%s ALL=(ALL:ALL) NOPASSWD:SETENV: `+pkgMgrLine+`
 %s ALL=(ALL:ALL) NOPASSWD: /usr/bin/fail2ban-client, /usr/local/bin/fail2ban-client
-`, username, username, username, username, username, username, username, username, username, username, username)
+`, username, username, username, username, username, username, username, username, username)
 }
 
 func runWithSudo(subcommand string, args []string) error {

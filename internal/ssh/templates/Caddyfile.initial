@@ -1,8 +1,0 @@
-{
-    email admin@example.com
-}
-
-# ===== BEGIN CUSTOM CONFIGURATION =====
-# Everything below this line will NOT be overwritten on deploy.
-# Add any custom Caddy directives or site blocks here.
-# ===== END CUSTOM CONFIGURATION =====

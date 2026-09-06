@@ -12,11 +12,17 @@
 
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 
-CONFIG_FILE="/etc/rathole/client.toml"
-VPS_KEY_FILE="/etc/rathole/vps_key.pub"
 INSTALL_PATH="/usr/local/bin/gopher-uninstall"
 HOST_URL="{{.HostURL}}"
-AGENT_CONFIG="/etc/gopher-agent/config.env"
+
+# Consolidated /etc/gopher layout with a fall back to the legacy paths, so this
+# works on both migrated and un-migrated machines.
+CONFIG_FILE="/etc/gopher/rathole/client.toml"
+[ -f "$CONFIG_FILE" ] || CONFIG_FILE="/etc/rathole/client.toml"
+VPS_KEY_FILE="/etc/gopher/rathole/vps_key.pub"
+[ -f "$VPS_KEY_FILE" ] || VPS_KEY_FILE="/etc/rathole/vps_key.pub"
+AGENT_CONFIG="/etc/gopher/agent/config.env"
+[ -f "$AGENT_CONFIG" ] || AGENT_CONFIG="/etc/gopher-agent/config.env"
 
 # Remove a marker-delimited section from a file.
 # Usage: remove_section <file> <start_marker> <end_marker>
@@ -104,7 +110,10 @@ if [ -z "$HOST_URL" ]; then
 elif [ ! -f "$AGENT_CONFIG" ]; then
   echo "Skipping server notification: $AGENT_CONFIG missing (agent not installed, or pre-agent machine)."
 else
-  AGENT_TOKEN=$(grep -E '^GOPHER_AGENT_TOKEN=' "$AGENT_CONFIG" 2>/dev/null | head -1 | cut -d= -f2-)
+  # Read via $SUDO: the config is chmod 640 root:gopher (the bearer token is
+  # deliberately not world-readable), so a plain grep run by a non-root operator
+  # silently reads nothing and we'd wrongly report the token as missing.
+  AGENT_TOKEN=$($SUDO grep -E '^GOPHER_AGENT_TOKEN=' "$AGENT_CONFIG" 2>/dev/null | head -1 | cut -d= -f2-)
   if [ -z "$AGENT_TOKEN" ]; then
     echo "Skipping server notification: GOPHER_AGENT_TOKEN not found in $AGENT_CONFIG."
   else
@@ -135,22 +144,43 @@ if [ "$NOTIFIED" != "1" ]; then
   echo "  → Open the dashboard and remove this machine manually so its record doesn't linger."
 fi
 
-# Remove the VPS SSH public key from authorized_keys so the server can no
-# longer SSH back into this machine.
-if [ -f "$VPS_KEY_FILE" ]; then
-  VPS_KEY=$(cat "$VPS_KEY_FILE" 2>/dev/null)
-  if [ -n "$VPS_KEY" ]; then
-    KEY_BLOB=$(echo "$VPS_KEY" | awk '{print $2}')
-    AK="$REAL_HOME/.ssh/authorized_keys"
-    if [ -n "$KEY_BLOB" ] && [ -f "$AK" ]; then
-      _tmp=$(mktemp)
-      grep -v "$KEY_BLOB" "$AK" > "$_tmp" 2>/dev/null || true
-      # Use cat redirect to preserve the original file's ownership/permissions.
-      # mv would change ownership to root when run via sudo.
-      cat "$_tmp" > "$AK" 2>/dev/null || mv "$_tmp" "$AK" 2>/dev/null || true
-      rm -f "$_tmp" 2>/dev/null || true
-      echo "Removed VPS SSH key from authorized_keys"
+# Remove Gopher's managed SSH key(s) from authorized_keys so the server can no
+# longer SSH back in. Match on the `gopher-managed` marker comment (self-healing:
+# clears every managed key, current or stale) and, for older installs whose key
+# predates the marker, also match the specific blob from vps_key.pub. Operator
+# keys (no marker) are never touched.
+#
+# Two hardenings here after a QA sweep: this used to run unconditionally, so a
+# failed read of $AK (root reading across an NFS-mounted $REAL_HOME with
+# root_squash, an SELinux/AppArmor denial, a transient I/O error) produced an
+# EMPTY $_tmp — indistinguishable from "genuinely no other keys" — which then
+# got written straight over $AK with no backup, silently deleting every key
+# including the operator's own. If that was their only key, this "safe,
+# best-effort" uninstall locks them out of the box with no recovery path.
+AK="$REAL_HOME/.ssh/authorized_keys"
+if [ -f "$AK" ]; then
+  if [ ! -r "$AK" ]; then
+    echo "WARN: $AK exists but isn't readable — skipping SSH key cleanup rather than risk wiping it. Remove Gopher's key from it manually if needed."
+  else
+    _tmp=$(mktemp)
+    # Back up before rewriting: this edits the file that controls SSH access
+    # to this box, so if anything below goes wrong there's something to
+    # restore from instead of a silent lockout. Left in place deliberately
+    # (not cleaned up) — a stray backup file is a trivial cost next to that.
+    _ak_backup="$AK.gopher-uninstall.bak"
+    cp "$AK" "$_ak_backup" 2>/dev/null || true
+    grep -v ' gopher-managed[[:space:]]*$' "$AK" > "$_tmp" 2>/dev/null
+    if [ -f "$VPS_KEY_FILE" ]; then
+      KEY_BLOB=$(awk '{print $2}' "$VPS_KEY_FILE" 2>/dev/null)
+      if [ -n "$KEY_BLOB" ]; then
+        grep -vF "$KEY_BLOB" "$_tmp" > "$_tmp.2" 2>/dev/null && mv "$_tmp.2" "$_tmp" || true
+      fi
     fi
+    # cat redirect preserves the file's ownership/permissions (mv under sudo would
+    # chown it to root).
+    cat "$_tmp" > "$AK" 2>/dev/null || mv "$_tmp" "$AK" 2>/dev/null || true
+    rm -f "$_tmp" 2>/dev/null || true
+    echo "Removed Gopher-managed SSH key(s) from authorized_keys (backup: $_ak_backup)"
   fi
 fi
 
@@ -166,14 +196,17 @@ $SUDO rm -f /etc/systemd/system/rathole-client.service 2>/dev/null || true
 $SUDO systemctl daemon-reload 2>/dev/null || true
 
 echo "Removing rathole config..."
-$SUDO rm -rf /etc/rathole 2>/dev/null || true
+$SUDO rm -rf /etc/gopher/rathole /etc/rathole 2>/dev/null || true
 
 echo "Removing rathole binary..."
 $SUDO rm -f /usr/local/bin/rathole 2>/dev/null || true
 
 echo "Removing gopher-agent binary and config..."
 $SUDO rm -f /usr/local/bin/gopher-agent 2>/dev/null || true
-$SUDO rm -rf /etc/gopher-agent 2>/dev/null || true
+$SUDO rm -rf /etc/gopher/agent /etc/gopher-agent 2>/dev/null || true
+# Drop the /etc/gopher tree if our subdirs were all it held (origins only ever
+# put rathole/ + agent/ there); ignore failure if anything else remains.
+$SUDO rmdir /etc/gopher 2>/dev/null || true
 
 # Remove the dedicated gopher system user. `userdel` fails if processes are
 # still owned by the user, so it must run AFTER stopping the agent service.

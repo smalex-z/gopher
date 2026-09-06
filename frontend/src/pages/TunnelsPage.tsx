@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { Network, ClipboardCopy, ArrowRight, Globe, Lock, Terminal, Info, AlertTriangle, Pencil, Plus, Search, Trash2, Zap } from 'lucide-react'
+import { Network, ChevronDown, ChevronRight, ClipboardCopy, ArrowRight, Globe, Lock, Info, AlertTriangle, Pencil, Plus, Search, Shield, Trash2, Zap } from 'lucide-react'
 import { tunnelsApi } from '../api/tunnels'
 import { machinesApi } from '../api/machines'
 import { localApi } from '../api/local'
+import ServerPortInput, { type PortCheck } from '../components/ServerPortInput'
 import StatusBadge from '../components/StatusBadge'
 import TunnelHealthCell from '../components/TunnelHealthCell'
 import { toast } from '../lib/toast'
@@ -24,12 +25,18 @@ interface FormState {
   bot_protection_enabled: boolean
   bot_protection_ttl: number    // stored as seconds; 0 = default
   bot_protection_allow_ip: string // newline-delimited in the textarea, JSON on wire
+  auth_enabled: boolean
+  auth_password: string          // write-only; '' = keep existing
+  auth_password_set: boolean     // read-only; whether a password already exists
+  auth_ttl: number               // stored as seconds; 0 = default
+  auth_allow_ip: string          // newline-delimited in the textarea, JSON on wire
 }
 
 const defaultForm: FormState = {
   machine_id: '', name: '', subdomain: '', local_port: 3000, rathole_port: 0,
   transport: 'tcp', no_tls: false, private: false, tls_skip_verify: false,
   bot_protection_enabled: false, bot_protection_ttl: 0, bot_protection_allow_ip: '',
+  auth_enabled: false, auth_password: '', auth_password_set: false, auth_ttl: 0, auth_allow_ip: '',
 }
 
 function cidrToJSON(raw: string): string {
@@ -44,22 +51,36 @@ function allowIPDisplay(json: string): string {
 
 export default function TunnelsPage() {
   const qc = useQueryClient()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [modal, setModal] = useState<ModalState>({ isOpen: false })
   const [form, setForm] = useState<FormState>(defaultForm)
   const [nextPortLoading, setNextPortLoading] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
+  const [botAdvancedOpen, setBotAdvancedOpen] = useState(false)   // collapsed by default (defaults are fine)
+  const [authAdvancedOpen, setAuthAdvancedOpen] = useState(false)
+  // Live server-port availability, mirrored up from ServerPortInput's
+  // debounced /tunnels/check-port probe via onCheck — kept in page state
+  // because Create's submit gate needs it, not just the input's styling.
+  const [portCheck, setPortCheck] = useState<PortCheck | null>(null)
+  // Ports openAddModal / the deep-link effect already got from nextPort() —
+  // the backend's own allocator — passed to ServerPortInput as skipCheckFor
+  // so it doesn't re-ask about a port the server itself just handed out.
+  const verifiedPortRef = useRef<number | null>(null)
 
   const openAddModal = async (machineId?: string) => {
     setNextPortLoading(true)
     try {
       const port = await tunnelsApi.nextPort()
+      verifiedPortRef.current = port
+      setPortCheck({ port, available: true, reason: '' })
       setForm({ ...defaultForm, rathole_port: port, machine_id: machineId ?? '' })
     } catch {
       setForm({ ...defaultForm, machine_id: machineId ?? '' })
     } finally {
       setNextPortLoading(false)
     }
+    setBotAdvancedOpen(false)
+    setAuthAdvancedOpen(false)
     setModal({ isOpen: true })
   }
 
@@ -73,12 +94,21 @@ export default function TunnelsPage() {
       rathole_port: t.rathole_port,
       transport: t.transport ?? 'tcp',
       no_tls: t.no_tls ?? false,
-      private: t.private ?? false,
+      // Legacy Proxied-UDP rows (created before the form pinned UDP to
+      // Direct) normalize on their next edit-save.
+      private: (t.transport ?? 'tcp') === 'udp' ? false : (t.private ?? false),
       tls_skip_verify: t.tls_skip_verify ?? false,
       bot_protection_enabled: t.bot_protection_enabled ?? false,
       bot_protection_ttl: t.bot_protection_ttl ?? 0,
       bot_protection_allow_ip: t.bot_protection_allow_ip ?? '',
+      auth_enabled: t.auth_enabled ?? false,
+      auth_password: '',
+      auth_password_set: t.auth_password_set ?? false,
+      auth_ttl: t.auth_ttl ?? 0,
+      auth_allow_ip: t.auth_allow_ip ?? '',
     })
+    setBotAdvancedOpen(false)
+    setAuthAdvancedOpen(false)
     setModal({ isOpen: true, editTunnel: t })
   }
 
@@ -97,23 +127,10 @@ export default function TunnelsPage() {
   const domain = localStatus?.domain
   const routingEnabled = Boolean(domain)
 
-  const { data: domainIPData } = useQuery({
-    queryKey: ['resolve-ip', domain ?? ''],
-    queryFn: () => localApi.resolveIP(domain!),
-    enabled: !!domain,
-    staleTime: 10 * 60 * 1000,
-  })
-  const { data: routerIPData } = useQuery({
-    queryKey: ['resolve-ip', domain ? `router.${domain}` : ''],
-    queryFn: () => localApi.resolveIP(`router.${domain}`),
-    enabled: !!domain,
-    staleTime: 10 * 60 * 1000,
-  })
-  const domainIP = domainIPData?.ip ?? ''
-  const routerIP = routerIPData?.ip ?? ''
-  const displayHost = domain
-    ? (domainIP && routerIP && domainIP === routerIP ? domain : `router.${domain}`)
-    : undefined
+  // Raw-TCP tunnel host shown to operators. Source of truth is the backend's
+  // ServerHost (defaults to router.<domain>) — the exact host baked into each
+  // client's remote_addr — rather than guessing apex-vs-router by resolved IP.
+  const displayHost = localStatus?.server_host || (domain ? `router.${domain}` : undefined)
 
   // Deep-link entry from MachinesPage ("/tunnels?machine=..."). Mirrors
   // openAddModal's nextPort() prefetch so the rathole-port input lands
@@ -127,6 +144,8 @@ export default function TunnelsPage() {
     tunnelsApi.nextPort()
       .then(port => {
         if (cancelled) return
+        verifiedPortRef.current = port
+        setPortCheck({ port, available: true, reason: '' })
         setForm({ ...defaultForm, rathole_port: port, machine_id: machineId })
       })
       .catch(() => {
@@ -134,11 +153,19 @@ export default function TunnelsPage() {
         setForm({ ...defaultForm, machine_id: machineId })
       })
       .finally(() => {
-        if (!cancelled) setNextPortLoading(false)
+        if (cancelled) return
+        setNextPortLoading(false)
+        // Consume the param (replace, not push) so a reload or back-nav
+        // doesn't reopen the modal. Must happen after the prefill above:
+        // changing the search params re-runs this effect, and the cleanup
+        // would cancel a nextPort() fetch still in flight.
+        const next = new URLSearchParams(searchParams)
+        next.delete('machine')
+        setSearchParams(next, { replace: true })
       })
     setModal({ isOpen: true })
     return () => { cancelled = true }
-  }, [searchParams])
+  }, [searchParams, setSearchParams])
 
   const createMutation = useMutation({
     mutationFn: (d: Partial<FormState>) => tunnelsApi.create(d),
@@ -166,22 +193,26 @@ export default function TunnelsPage() {
   })
 
   const togglePrivate = (t: Tunnel) => {
-    updateMutation.mutate({ id: t.id, data: { name: t.name, local_port: t.local_port, subdomain: t.subdomain, private: !t.private } })
-  }
-
-  // VPS config for jumpbox commands. The localStatus query above carries
-  // jumpbox_user — the dedicated, restricted system user we want operators
-  // to SSH into, not the dashboard's service user. Falls back to
-  // vps.username on legacy installs that haven't created the jumpbox user
-  // yet (re-running `gopher install` creates it and migrates the keys).
-  const { data: vpsData } = useQuery({ queryKey: ['vps'], queryFn: () => import('../api/vps').then(m => m.vpsApi.get()) })
-  const vps = vpsData?.data
-
-  const jumpboxCmd = (t: Tunnel) => {
-    if (!vps) return ''
-    const sshUser = localStatus?.jumpbox_user || vps.username
-    const vpsAddr = `${sshUser}@${vps.host}`
-    return `ssh -L ${t.local_port}:localhost:${t.rathole_port} ${vpsAddr} -N`
+    // Send the FULL set of fields the backend reads — omitting them makes the
+    // Go DTO decode them as false/empty and wipes bot protection, the IP
+    // allowlist, and TLS-skip on a single click. (The toggle is disabled for
+    // bot-protected tunnels in the UI, so visibility there is changed via Edit.)
+    updateMutation.mutate({
+      id: t.id,
+      data: {
+        name: t.name,
+        local_port: t.local_port,
+        subdomain: t.subdomain,
+        private: !t.private,
+        bot_protection_enabled: t.bot_protection_enabled,
+        bot_protection_ttl: t.bot_protection_ttl,
+        bot_protection_allow_ip: t.bot_protection_allow_ip,
+        auth_enabled: t.auth_enabled,
+        auth_ttl: t.auth_ttl,
+        auth_allow_ip: t.auth_allow_ip,
+        tls_skip_verify: t.tls_skip_verify,
+      },
+    })
   }
 
   const testTunnel = async (id: string) => {
@@ -314,7 +345,24 @@ export default function TunnelsPage() {
                 <thead className="bg-gray-50 border-b">
                   <tr>
                     {['Name', 'Machine', 'Routing', 'Status', 'Uptime', 'Actions'].map(h => (
-                      <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
+                      <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                        {h === 'Status' ? (
+                          <span className="inline-flex items-center gap-1">
+                            Status
+                            <span className="relative group">
+                              <Info size={12} className="text-gray-400 cursor-help" />
+                              <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1.5 w-72 bg-gray-900 text-white text-xs rounded-lg px-3 py-2 hidden group-hover:block z-50 shadow-lg pointer-events-none font-normal normal-case tracking-normal text-left">
+                                <p className="mb-1.5 text-gray-300">gopher passes real traffic through the tunnel's server port, then asks the origin's agent whether the local port is actually listening.</p>
+                                <p><span className="text-yellow-300 font-semibold">Provisioning</span> — tunnel created; waiting for the edge to serve the URL (TLS certificate issuance, usually under a minute).</p>
+                                <p className="mt-1"><span className="text-green-300 font-semibold">Active</span> — traffic reached the service and it responded; the whole path works.</p>
+                                <p className="mt-1"><span className="text-emerald-300 font-semibold">Connected</span> — tunnel up and the port is listening, but the service didn't answer the probe (normal for speak-first apps like MySQL, Minecraft).</p>
+                                <p className="mt-1"><span className="text-amber-300 font-semibold">Idle</span> — tunnel up, but nothing is listening on the origin's local port.</p>
+                                <p className="mt-1"><span className="text-red-300 font-semibold">Offline</span> — the tunnel path is down (server port unreachable, or the machine is offline).</p>
+                              </div>
+                            </span>
+                          </span>
+                        ) : h}
+                      </th>
                     ))}
                   </tr>
                 </thead>
@@ -357,14 +405,11 @@ export default function TunnelsPage() {
                                     <a href={`https://${t.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
                                       className="text-blue-600 hover:underline">{t.subdomain}.{domain}</a>
                                   )}
-                                  {isPrivate ? (
-                                    <span className="text-gray-400">VPS-local <span className="text-gray-500">:{t.rathole_port}</span></span>
-                                  ) : (
-                                    <span className="text-gray-500">
-                                      {t.transport === 'udp' && <span className="text-purple-600 font-semibold mr-0.5">UDP</span>}
-                                      {displayHost ?? 'server'}:{t.rathole_port}
-                                    </span>
-                                  )}
+                                  {/* edge bind — 127.0.0.1 for private, server host for public */}
+                                  <span className={isPrivate ? 'text-gray-400' : 'text-gray-500'}>
+                                    {t.transport === 'udp' && <span className="text-purple-600 font-semibold mr-0.5">UDP</span>}
+                                    {isPrivate ? '127.0.0.1' : (displayHost ?? 'server')}:{t.rathole_port}
+                                  </span>
                                 </div>
                                 <ArrowRight size={12} className="text-gray-400 shrink-0" />
                                 <span>localhost:{t.local_port}</span>
@@ -380,7 +425,7 @@ export default function TunnelsPage() {
                                 <StatusBadge status={t.status} />
                                 {isPrivate && (
                                   <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200 flex items-center gap-0.5">
-                                    <Lock size={10} /> Private
+                                    <Lock size={10} /> Proxied
                                   </span>
                                 )}
                                 {t.transport === 'udp' && (
@@ -392,6 +437,9 @@ export default function TunnelsPage() {
                                 {t.bot_protection_enabled && (
                                   <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-orange-50 text-orange-700 border border-orange-200">Bot Shield</span>
                                 )}
+                                {t.auth_enabled && (
+                                  <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">Password</span>
+                                )}
                                 {t.tls_skip_verify && (
                                   <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-50 text-yellow-700 border border-yellow-200">Self-signed</span>
                                 )}
@@ -402,16 +450,18 @@ export default function TunnelsPage() {
                             </td>
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-1">
+                                {t.kind !== 'machine-agent' && (
                                 <button
                                   onClick={() => togglePrivate(t)}
-                                  disabled={updateMutation.isPending}
-                                  title={isPrivate ? 'Make public' : 'Make private'}
-                                  className={`p-1.5 rounded border ${isPrivate
+                                  disabled={updateMutation.isPending || t.bot_protection_enabled || t.auth_enabled || t.transport === 'udp'}
+                                  title={t.transport === 'udp' ? 'UDP tunnels are always Direct — Caddy routes HTTP/HTTPS only' : (t.bot_protection_enabled || t.auth_enabled) ? 'Gated tunnels must stay Proxied — use Edit to change visibility' : (isPrivate ? 'Switch to Direct (open a raw port)' : 'Switch to Proxied (Caddy/localhost only)')}
+                                  className={`p-1.5 rounded border disabled:opacity-40 disabled:cursor-not-allowed ${isPrivate
                                     ? 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
                                     : 'bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-gray-600'}`}
                                 >
                                   {isPrivate ? <Globe size={13} /> : <Lock size={13} />}
                                 </button>
+                                )}
                                 {!isProtectedTunnel && (
                                   <>
                                     <button onClick={() => openEditModal(t)} title="Edit tunnel" className="p-1.5 rounded border bg-white text-gray-400 border-gray-200 hover:bg-gray-50 hover:text-gray-600"><Pencil size={13} /></button>
@@ -422,20 +472,6 @@ export default function TunnelsPage() {
                               </div>
                             </td>
                           </tr>
-                          {t.private && jumpboxCmd(t) && (
-                            <tr className="bg-slate-50 border-t-0">
-                              <td colSpan={6} className="px-4 pb-2 pt-0">
-                                <div className="flex items-center gap-2 text-xs text-slate-600">
-                                  <Terminal size={11} className="shrink-0" />
-                                  <span className="font-medium">Jumpbox:</span>
-                                  <code className="font-mono text-slate-700 bg-slate-100 px-2 py-0.5 rounded select-all">{jumpboxCmd(t)}</code>
-                                  <button onClick={() => { navigator.clipboard.writeText(jumpboxCmd(t)); toast.success('Copied!') }} className="text-slate-400 hover:text-slate-600">
-                                    <ClipboardCopy size={11} />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          )}
                         </React.Fragment>
                       )
                     })}
@@ -448,7 +484,7 @@ export default function TunnelsPage() {
       )}
 
       {modal.isOpen && (
-        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
+        <div className="fixed inset-0 !mt-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg">
             <div className="flex items-center justify-between p-4 border-b">
               <h2 className="text-lg font-semibold">{modal.editTunnel ? 'Edit Tunnel' : 'Add Tunnel'}</h2>
@@ -456,22 +492,30 @@ export default function TunnelsPage() {
             </div>
             {(() => {
               const isEdit = Boolean(modal.editTunnel)
-              const serverPortConflict = !isEdit && form.rathole_port > 0 && (
+              const serverPortDbConflict = !isEdit && form.rathole_port > 0 && (
                 tunnels.some(t => t.rathole_port === form.rathole_port) ||
                 machines.some(m => m.tunnel_port === form.rathole_port)
               )
+              // Backend probe result, only trusted when it matches the current port
+              // (a debounced response for a stale port must not gate the new one).
+              const serverPortOSConflict = !isEdit && portCheck !== null &&
+                portCheck.port === form.rathole_port && !portCheck.available
+              const serverPortConflict = serverPortDbConflict || serverPortOSConflict
               const localPortConflict = !isEdit && form.local_port > 0 && form.machine_id !== '' &&
                 tunnels.some(t => t.machine_id === form.machine_id && t.local_port === form.local_port)
+              // Password protection needs a password: either one already exists
+              // (edit) or the operator typed a new one. Block save/create otherwise.
+              const authNeedsPassword = form.auth_enabled && !form.auth_password_set && form.auth_password.trim() === ''
               const canCreate = form.machine_id !== '' && form.name.trim() !== '' &&
-                form.rathole_port > 0 && !serverPortConflict && !localPortConflict && !createMutation.isPending
-              const canSave = form.name.trim() !== '' && !updateMutation.isPending
+                form.local_port > 0 && form.rathole_port > 0 && !serverPortConflict && !localPortConflict && !authNeedsPassword && !createMutation.isPending
+              const canSave = form.name.trim() !== '' && !authNeedsPassword && !updateMutation.isPending
               return (
             <>
             <div className="p-4 space-y-4">
               {!routingEnabled && (
                 <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-800">
-                  <strong>URL routing is disabled.</strong> Caddy/reverse-proxy setup was skipped, so tunnels are exposed
-                  by server port only.
+                  <strong>URL routing is disabled.</strong> No domain is configured yet, so tunnels are exposed by server
+                  port only. Finish the setup wizard to enable subdomain routing.
                 </div>
               )}
 
@@ -496,57 +540,24 @@ export default function TunnelsPage() {
                 </select>
               </div>
 
-              <div className="flex gap-4">
-                <div className="flex-1">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Transport</label>
-                  <div className="flex gap-2">
-                    {(['tcp', 'udp'] as const).map(t => (
-                      <button key={t} type="button"
-                        onClick={() => setForm(f => ({ ...f, transport: t, ...(t === 'udp' ? { subdomain: '', no_tls: false } : {}) }))}
-                        className={`px-4 py-1.5 rounded-lg text-sm font-semibold border transition-colors ${
-                          form.transport === t
-                            ? t === 'udp' ? 'bg-purple-600 text-white border-purple-600' : 'bg-blue-600 text-white border-blue-600'
-                            : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
-                        }`}>
-                        {t.toUpperCase()}
-                      </button>
-                    ))}
-                  </div>
-                  {form.transport === 'udp' && (
-                    <p className="text-xs text-purple-600 mt-1">UDP tunnels don't support HTTP subdomain routing.</p>
-                  )}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Transport</label>
+                <div className="flex gap-2">
+                  {(['tcp', 'udp'] as const).map(t => (
+                    <button key={t} type="button"
+                      onClick={() => setForm(f => ({ ...f, transport: t, ...(t === 'udp' ? { subdomain: '', no_tls: false, private: false, bot_protection_enabled: false, auth_enabled: false } : {}) }))}
+                      className={`px-4 py-1.5 rounded-lg text-sm font-semibold border transition-colors ${
+                        form.transport === t
+                          ? t === 'udp' ? 'bg-purple-600 text-white border-purple-600' : 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                      }`}>
+                      {t.toUpperCase()}
+                    </button>
+                  ))}
                 </div>
-                <div>
-                  <div className="flex items-center gap-1 mb-2">
-                    <label className="block text-sm font-medium text-gray-700">Visibility</label>
-                    <span className="relative group">
-                      <Info size={13} className="text-gray-400 cursor-help" />
-                      <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-64 bg-gray-900 text-white text-xs rounded-lg px-3 py-2 hidden group-hover:block z-50 shadow-lg pointer-events-none">
-                        <p><strong>Private</strong> binds 127.0.0.1 — the port is only reachable from the VPS itself, not the public internet.</p>
-                        <p className="mt-1"><strong>Public</strong> binds 0.0.0.0 — the port is open on all interfaces.</p>
-                        {routingEnabled && form.subdomain.trim() !== '' && (
-                          <p className="mt-1 text-blue-300">Since you have a subdomain configured, traffic will be routed through Caddy — keeping the port private is recommended.</p>
-                        )}
-                        {routingEnabled && form.subdomain.trim() === '' && (
-                          <p className="mt-1 text-gray-400">If you add a subdomain, Caddy will handle routing and you can safely keep the port private.</p>
-                        )}
-                      </div>
-                    </span>
-                  </div>
-                  <div className="flex gap-2">
-                    {([false, true] as const).map(priv => (
-                      <button key={String(priv)} type="button"
-                        onClick={() => setForm(f => ({ ...f, private: priv }))}
-                        className={`px-3 py-1.5 rounded-lg text-sm font-semibold border transition-colors flex items-center gap-1 ${
-                          form.private === priv
-                            ? priv ? 'bg-slate-700 text-white border-slate-700' : 'bg-green-600 text-white border-green-600'
-                            : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
-                        }`}>
-                        {priv ? <><Lock size={12} /> Private</> : <><Globe size={12} /> Public</>}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                {form.transport === 'udp' && (
+                  <p className="text-xs text-purple-600 mt-1">UDP tunnels don't support HTTP subdomain routing.</p>
+                )}
               </div>
 
               <div>
@@ -556,7 +567,7 @@ export default function TunnelsPage() {
                 </label>
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-gray-500 font-mono shrink-0">localhost:</span>
-                  <input type="number" value={form.local_port} onChange={e => setForm(f => ({ ...f, local_port: Number(e.target.value) }))}
+                  <input type="number" value={form.local_port || ''} onChange={e => setForm(f => ({ ...f, local_port: Number(e.target.value) }))}
                     className={`flex-1 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 border ${
                       localPortConflict
                         ? 'border-amber-400 focus:ring-amber-400 bg-amber-50'
@@ -575,28 +586,64 @@ export default function TunnelsPage() {
                   Server Port
                   <span className="ml-1 font-normal text-gray-400 text-xs">(port on your VPS — 1024–65535)</span>
                 </label>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-500 font-mono shrink-0 truncate max-w-[160px]" title={displayHost ?? 'server'}>{displayHost ?? 'server'}:</span>
-                  <input
-                    type="number"
-                    min={1024}
-                    max={65535}
-                    value={form.rathole_port || ''}
-                    onChange={e => setForm(f => ({ ...f, rathole_port: Number(e.target.value) }))}
-                    className={`flex-1 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 border ${
-                      serverPortConflict
-                        ? 'border-red-400 focus:ring-red-400 bg-red-50'
-                        : 'border-gray-300 focus:ring-blue-500'
-                    }`}
-                  />
-                </div>
-                {serverPortConflict && (
-                  <p className="text-xs text-red-600 mt-1 flex items-center gap-1">
-                    ⚠ Port {form.rathole_port} is already in use.
-                  </p>
-                )}
+                {/* paused during the create mutation: Create() claims the port
+                    in the DB before its network I/O finishes, so a check firing
+                    mid-submission would flash "port in use" against our own
+                    in-flight request. */}
+                <ServerPortInput
+                  prefix={displayHost ?? 'server'}
+                  value={form.rathole_port || null}
+                  onChange={p => setForm(f => ({ ...f, rathole_port: p ?? 0 }))}
+                  paused={createMutation.isPending}
+                  skipCheckFor={verifiedPortRef.current}
+                  externalConflict={serverPortDbConflict ? `Port ${form.rathole_port} is already in use by another tunnel.` : undefined}
+                  onCheck={setPortCheck}
+                />
               </div>
                 </>
+              )}
+
+              {/* Visibility — editable in both create AND edit (privacy can change post-creation).
+                  UDP is pinned to Direct: Proxied means "bind 127.0.0.1, reach it through
+                  Caddy", and Caddy routes HTTP/HTTPS only — a Proxied UDP port would be
+                  reachable from nowhere but the VPS itself. */}
+              {form.transport === 'udp' ? (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Visibility</label>
+                  <p className="flex items-start gap-1.5 text-xs text-gray-500">
+                    <Globe size={13} className="mt-0.5 shrink-0 text-gray-400" />
+                    UDP tunnels are always Direct — a raw port open on all interfaces. Proxied needs Caddy, which routes HTTP/HTTPS only.
+                  </p>
+                </div>
+              ) : (
+              <div>
+                <div className="flex items-center gap-1 mb-2">
+                  <label className="block text-sm font-medium text-gray-700">Visibility</label>
+                  <span className="relative group">
+                    <Info size={13} className="text-gray-400 cursor-help" />
+                    <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-64 bg-gray-900 text-white text-xs rounded-lg px-3 py-2 hidden group-hover:block z-50 shadow-lg pointer-events-none">
+                      <p><strong>Proxied</strong> binds 127.0.0.1 — no raw public port. The tunnel is reachable only through its HTTPS subdomain (via Caddy) or from the VPS itself.</p>
+                      <p className="mt-1"><strong>Direct</strong> binds 0.0.0.0 — a raw port is open on all interfaces, reachable directly by IP:port.</p>
+                      {routingEnabled && form.subdomain.trim() !== '' && (
+                        <p className="mt-1 text-blue-300">Since you have a subdomain, traffic routes through Caddy — Proxied is recommended.</p>
+                      )}
+                    </div>
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  {([false, true] as const).map(priv => (
+                    <button key={String(priv)} type="button"
+                      onClick={() => setForm(f => ({ ...f, private: priv, bot_protection_enabled: priv ? f.bot_protection_enabled : false, auth_enabled: priv ? f.auth_enabled : false }))}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-semibold border transition-colors flex items-center gap-1 ${
+                        form.private === priv
+                          ? priv ? 'bg-slate-700 text-white border-slate-700' : 'bg-green-600 text-white border-green-600'
+                          : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                      }`}>
+                      {priv ? <><Lock size={12} /> Proxied</> : <><Globe size={12} /> Direct</>}
+                    </button>
+                  ))}
+                </div>
+              </div>
               )}
 
               <div>
@@ -617,7 +664,7 @@ export default function TunnelsPage() {
                     <div className="mt-2 space-y-2">
                       {domain && (
                         <div className="text-xs px-2 py-1 rounded font-mono bg-blue-50 text-blue-700">
-                          {form.no_tls ? 'http' : 'https'}://{form.subdomain}.{domain} → localhost:{form.local_port}
+                          {form.no_tls ? 'http' : 'https'}://{form.subdomain}.{domain} → {form.private ? '127.0.0.1' : (displayHost ?? 'server')}:{form.rathole_port} → localhost:{form.local_port}
                         </div>
                       )}
                       {/* Contextual hint — SSH port escalates to a warning */}
@@ -659,53 +706,168 @@ export default function TunnelsPage() {
                 </div>
               ) : null}
 
-              {/* Bot Protection — requires subdomain (Host-header routing) */}
+              {/* Access control — bot protection + password auth. Both require a
+                  subdomain (Host-header routing) and coerce the tunnel to Proxied. */}
               {routingEnabled && form.transport !== 'udp' && form.subdomain.trim() !== '' && (
                 <div className="border border-gray-200 rounded-lg p-3 space-y-3">
-                  <label className="flex items-center gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={form.bot_protection_enabled}
-                      onChange={e => setForm(f => ({ ...f, bot_protection_enabled: e.target.checked }))}
-                      className="rounded"
-                    />
-                    <span className="text-sm font-medium text-gray-700">Bot Protection <span className="bg-orange-100 text-orange-700 text-xs font-semibold px-1.5 py-0.5 rounded">Alpha</span></span>
-                    <span className="text-xs text-gray-400 font-normal">JS proof-of-work challenge for browsers</span>
-                  </label>
-                  {form.bot_protection_enabled && (
-                    <div className="space-y-3 pl-5">
-                      <div>
+                  <div className="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                    <Shield size={13} className="text-gray-400" /> Access Control
+                  </div>
+                  <p className="flex items-start gap-1.5 text-xs text-gray-500">
+                    <Lock size={12} className="mt-0.5 shrink-0 text-gray-400" />
+                    Gates require a Proxied tunnel (Caddy-only) — enabling one switches Visibility to Proxied, since a Direct raw port would bypass it.
+                  </p>
+
+                  {/* ── Bot Protection ── */}
+                  <div>
+                    <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={form.bot_protection_enabled}
+                        onChange={e => setForm(f => ({ ...f, bot_protection_enabled: e.target.checked, private: e.target.checked ? true : f.private }))}
+                        className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 shrink-0"
+                      />
+                      <span className="text-sm font-medium text-gray-700">Bot Protection</span>
+                      <span className="bg-amber-100 text-amber-700 text-[11px] font-semibold px-1.5 py-0.5 rounded shrink-0">Alpha</span>
+                      <span className="text-xs text-gray-400 font-normal truncate">JS proof-of-work challenge for browsers</span>
+                    </label>
+                    {form.bot_protection_enabled && (
+                      <div className="ml-6 mt-2 rounded-md border border-gray-100 bg-gray-50/80">
+                        <button
+                          onClick={() => setBotAdvancedOpen(o => !o)}
+                          className="w-full flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-gray-500 hover:text-gray-700 text-left"
+                        >
+                          {botAdvancedOpen ? <ChevronDown size={13} className="shrink-0" /> : <ChevronRight size={13} className="shrink-0" />}
+                          Advanced
+                          {!botAdvancedOpen && (
+                            <span className="font-normal text-gray-400 truncate">· session TTL, IP allowlist</span>
+                          )}
+                        </button>
+                        {botAdvancedOpen && (
+                          <div className="px-2.5 pb-3 pt-1 space-y-3">
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">
+                                Session TTL (hours) <span className="text-gray-400 font-normal">— 0 = 24 h default</span>
+                              </label>
+                              <input
+                                type="number"
+                                min={0}
+                                value={form.bot_protection_ttl === 0 ? '' : Math.round(form.bot_protection_ttl / 3600)}
+                                onChange={e => setForm(f => ({
+                                  ...f,
+                                  bot_protection_ttl: e.target.value === '' ? 0 : Number(e.target.value) * 3600,
+                                }))}
+                                placeholder="24"
+                                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">
+                                IP Allowlist <span className="text-gray-400 font-normal">— one CIDR or IP per line, bypasses challenge</span>
+                              </label>
+                              <textarea
+                                rows={3}
+                                value={allowIPDisplay(form.bot_protection_allow_ip)}
+                                onChange={e => setForm(f => ({ ...f, bot_protection_allow_ip: cidrToJSON(e.target.value) }))}
+                                placeholder={"192.168.1.0/24\n10.0.0.1"}
+                                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none bg-white"
+                              />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* ── Password Protection ── */}
+                  <div>
+                    <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={form.auth_enabled}
+                        onChange={e => setForm(f => ({ ...f, auth_enabled: e.target.checked, private: e.target.checked ? true : f.private }))}
+                        className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 shrink-0"
+                      />
+                      <span className="text-sm font-medium text-gray-700">Password Protection</span>
+                      <span className="bg-amber-100 text-amber-700 text-[11px] font-semibold px-1.5 py-0.5 rounded shrink-0">Alpha</span>
+                      <span className="text-xs text-gray-400 font-normal truncate">shared password login gate</span>
+                    </label>
+                    {form.auth_enabled && (
+                      <div className="ml-6 mt-2">
                         <label className="block text-xs font-medium text-gray-600 mb-1">
-                          Session TTL (hours) <span className="text-gray-400 font-normal">— 0 = 24 h default</span>
+                          Password
+                          {form.auth_password_set && <span className="text-gray-400 font-normal"> — set. Leave blank to keep the current one.</span>}
                         </label>
                         <input
-                          type="number"
-                          min={0}
-                          value={form.bot_protection_ttl === 0 ? '' : Math.round(form.bot_protection_ttl / 3600)}
-                          onChange={e => setForm(f => ({
-                            ...f,
-                            bot_protection_ttl: e.target.value === '' ? 0 : Number(e.target.value) * 3600,
-                          }))}
-                          placeholder="24"
+                          type="password"
+                          autoComplete="new-password"
+                          value={form.auth_password}
+                          onChange={e => setForm(f => ({ ...f, auth_password: e.target.value }))}
+                          placeholder={form.auth_password_set ? '••••••••' : 'Set a password'}
                           className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
                         />
+                        {authNeedsPassword && (
+                          <p className="text-xs text-red-600 mt-1">A password is required to enable this.</p>
+                        )}
                       </div>
-                      <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">
-                          IP Allowlist <span className="text-gray-400 font-normal">— one CIDR or IP per line, bypasses challenge</span>
-                        </label>
-                        <textarea
-                          rows={3}
-                          value={allowIPDisplay(form.bot_protection_allow_ip)}
-                          onChange={e => setForm(f => ({ ...f, bot_protection_allow_ip: cidrToJSON(e.target.value) }))}
-                          placeholder={"192.168.1.0/24\n10.0.0.1"}
-                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none"
-                        />
+                    )}
+                    {form.auth_enabled && (
+                      <div className="ml-6 mt-2 rounded-md border border-gray-100 bg-gray-50/80">
+                        <button
+                          onClick={() => setAuthAdvancedOpen(o => !o)}
+                          className="w-full flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-gray-500 hover:text-gray-700 text-left"
+                        >
+                          {authAdvancedOpen ? <ChevronDown size={13} className="shrink-0" /> : <ChevronRight size={13} className="shrink-0" />}
+                          Advanced
+                          {!authAdvancedOpen && (
+                            <span className="font-normal text-gray-400 truncate">· session TTL, IP allowlist</span>
+                          )}
+                        </button>
+                        {authAdvancedOpen && (
+                          <div className="px-2.5 pb-3 pt-1 space-y-3">
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">
+                                Session TTL (hours) <span className="text-gray-400 font-normal">— 0 = 24 h default</span>
+                              </label>
+                              <input
+                                type="number"
+                                min={0}
+                                value={form.auth_ttl === 0 ? '' : Math.round(form.auth_ttl / 3600)}
+                                onChange={e => setForm(f => ({
+                                  ...f,
+                                  auth_ttl: e.target.value === '' ? 0 : Number(e.target.value) * 3600,
+                                }))}
+                                placeholder="24"
+                                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">
+                                IP Allowlist <span className="text-gray-400 font-normal">— one CIDR or IP per line, bypasses login</span>
+                              </label>
+                              <textarea
+                                rows={3}
+                                value={allowIPDisplay(form.auth_allow_ip)}
+                                onChange={e => setForm(f => ({ ...f, auth_allow_ip: cidrToJSON(e.target.value) }))}
+                                placeholder={"192.168.1.0/24\n10.0.0.1"}
+                                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none bg-white"
+                              />
+                            </div>
+                          </div>
+                        )}
                       </div>
-                      <p className="text-xs text-orange-700 bg-orange-50 border border-orange-100 rounded px-2 py-1.5">
-                        API clients (Accept: application/json) receive 403. WebSocket connections are allowed after the cookie is set. Does not protect against L3/L4 attacks.
-                      </p>
-                    </div>
+                    )}
+                  </div>
+
+                  {/* Unified caveat — shown once, covers whichever gates are on */}
+                  {(form.bot_protection_enabled || form.auth_enabled) && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      Gates run at the HTTP layer. API clients (Accept: application/json) are rejected
+                      ({form.bot_protection_enabled && '403 for the bot challenge'}
+                      {form.bot_protection_enabled && form.auth_enabled && ', '}
+                      {form.auth_enabled && '401 for the password gate'}).
+                      WebSocket connections pass once the session cookie is set. Does not protect against L3/L4 attacks.
+                    </p>
                   )}
                 </div>
               )}
@@ -725,6 +887,10 @@ export default function TunnelsPage() {
                       bot_protection_enabled: form.bot_protection_enabled,
                       bot_protection_ttl: form.bot_protection_ttl,
                       bot_protection_allow_ip: form.bot_protection_allow_ip,
+                      auth_enabled: form.auth_enabled,
+                      auth_password: form.auth_password,
+                      auth_ttl: form.auth_ttl,
+                      auth_allow_ip: form.auth_allow_ip,
                     },
                   }, { onSuccess: () => { qc.invalidateQueries({ queryKey: ['tunnels'] }); setModal({ isOpen: false }); toast.success('Tunnel updated!') }, onError: (e: Error) => toast.error(e.message) })}
                   disabled={!canSave}

@@ -1,7 +1,10 @@
 package db
 
 import (
+	"crypto/subtle"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,27 +14,25 @@ import (
 
 // VPS Repository
 
+// GetVPS returns the edge's identity (host + domain) synthesized from
+// AppSettings. The old vps_configs table is no longer written (the remote-VPS
+// management flow was removed), so reading it directly always 404'd — which the
+// dashboard's jumpbox-command builder turned into a crash on installs without a
+// jumpbox user. Deriving from settings keeps GET /api/vps and /api/status
+// working. Returns NotFound only when the edge genuinely isn't configured yet.
 func GetVPS() (*VPSConfig, error) {
-	var vps VPSConfig
-	if err := DB.First(&vps).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, &apperrors.NotFoundError{Resource: "vps_config", ID: "singleton"}
-		}
+	settings, err := GetSettings()
+	if err != nil {
 		return nil, err
 	}
-	return &vps, nil
-}
-
-func CreateVPS(vps *VPSConfig) error {
-	return DB.Create(vps).Error
-}
-
-func UpdateVPS(vps *VPSConfig) error {
-	return DB.Save(vps).Error
-}
-
-func DeleteVPS(id string) error {
-	return DB.Delete(&VPSConfig{}, "id = ?", id).Error
+	host := settings.ServerHost
+	if host == "" {
+		host = settings.Domain
+	}
+	if host == "" {
+		return nil, &apperrors.NotFoundError{Resource: "vps_config", ID: "singleton"}
+	}
+	return &VPSConfig{Host: host, Domain: settings.Domain}, nil
 }
 
 // Machine Repository
@@ -56,7 +57,11 @@ func GetMachine(id string) (*Machine, error) {
 }
 
 func CreateMachine(machine *Machine) error {
-	return DB.Create(machine).Error
+	err := DB.Create(machine).Error
+	if err == nil {
+		notifyStatusChange("machine", machine.ID, "", machine.Status)
+	}
+	return err
 }
 
 // GetMachineByAgentToken resolves a machine by its per-machine agent bearer
@@ -73,6 +78,12 @@ func GetMachineByAgentToken(token string) (*Machine, error) {
 		}
 		return nil, err
 	}
+	// Re-check in constant time: the SQL lookup is what found the row, but a
+	// bearer credential should never be accepted on a comparison whose timing
+	// (or collation) we don't control.
+	if subtle.ConstantTimeCompare([]byte(m.AgentToken), []byte(token)) != 1 {
+		return nil, &apperrors.NotFoundError{Resource: "machine", ID: "(by agent token)"}
+	}
 	return &m, nil
 }
 
@@ -83,7 +94,18 @@ func UpdateMachine(machine *Machine) error {
 // SetMachineStatus updates only Status / LastSeen / UpdatedAt — used by the
 // monitor and the TCP-fallback health probe so concurrent writes from the
 // agent path can't be clobbered by a stale full-record Save.
+// SetMachineConfigPushPending sets/clears the ConfigPushPending flag without
+// touching any other field. Partial Update (vs. a full GORM Save) so we don't
+// race the health/monitor writers that may have just updated agent fields.
+func SetMachineConfigPushPending(id string, pending bool) error {
+	return DB.Model(&Machine{}).Where("id = ?", id).Updates(map[string]any{
+		"config_push_pending": pending,
+		"updated_at":          time.Now(),
+	}).Error
+}
+
 func SetMachineStatus(id, status string, lastSeen *time.Time) error {
+	old := currentMachineStatus(id)
 	updates := map[string]any{
 		"status":     status,
 		"updated_at": time.Now(),
@@ -91,7 +113,29 @@ func SetMachineStatus(id, status string, lastSeen *time.Time) error {
 	if lastSeen != nil {
 		updates["last_seen"] = *lastSeen
 	}
-	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
+	if status == "connected" {
+		when := time.Now()
+		if lastSeen != nil {
+			when = *lastSeen
+		}
+		updates["connected_since"] = connectedSinceExpr(when)
+	}
+	err := DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
+	if err == nil {
+		notifyStatusChange("machine", id, old, status)
+	}
+	return err
+}
+
+// connectedSinceExpr stamps connected_since on the up-transition (or the first
+// observation where it's still NULL) but preserves it across consecutive
+// connected polls, so uptime is continuous rather than resetting every tick.
+// SQLite evaluates the CASE against the pre-update row, so `status` here is the
+// machine's status *before* this Update sets it to "connected".
+func connectedSinceExpr(when time.Time) any {
+	return gorm.Expr(
+		"CASE WHEN status <> ? OR connected_since IS NULL THEN ? ELSE connected_since END",
+		"connected", when)
 }
 
 // SetMachineAgentDegraded records the "agent up, rathole down" state: the
@@ -101,6 +145,7 @@ func SetMachineStatus(id, status string, lastSeen *time.Time) error {
 // "offline" so the tunnels list / network map don't keep claiming the
 // machine can serve traffic.
 func SetMachineAgentDegraded(id, version string, when time.Time) error {
+	old := currentMachineStatus(id)
 	updates := map[string]any{
 		"agent_installed":     true,
 		"agent_version":       version,
@@ -109,7 +154,11 @@ func SetMachineAgentDegraded(id, version string, when time.Time) error {
 		"status":              "offline",
 		"updated_at":          when,
 	}
-	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
+	err := DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
+	if err == nil {
+		notifyStatusChange("machine", id, old, "offline")
+	}
+	return err
 }
 
 // SetMachineAgentSeen marks the machine as having a healthy, reachable agent.
@@ -118,6 +167,7 @@ func SetMachineAgentDegraded(id, version string, when time.Time) error {
 // Status is also set to "connected" since reaching the agent proves end-to-end
 // connectivity through the rathole back-channel.
 func SetMachineAgentSeen(id, version string, when time.Time) error {
+	old := currentMachineStatus(id)
 	updates := map[string]any{
 		"agent_installed":     true,
 		"agent_version":       version,
@@ -125,13 +175,63 @@ func SetMachineAgentSeen(id, version string, when time.Time) error {
 		"agent_install_error": "",
 		"status":              "connected",
 		"last_seen":           when,
+		"connected_since":     connectedSinceExpr(when),
 		"updated_at":          when,
 	}
-	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
+	err := DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
+	if err == nil {
+		notifyStatusChange("machine", id, old, "connected")
+	}
+	return err
+}
+
+// SetMachineAgentOutdated flags (or clears) a machine whose agent needs an
+// upgrade — reachable-but-older or pre-gRPC skew. Partial update so it doesn't
+// clobber concurrent status writes.
+func SetMachineAgentOutdated(id string, outdated bool) error {
+	return DB.Model(&Machine{}).Where("id = ?", id).Updates(map[string]any{
+		"agent_outdated": outdated,
+		"updated_at":     time.Now(),
+	}).Error
 }
 
 func DeleteMachine(id string) error {
-	return DB.Delete(&Machine{}, "id = ?", id).Error
+	err := DB.Delete(&Machine{}, "id = ?", id).Error
+	if err == nil {
+		notifyStatusChange("machine", id, "", "deleted")
+	}
+	return err
+}
+
+// Dashboard Session Repository — see the DashboardSession model comment for
+// why these are persisted (self-restarts must not log the operator out).
+
+func CreateDashboardSession(tokenHash string, expiresAt time.Time) error {
+	// Opportunistic sweep: expired rows are dead weight and this is the only
+	// low-frequency write path, so no background reaper is needed.
+	_ = DB.Where("expires_at < ?", time.Now()).Delete(&DashboardSession{}).Error
+	return DB.Create(&DashboardSession{TokenHash: tokenHash, ExpiresAt: expiresAt}).Error
+}
+
+// GetDashboardSession returns nil (no error) when the session doesn't exist.
+func GetDashboardSession(tokenHash string) (*DashboardSession, error) {
+	var s DashboardSession
+	if err := DB.First(&s, "token_hash = ?", tokenHash).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &s, nil
+}
+
+func TouchDashboardSession(tokenHash string, expiresAt time.Time) error {
+	return DB.Model(&DashboardSession{}).Where("token_hash = ?", tokenHash).
+		Update("expires_at", expiresAt).Error
+}
+
+func DeleteDashboardSession(tokenHash string) error {
+	return DB.Delete(&DashboardSession{}, "token_hash = ?", tokenHash).Error
 }
 
 // Tunnel Repository
@@ -164,7 +264,11 @@ func GetTunnel(id string) (*Tunnel, error) {
 }
 
 func CreateTunnel(tunnel *Tunnel) error {
-	return DB.Create(tunnel).Error
+	err := DB.Create(tunnel).Error
+	if err == nil {
+		notifyStatusChange("tunnel", tunnel.ID, "", tunnel.Status)
+	}
+	return err
 }
 
 func UpdateTunnel(tunnel *Tunnel) error {
@@ -177,14 +281,38 @@ func UpdateTunnel(tunnel *Tunnel) error {
 // stale full-record DB.Save 30 seconds later. Same pattern as
 // SetMachineStatus / SetMachineAgentSeen.
 func SetTunnelStatus(id, status string) error {
-	return DB.Model(&Tunnel{}).Where("id = ?", id).Updates(map[string]any{
+	old := currentTunnelStatus(id)
+	err := DB.Model(&Tunnel{}).Where("id = ?", id).Updates(map[string]any{
 		"status":     status,
 		"updated_at": time.Now(),
 	}).Error
+	if err == nil {
+		notifyStatusChange("tunnel", id, old, status)
+	}
+	return err
+}
+
+// SetTunnelCaddyPending flips the provisioning flag without touching the
+// rest of the row (same partial-update rationale as SetTunnelStatus). The
+// clear fires a status notification so dashboards drop the "provisioning"
+// presentation promptly instead of waiting out their poll interval.
+func SetTunnelCaddyPending(id string, pending bool) error {
+	err := DB.Model(&Tunnel{}).Where("id = ?", id).Updates(map[string]any{
+		"caddy_pending": pending,
+		"updated_at":    time.Now(),
+	}).Error
+	if err == nil && !pending {
+		notifyStatusChange("tunnel", id, "provisioning", currentTunnelStatus(id))
+	}
+	return err
 }
 
 func DeleteTunnel(id string) error {
-	return DB.Delete(&Tunnel{}, "id = ?", id).Error
+	err := DB.Delete(&Tunnel{}, "id = ?", id).Error
+	if err == nil {
+		notifyStatusChange("tunnel", id, "", "deleted")
+	}
+	return err
 }
 
 // allUsedPorts returns every port currently assigned across service tunnels,
@@ -225,6 +353,46 @@ func allUsedPorts() (map[int]bool, error) {
 // (bootstrap allocates an SSH tunnel port and an agent port together; the
 // first allocation isn't persisted by the time the second one queries the
 // DB, so without this both calls would return the same port).
+// portAvailable reports whether a port is free to bind. It's a package var so
+// tests can stub it for deterministic allocation.
+var portAvailable = osPortAvailable
+
+// PortAvailable reports whether a port is free to bind on the edge right now.
+// Exposed so the explicit-rathole-port create path can apply the same live
+// OS check the auto-allocator uses, rather than trusting the DB view alone —
+// this is what catches a user-supplied port that's occupied by a core listener
+// (rathole's own 2333 control channel, Caddy on 80/443, the dashboard, sshd) or
+// any other process, without gopher hardcoding which ports those are.
+func PortAvailable(port int) bool { return portAvailable(port) }
+
+// osPortAvailable checks the OS, not just Gopher's DB: it tries to bind the port
+// (TCP and UDP) on all interfaces. This catches ports occupied by anything on
+// the edge that the DB view can't see — including Gopher's own services
+// (22/80/443/2333/4321) and whatever else the operator happens to run. It's
+// best-effort: a small TOCTOU window remains between this check and rathole's
+// actual bind, but it turns "something's already listening there" from a silent
+// rathole bind failure into a skipped port.
+func osPortAvailable(port int) bool {
+	addr := net.JoinHostPort("", strconv.Itoa(port))
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return false
+	}
+	_ = pc.Close()
+	return true
+}
+
+// NextRatholePort returns the lowest free edge port for a new tunnel. It starts
+// at 1024 on purpose: the edge is a dedicated box and short, low port numbers
+// are far easier to remember/type than 5-digit ones on the rare occasion an
+// operator touches the raw port (a TCP tunnel, or `ssh localhost:<port>`). A
+// port is "free" only if it's unused in Gopher's DB AND not currently bound by
+// any process on the host.
 func NextRatholePort(excluding ...int) (int, error) {
 	used, err := allUsedPorts()
 	if err != nil {
@@ -235,11 +403,13 @@ func NextRatholePort(excluding ...int) (int, error) {
 			used[p] = true
 		}
 	}
-	port := 1024
-	for used[port] {
-		port++
+	for port := 1024; port <= 65535; port++ {
+		if used[port] || !portAvailable(port) {
+			continue
+		}
+		return port, nil
 	}
-	return port, nil
+	return 0, fmt.Errorf("no free rathole port available in 1024-65535")
 }
 
 func CheckSubdomainExists(subdomain string) (bool, error) {
@@ -261,6 +431,15 @@ func CheckRatholePortExists(port int) (bool, error) {
 		return true, nil
 	}
 	if err := DB.Model(&Machine{}).Where("tunnel_port = ?", port).Count(&count).Error; err != nil {
+		return false, err
+	}
+	if count > 0 {
+		return true, nil
+	}
+	// Also reserve agent back-channel ports — allUsedPorts() (the auto-allocator)
+	// excludes them, so the user-supplied-port path must too, or an explicit
+	// rathole_port can collide with a machine's agent port → duplicate bind_addr.
+	if err := DB.Model(&Machine{}).Where("agent_remote_port = ?", port).Count(&count).Error; err != nil {
 		return false, err
 	}
 	return count > 0, nil
@@ -318,6 +497,22 @@ func DeleteSSHKeyByID(id string) error {
 	return DB.Delete(&SSHKey{}, "id = ?", id).Error
 }
 
+// BlankSSHPrivateKey clears the stored private key for a key while keeping the
+// public key (and the row) intact. Column-level update so it can't touch other
+// fields. Used by "delete private key" — the server can still hand the public
+// key to authorized_keys / the jumpbox, it just no longer holds a secret that
+// could SSH into origins.
+func BlankSSHPrivateKey(id string) error {
+	return DB.Model(&SSHKey{}).Where("id = ?", id).Update("private_key", "").Error
+}
+
+// SetSSHPrivateKey stores (or restores) the private half of an existing
+// public-only key. Column-level update. The caller must have verified the
+// private key matches the stored public key first.
+func SetSSHPrivateKey(id, privateKey string) error {
+	return DB.Model(&SSHKey{}).Where("id = ?", id).Update("private_key", privateKey).Error
+}
+
 func SetDefaultSSHKey(id string) error {
 	return DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&SSHKey{}).Where("is_default = ?", true).Update("is_default", false).Error; err != nil {
@@ -340,9 +535,14 @@ func CountMachinesUsingKey(keyID string) (int64, error) {
 func GetSSHKeyForMachine(machine *Machine) (*SSHKey, error) {
 	if machine.SSHKeyID != "" {
 		key, err := GetSSHKey(machine.SSHKeyID)
-		if err == nil {
-			return key, nil
+		if err != nil {
+			// No silent fallback to the default key: dialing with a different
+			// identity than the machine was provisioned with can't succeed and
+			// masks the real problem (the assigned key row is gone). Surface it
+			// so the operator reassigns a key instead.
+			return nil, fmt.Errorf("machine's assigned SSH key %q not found — reassign a key to this machine: %w", machine.SSHKeyID, err)
 		}
+		return key, nil
 	}
 	return GetDefaultSSHKey()
 }
@@ -433,23 +633,29 @@ func CreateMigrationToken(token, machineID string, ttl time.Duration) error {
 	return DB.Create(mt).Error
 }
 
-// GetMigrationToken resolves a migration token to its target machine ID.
-// Returns an error if the token is unknown or expired.
+// ClaimMigrationToken atomically consumes a migration token and returns its
+// target machine ID. Same single-conditional-UPDATE pattern as
+// ClaimBootstrapToken: only the request whose UPDATE changes the row wins.
 //
-// The token is NOT consumed on first read — migrate.sh is idempotent and the
-// operator may need to re-run it within the TTL window (rate-limited
-// connection, retry after fixing a one-off network issue, etc.). After the
-// TTL elapses the dashboard generates a new token.
-func GetMigrationToken(token string) (*MigrationToken, error) {
+// Tokens used to be replayable for their whole TTL so migrate.sh re-runs
+// were free — but POST /api/migrate returns the machine's agent and rathole
+// credentials, so a leaked token (shell history, pasted command) was a 1-hour
+// credential-disclosure window. A failed migrate.sh run now needs a fresh
+// token from the dashboard (one click on Install agent).
+func ClaimMigrationToken(token string) (*MigrationToken, error) {
+	now := time.Now()
+	res := DB.Model(&MigrationToken{}).
+		Where("token = ? AND used_at IS NULL AND expires_at > ?", token, now).
+		Update("used_at", now)
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return nil, &apperrors.NotFoundError{Resource: "migration_token", ID: token}
+	}
 	var mt MigrationToken
 	if err := DB.First(&mt, "token = ?", token).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, &apperrors.NotFoundError{Resource: "migration_token", ID: token}
-		}
 		return nil, err
-	}
-	if time.Now().After(mt.ExpiresAt) {
-		return nil, fmt.Errorf("migration token expired")
 	}
 	return &mt, nil
 }
@@ -493,7 +699,20 @@ func SaveSettings(s *AppSettings) error {
 //
 // fn must not call MutateSettings recursively (deadlock); pass everything
 // it needs in via captured variables.
-func MutateSettings(fn func(*AppSettings) error) error {
+// MutateSettingsTx mutates AppSettings inside a transaction and exposes that
+// transaction to the closure.
+//
+// CRITICAL: the connection pool is capped at ONE connection
+// (SetMaxOpenConns(1), see db.go — the app relies on it for pragma
+// persistence). That means any nested DB call the closure makes MUST go
+// through the passed `tx`, never the global DB pool. A nested global-pool
+// call blocks waiting for the single connection that this very transaction is
+// already holding → permanent self-deadlock that freezes ALL database access,
+// and therefore the entire server. This exact bug froze a production box: the
+// 2FA-confirm path called db.CreateTOTPDevice (global pool) inside a
+// MutateSettings transaction. Use the *Tx db helpers (GetTOTPDevicesTx,
+// CreateTOTPDeviceTx, …) for any read or write inside fn.
+func MutateSettingsTx(fn func(tx *gorm.DB, s *AppSettings) error) error {
 	return DB.Transaction(func(tx *gorm.DB) error {
 		var s AppSettings
 		if err := tx.First(&s, "id = 'singleton'").Error; err != nil {
@@ -504,11 +723,19 @@ func MutateSettings(fn func(*AppSettings) error) error {
 			}
 		}
 		s.ID = "singleton"
-		if err := fn(&s); err != nil {
+		if err := fn(tx, &s); err != nil {
 			return err
 		}
 		return tx.Save(&s).Error
 	})
+}
+
+// MutateSettings mutates AppSettings in a transaction. The closure must make
+// NO nested DB call on the global pool — with SetMaxOpenConns(1) that
+// self-deadlocks (see MutateSettingsTx). If the closure needs a nested read or
+// write, use MutateSettingsTx and route it through the tx.
+func MutateSettings(fn func(*AppSettings) error) error {
+	return MutateSettingsTx(func(_ *gorm.DB, s *AppSettings) error { return fn(s) })
 }
 
 // Firewall Rules Repository
@@ -677,16 +904,18 @@ type KindDefault struct {
 }
 
 var kindDefaults = map[string]KindDefault{
-	"machine_registered":   {"info", "machine", "Machine %s registered"},
-	"machine_deleted":      {"info", "machine", "Machine %s deleted"},
-	"machine_connected":    {"info", "machine", "Machine %s connected"},
-	"machine_disconnected": {"warn", "machine", "Machine %s disconnected"},
-	"machine_degraded":     {"warn", "machine", "Machine %s rathole inactive"},
-	"machine_recovered":    {"info", "machine", "Machine %s auto-recovered"},
-	"recovery_failed":      {"error", "machine", "Auto-recovery failed for machine %s"},
-	"agent_unreachable":    {"warn", "machine", "Agent unreachable on machine %s"},
-	"tunnel_created":       {"info", "tunnel", "Tunnel %s created"},
-	"tunnel_deleted":       {"info", "tunnel", "Tunnel %s deleted"},
+	"machine_registered":     {"info", "machine", "Machine %s registered"},
+	"machine_deleted":        {"info", "machine", "Machine %s deleted"},
+	"machine_connected":      {"info", "machine", "Machine %s connected"},
+	"machine_disconnected":   {"warn", "machine", "Machine %s disconnected"},
+	"machine_degraded":       {"warn", "machine", "Machine %s rathole inactive"},
+	"machine_recovered":      {"info", "machine", "Machine %s auto-recovered"},
+	"agent_config_recovered": {"warn", "machine", "Machine %s recovered client config via dial-home"},
+	"config_drift_repaired":  {"warn", "machine", "Machine %s client config drift repaired"},
+	"recovery_failed":        {"error", "machine", "Auto-recovery failed for machine %s"},
+	"agent_unreachable":      {"warn", "machine", "Agent unreachable on machine %s"},
+	"tunnel_created":         {"info", "tunnel", "Tunnel %s created"},
+	"tunnel_deleted":         {"info", "tunnel", "Tunnel %s deleted"},
 }
 
 // LookupKindDefault returns the registered defaults for a kind, or a fallback
@@ -753,9 +982,9 @@ func GetRecentEvents(limit int) ([]Event, error) {
 // EventFilter narrows GetEvents queries. Empty fields mean "no filter on this
 // dimension".
 type EventFilter struct {
-	Sources     []string  // any of these (OR'd). Empty = all sources.
-	Severity    string    // exact match: info | warn | error | critical
-	MinSeverity string    // returns events at or above this severity
+	Sources     []string // any of these (OR'd). Empty = all sources.
+	Severity    string   // exact match: info | warn | error | critical
+	MinSeverity string   // returns events at or above this severity
 	ResourceID  string
 	Search      string    // case-insensitive substring match on message, resource_name, kind
 	Since       time.Time // CreatedAt >=
@@ -889,16 +1118,45 @@ func PurgeBotSessions() error {
 // ── TOTP Devices ─────────────────────────────────────────────────────────────
 
 func GetTOTPDevices() ([]TOTPDevice, error) {
+	return GetTOTPDevicesTx(DB)
+}
+
+func GetTOTPDevice(id string) (*TOTPDevice, error) {
+	return GetTOTPDeviceTx(DB, id)
+}
+
+func CreateTOTPDevice(d *TOTPDevice) error {
+	return CreateTOTPDeviceTx(DB, d)
+}
+
+func DeleteTOTPDevice(id string) error {
+	return DeleteTOTPDeviceTx(DB, id)
+}
+
+func DeleteAllTOTPDevices() error {
+	return DeleteAllTOTPDevicesTx(DB)
+}
+
+func CountTOTPDevices() (int64, error) {
+	return CountTOTPDevicesTx(DB)
+}
+
+// *Tx variants operate on a caller-supplied *gorm.DB — either the global DB
+// (the plain wrappers above) or an open transaction. Callers inside a
+// MutateSettingsTx closure MUST use these with the tx; see MutateSettingsTx
+// for why a global-pool call there deadlocks.
+
+func GetTOTPDevicesTx(tx *gorm.DB) ([]TOTPDevice, error) {
 	var devices []TOTPDevice
-	if err := DB.Order("created_at ASC").Find(&devices).Error; err != nil {
+	if err := tx.Order("created_at ASC").Find(&devices).Error; err != nil {
 		return nil, err
 	}
 	return devices, nil
 }
 
-func GetTOTPDevice(id string) (*TOTPDevice, error) {
+func GetTOTPDeviceTx(tx *gorm.DB, id string) (*TOTPDevice, error) {
 	var d TOTPDevice
-	if err := DB.First(&d, "id = ?", id).Error; err != nil {
+	if err := tx.First(&d, "id = ?", id).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return nil, &apperrors.NotFoundError{Resource: "totp_device", ID: id}
 		}
@@ -907,21 +1165,21 @@ func GetTOTPDevice(id string) (*TOTPDevice, error) {
 	return &d, nil
 }
 
-func CreateTOTPDevice(d *TOTPDevice) error {
-	return DB.Create(d).Error
+func CreateTOTPDeviceTx(tx *gorm.DB, d *TOTPDevice) error {
+	return tx.Create(d).Error
 }
 
-func DeleteTOTPDevice(id string) error {
-	return DB.Delete(&TOTPDevice{}, "id = ?", id).Error
+func DeleteTOTPDeviceTx(tx *gorm.DB, id string) error {
+	return tx.Delete(&TOTPDevice{}, "id = ?", id).Error
 }
 
-func DeleteAllTOTPDevices() error {
-	return DB.Exec("DELETE FROM totp_devices").Error
+func DeleteAllTOTPDevicesTx(tx *gorm.DB) error {
+	return tx.Exec("DELETE FROM totp_devices").Error
 }
 
-func CountTOTPDevices() (int64, error) {
+func CountTOTPDevicesTx(tx *gorm.DB) (int64, error) {
 	var count int64
-	return count, DB.Model(&TOTPDevice{}).Count(&count).Error
+	return count, tx.Model(&TOTPDevice{}).Count(&count).Error
 }
 
 func TouchTOTPDevice(id string) error {

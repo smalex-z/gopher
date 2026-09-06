@@ -27,19 +27,3 @@ type ValidationError struct {
 func (e *ValidationError) Error() string {
 	return fmt.Sprintf("validation error: %s - %s", e.Field, e.Message)
 }
-
-type SSHError struct {
-	Message string
-	Cause   error
-}
-
-func (e *SSHError) Error() string {
-	if e.Cause != nil {
-		return fmt.Sprintf("SSH error: %s: %v", e.Message, e.Cause)
-	}
-	return fmt.Sprintf("SSH error: %s", e.Message)
-}
-
-func (e *SSHError) Unwrap() error {
-	return e.Cause
-}

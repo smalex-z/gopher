@@ -1,14 +1,15 @@
-import { useState, useRef } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ShieldCheck, ShieldOff, KeyRound, RefreshCw, Copy, Check,
   Ban, Trash2, Plus, AlertTriangle, Activity, Unplug, Eye, EyeOff,
-  Download, Upload, Database,
+  Download, Database,
 } from 'lucide-react'
 import client from '../api/client'
 import { securityApi, type AuditEvent, type Fail2banStatus, type Fail2banConfig, type StaleTokenAttempt } from '../api/security'
 import { localApi } from '../api/local'
 import { toast } from '../lib/toast'
+import { PaginatedTable, type Column } from '../components/PaginatedTable'
 
 // ─── TOTP types + hook ───────────────────────────────────────────────────────
 
@@ -428,6 +429,26 @@ function formatTime(iso: string) {
   }
 }
 
+const auditLogColumns: Column<AuditEvent>[] = [
+  {
+    key: 'time',
+    header: 'Time',
+    cellClassName: 'text-gray-400 text-xs whitespace-nowrap font-mono',
+    render: ev => formatTime(ev.time),
+  },
+  {
+    key: 'event',
+    header: 'Event',
+    render: ev => eventBadge(ev.event),
+  },
+  {
+    key: 'ip',
+    header: 'IP',
+    cellClassName: 'font-mono text-xs text-gray-600',
+    render: ev => ev.ip || '—',
+  },
+]
+
 function AuditLogSection() {
   const { data: events, isLoading, error } = useQuery<AuditEvent[]>({
     queryKey: ['security-audit-log'],
@@ -448,26 +469,11 @@ function AuditLogSection() {
       {events && events.length === 0 && <p className="text-sm text-gray-400">No events yet.</p>}
 
       {events && events.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100">
-                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Time</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Event</th>
-                <th className="text-left py-2 font-medium text-gray-500 text-xs">IP</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {events.map((ev, i) => (
-                <tr key={i} className="hover:bg-gray-50">
-                  <td className="py-2 pr-4 text-gray-400 text-xs whitespace-nowrap font-mono">{formatTime(ev.time)}</td>
-                  <td className="py-2 pr-4">{eventBadge(ev.event)}</td>
-                  <td className="py-2 font-mono text-xs text-gray-600">{ev.ip || '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <PaginatedTable
+          rows={events}
+          columns={auditLogColumns}
+          rowKey={(ev, i) => `${ev.time}-${ev.ip}-${i}`}
+        />
       )}
     </div>
   )
@@ -499,39 +505,48 @@ function StaleTokensSection() {
       {data && data.length === 0 && <p className="text-sm text-gray-400">No stale clients detected.</p>}
 
       {data && data.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100">
-                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Token</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Source IP</th>
-                <th className="text-left py-2 pr-4 font-medium text-gray-500 text-xs">Last seen</th>
-                <th className="text-left py-2 font-medium text-gray-500 text-xs">Attempts</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {data.map((a, i) => (
-                <tr key={i} className="hover:bg-gray-50">
-                  <td className="py-2 pr-4">
-                    <span
-                      className="font-mono text-xs text-gray-600 bg-gray-100 px-2 py-0.5 rounded"
-                      title={a.token}
-                    >
-                      {a.token.length > 16 ? a.token.slice(0, 16) + '…' : a.token}
-                    </span>
-                  </td>
-                  <td className="py-2 pr-4 font-mono text-xs text-gray-700">{a.ip}</td>
-                  <td className="py-2 pr-4 text-xs text-gray-500 whitespace-nowrap">{formatTime(a.last_seen)}</td>
-                  <td className="py-2 text-xs font-medium text-amber-600">{a.count}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <PaginatedTable
+          rows={data}
+          columns={staleTokenColumns}
+          rowKey={(a, i) => `${a.token}-${a.ip}-${i}`}
+        />
       )}
     </div>
   )
 }
+
+const staleTokenColumns: Column<StaleTokenAttempt>[] = [
+  {
+    key: 'token',
+    header: 'Token',
+    render: a => (
+      <span
+        className="font-mono text-xs text-gray-600 bg-gray-100 px-2 py-0.5 rounded"
+        title={a.token}
+      >
+        {a.token.length > 16 ? a.token.slice(0, 16) + '…' : a.token}
+      </span>
+    ),
+  },
+  {
+    key: 'ip',
+    header: 'Source IP',
+    cellClassName: 'font-mono text-xs text-gray-700',
+    render: a => a.ip,
+  },
+  {
+    key: 'last_seen',
+    header: 'Last seen',
+    cellClassName: 'text-xs text-gray-500 whitespace-nowrap',
+    render: a => formatTime(a.last_seen),
+  },
+  {
+    key: 'count',
+    header: 'Attempts',
+    cellClassName: 'text-xs font-medium text-amber-600',
+    render: a => a.count,
+  },
+]
 
 // ─── Fail2ban status section ──────────────────────────────────────────────────
 
@@ -964,38 +979,23 @@ function ExternalAPISection() {
 // ─── Backup & Restore ─────────────────────────────────────────────────────────
 
 function BackupSection() {
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const [restoreFile, setRestoreFile] = useState<File | null>(null)
-  const [confirmText, setConfirmText] = useState('')
-
   const downloadMutation = useMutation({
     mutationFn: () => securityApi.downloadBackup(),
     onSuccess: () => toast.success('Backup downloaded'),
     onError: (e: Error) => toast.error(e.message),
   })
 
-  const restoreMutation = useMutation({
-    mutationFn: (file: File) => securityApi.restoreBackup(file),
-    onSuccess: () => {
-      toast.success('Backup restored. Service is restarting…')
-      setRestoreFile(null)
-      setConfirmText('')
-      // Service will restart in ~750ms; the page will become unreachable briefly.
-      // No need for a manual reload — the user can refresh once it comes back.
-    },
-    onError: (e: Error) => toast.error(e.message),
-  })
-
-  const restoreReady = !!restoreFile && confirmText === 'RESTORE'
-
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 space-y-5">
       <div className="flex items-start gap-3">
         <Database className="w-5 h-5 text-indigo-600 mt-0.5 shrink-0" />
         <div>
-          <h2 className="font-semibold text-gray-900">Backup & restore</h2>
+          <h2 className="font-semibold text-gray-900 flex items-center gap-2">
+            Backup
+            <span className="bg-amber-100 text-amber-700 text-[11px] font-semibold px-1.5 py-0.5 rounded shrink-0">Alpha</span>
+          </h2>
           <p className="text-sm text-gray-500 mt-0.5">
-            Download a snapshot of <code className="font-mono text-xs">gopher.db</code> or restore from a previous backup.
+            Download a snapshot of <code className="font-mono text-xs">gopher.db</code>.
             Backups contain SSH private keys and TOTP secrets — store them like you'd store a private key.
           </p>
         </div>
@@ -1021,68 +1021,20 @@ function BackupSection() {
         </div>
       </div>
 
-      {/* Restore */}
-      <div className="border border-amber-200 bg-amber-50/40 rounded-xl p-4 space-y-3">
-        <div className="flex items-start gap-2">
-          <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
-          <div>
-            <h3 className="text-sm font-semibold text-gray-800">Restore from backup</h3>
-            <p className="text-xs text-gray-600 mt-0.5">
-              Replaces the live database and restarts the service. All current state is overwritten.
-              Tunnel clients with mismatched rathole tokens will need to be re-bootstrapped.
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".db,application/octet-stream,application/x-sqlite3"
-            onChange={e => setRestoreFile(e.target.files?.[0] ?? null)}
-            className="hidden"
-          />
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
-          >
-            Choose file…
-          </button>
-          <span className="text-xs text-gray-500 truncate">
-            {restoreFile ? restoreFile.name : 'No file selected'}
-          </span>
-        </div>
-
-        {restoreFile && (
-          <div className="space-y-2">
-            <label className="block text-xs font-medium text-gray-700">
-              Type <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">RESTORE</code> to confirm
-            </label>
-            <input
-              type="text"
-              value={confirmText}
-              onChange={e => setConfirmText(e.target.value)}
-              placeholder="RESTORE"
-              className="w-full max-w-sm border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => { setRestoreFile(null); setConfirmText('') }}
-                className="px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-800"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => restoreFile && restoreMutation.mutate(restoreFile)}
-                disabled={!restoreReady || restoreMutation.isPending}
-                className="px-4 py-1.5 bg-amber-600 text-white rounded-lg text-sm font-semibold hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
-              >
-                <Upload size={14} />
-                {restoreMutation.isPending ? 'Restoring…' : 'Restore & restart'}
-              </button>
-            </div>
-          </div>
-        )}
+      {/* Restore is temporarily disabled — see BackupService.Restore. Restoring
+          a WAL-mode SQLite DB by renaming the file under the live connection
+          leaves stale -wal/-shm sidecars that revert the swap on restart. The
+          correct fix is a startup-time swap (pending-restore file applied
+          before any connection opens); until then, restore is removed rather
+          than shipped broken. Download remains fully functional. */}
+      <div className="border border-gray-200 rounded-xl p-4">
+        <h3 className="text-sm font-semibold text-gray-800">Restore from backup</h3>
+        <p className="text-xs text-gray-500 mt-0.5">
+          Coming soon. To restore a snapshot for now, stop the service and swap the file manually:
+          {' '}<code className="font-mono text-[11px] bg-gray-100 px-1 py-0.5 rounded">systemctl stop gopher</code>,
+          replace <code className="font-mono text-[11px] bg-gray-100 px-1 py-0.5 rounded">gopher.db</code> (and delete
+          {' '}<code className="font-mono text-[11px] bg-gray-100 px-1 py-0.5 rounded">gopher.db-wal</code>/<code className="font-mono text-[11px] bg-gray-100 px-1 py-0.5 rounded">-shm</code>), then start it again.
+        </p>
       </div>
     </div>
   )

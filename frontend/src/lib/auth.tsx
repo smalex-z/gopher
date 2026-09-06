@@ -37,13 +37,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const [authRes, localRes] = await Promise.all([
         client.get<{ data: { setup: boolean; authenticated: boolean } }>('/auth/status'),
-        client.get<{ data: { local_setup_done: boolean; firewall_mode: string; fail2ban_setup_done: boolean; ssh_public_key: string } }>('/local/status').catch(() => ({ data: { data: { local_setup_done: false, firewall_mode: 'none', fail2ban_setup_done: true, ssh_public_key: 'unknown' } } })),
+        client.get<{ data: { local_setup_done: boolean; firewall_configured: boolean; fail2ban_setup_done: boolean; ssh_key_configured: boolean } }>('/local/setup-state').catch(() => ({ data: { data: { local_setup_done: false, firewall_configured: true, fail2ban_setup_done: true, ssh_key_configured: true } } })),
       ])
       setIsSetup(authRes.data.data.setup)
       setIsAuthenticated(authRes.data.data.authenticated)
       setLocalSetupDone(localRes.data.data.local_setup_done)
-      setFirewallConfigured(localRes.data.data.firewall_mode !== '')
-      setSshKeyConfigured(Boolean(localRes.data.data.ssh_public_key))
+      setFirewallConfigured(localRes.data.data.firewall_configured)
+      setSshKeyConfigured(localRes.data.data.ssh_key_configured)
       setFail2banSetupDone(localRes.data.data.fail2ban_setup_done)
     } catch {
       setIsSetup(false)

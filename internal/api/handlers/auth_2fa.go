@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/smalex-z/gopher/internal/api/response"
 	apperrors "github.com/smalex-z/gopher/internal/errors"
+	"github.com/smalex-z/gopher/internal/service"
 )
 
 // GET /api/auth/2fa/status
@@ -50,7 +51,7 @@ func (h *AuthHandler) TOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "code is required")
 		return
 	}
-	backupCodes, err := h.authSvc.TOTPConfirm(body.Code, body.Name)
+	backupCodes, err := h.authSvc.TOTPConfirm(body.Code, body.Name, service.ClientIP(r))
 	if err != nil {
 		response.BadRequest(w, err.Error())
 		return
@@ -76,7 +77,7 @@ func (h *AuthHandler) TOTPDisable(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "code is required")
 		return
 	}
-	if err := h.authSvc.TOTPDisable(body.Code); err != nil {
+	if err := h.authSvc.TOTPDisable(body.Code, service.ClientIP(r)); err != nil {
 		response.BadRequest(w, err.Error())
 		return
 	}
@@ -99,7 +100,7 @@ func (h *AuthHandler) TOTPRemoveDevice(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "code is required")
 		return
 	}
-	if err := h.authSvc.TOTPRemoveDevice(id, body.Code); err != nil {
+	if err := h.authSvc.TOTPRemoveDevice(id, body.Code, service.ClientIP(r)); err != nil {
 		if _, ok := err.(*apperrors.NotFoundError); ok {
 			response.NotFound(w, "device not found")
 			return
@@ -120,7 +121,7 @@ func (h *AuthHandler) TOTPRegenerateBackupCodes(w http.ResponseWriter, r *http.R
 		response.BadRequest(w, "code is required")
 		return
 	}
-	codes, err := h.authSvc.TOTPRegenerateBackupCodes(body.Code)
+	codes, err := h.authSvc.TOTPRegenerateBackupCodes(body.Code, service.ClientIP(r))
 	if err != nil {
 		response.BadRequest(w, err.Error())
 		return

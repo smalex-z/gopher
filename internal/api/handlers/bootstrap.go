@@ -3,15 +3,22 @@ package handlers
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/smalex-z/gopher/internal/agentdist"
 	"github.com/smalex-z/gopher/internal/api/response"
+	"github.com/smalex-z/gopher/internal/build"
 	"github.com/smalex-z/gopher/internal/db"
+	"github.com/smalex-z/gopher/internal/embedbin"
+	apperrors "github.com/smalex-z/gopher/internal/errors"
 	"github.com/smalex-z/gopher/internal/service"
 )
 
@@ -23,6 +30,14 @@ var gopherUninstallScript string
 
 //go:embed templates/migrate.sh
 var migrateScriptTmpl string
+
+// Parsed once at init: the sources are embedded, so a parse failure is a
+// build defect that should fail at startup, not per-request.
+var (
+	bootstrapTmpl = template.Must(template.New("bootstrap").Delims("{{", "}}").Parse(bootstrapScriptTmpl))
+	uninstallTmpl = template.Must(template.New("uninstall").Delims("{{", "}}").Parse(gopherUninstallScript))
+	migrateTmpl   = template.Must(template.New("migrate").Delims("{{", "}}").Parse(migrateScriptTmpl))
+)
 
 type BootstrapHandler struct {
 	svc *service.BootstrapService
@@ -58,19 +73,35 @@ func (h *BootstrapHandler) GenerateToken(w http.ResponseWriter, r *http.Request)
 	var req struct {
 		TunnelPort int    `json:"tunnel_port"`
 		SSHKeyID   string `json:"ssh_key_id"`
-		PublicSSH  bool   `json:"public_ssh"`
+		PublicSSH  *bool  `json:"public_ssh"`
+		SSHEnabled *bool  `json:"ssh_enabled"`
 	}
 	// Body is optional; ignore decode errors so a plain POST with no body still works.
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	bt, err := h.svc.GenerateToken(req.TunnelPort, req.SSHKeyID, req.PublicSSH)
+	// Defaults when unspecified: SSH enabled, publicly reachable. The
+	// security-conscious opt into jumpbox-gating or disable SSH entirely.
+	sshEnabled := req.SSHEnabled == nil || *req.SSHEnabled
+	publicSSH := req.PublicSSH == nil || *req.PublicSSH
+
+	bt, err := h.svc.GenerateToken(req.TunnelPort, req.SSHKeyID, publicSSH, sshEnabled)
 	if err != nil {
+		var verr *apperrors.ValidationError
+		if errors.As(err, &verr) {
+			response.BadRequest(w, err.Error())
+			return
+		}
 		response.InternalError(w, err.Error())
 		return
 	}
 
 	base := hostURL(r)
 	bootstrapCmd := fmt.Sprintf("curl -fsSL %s/static/bootstrap.sh | bash -s -- %s", base, bt.Token)
+	// Surface the disable as a visible flag so the copied command is honest and
+	// CLI users can reproduce it. Register honors --no-ssh authoritatively.
+	if !sshEnabled {
+		bootstrapCmd += " --no-ssh"
+	}
 
 	response.Success(w, map[string]string{
 		"token":             bt.Token,
@@ -121,10 +152,54 @@ func (h *BootstrapHandler) ServeTokenizedScript(w http.ResponseWriter, r *http.R
 	fmt.Fprint(w, script)
 }
 
+// POST /api/agent/recover-config — the agent's dial-home recovery endpoint.
+// Public (pre-auth) route, authenticated by the per-machine agent bearer
+// token; returns the machine's regenerated managed client.toml as text/plain.
+// The audit event is warn-severity on purpose: legitimate dial-home recovery
+// is rare, so every one deserves operator eyeballs — and the IP column shows
+// who asked.
+func (h *BootstrapHandler) RecoverConfig(w http.ResponseWriter, r *http.Request) {
+	ip := service.ClientIP(r)
+	if !h.svc.AllowAttempt(ip) {
+		response.Error(w, http.StatusTooManyRequests, "too many attempts; try again later")
+		return
+	}
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == "" || token == r.Header.Get("Authorization") {
+		response.Error(w, http.StatusUnauthorized, "bearer token required")
+		return
+	}
+	// Optional body: the agent's current (suspect) config, so custom sections
+	// survive the rebuild. 0.2.6/0.2.7 agents send no body — from-scratch.
+	current, _ := io.ReadAll(io.LimitReader(r.Body, 256<<10))
+	toml, machine, err := h.svc.RecoverClientConfig(token, r.Host, string(current))
+	if err != nil {
+		if errors.Is(err, service.ErrUnknownAgentToken) {
+			response.Error(w, http.StatusUnauthorized, "invalid token")
+			return
+		}
+		response.InternalError(w, "config generation failed")
+		return
+	}
+	db.RecordEvent(&db.Event{
+		Severity:     "warn",
+		Source:       "machine",
+		Kind:         "agent_config_recovered",
+		Actor:        "agent",
+		ResourceType: "machine",
+		ResourceID:   machine.ID,
+		ResourceName: machine.Name,
+		IP:           ip,
+		Message:      fmt.Sprintf("Machine %s recovered client config via dial-home", machine.Name),
+	})
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(toml))
+}
+
 // GET /static/bootstrap.sh - serve bootstrap script dynamically
 func (h *BootstrapHandler) ServeScript(w http.ResponseWriter, r *http.Request) {
 	base := hostURL(r)
-	script := generateBootstrapScript(base)
+	script := build.InjectVersions(generateBootstrapScript(base))
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, script)
@@ -134,13 +209,8 @@ func (h *BootstrapHandler) ServeScript(w http.ResponseWriter, r *http.Request) {
 // HostURL templated in so the script can call back to the dashboard's
 // /api/machines/self-delete endpoint when an operator runs it locally.
 func (h *BootstrapHandler) ServeUninstallScript(w http.ResponseWriter, r *http.Request) {
-	tmpl, err := template.New("uninstall").Delims("{{", "}}").Parse(gopherUninstallScript)
-	if err != nil {
-		http.Error(w, "uninstall template error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
 	var buf strings.Builder
-	if err := tmpl.Execute(&buf, struct{ HostURL string }{HostURL: hostURL(r)}); err != nil {
+	if err := uninstallTmpl.Execute(&buf, struct{ HostURL string }{HostURL: hostURL(r)}); err != nil {
 		http.Error(w, "uninstall template error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -154,13 +224,8 @@ func (h *BootstrapHandler) ServeUninstallScript(w http.ResponseWriter, r *http.R
 // per-machine secrets. Mirrors the bootstrap.sh pattern: a token-bearing
 // shell script + an API callback that resolves the token to config.
 func (h *BootstrapHandler) ServeMigrateScript(w http.ResponseWriter, r *http.Request) {
-	tmpl, err := template.New("migrate").Delims("{{", "}}").Parse(migrateScriptTmpl)
-	if err != nil {
-		http.Error(w, "migrate template error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
 	var buf strings.Builder
-	if err := tmpl.Execute(&buf, struct{ HostURL string }{HostURL: hostURL(r)}); err != nil {
+	if err := migrateTmpl.Execute(&buf, scriptDataFor(hostURL(r))); err != nil {
 		http.Error(w, "migrate template error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -192,9 +257,13 @@ func (h *BootstrapHandler) Migrate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mt, err := db.GetMigrationToken(req.Token)
+	mt, err := db.ClaimMigrationToken(req.Token)
 	if err != nil {
-		response.BadRequest(w, "invalid or expired migration token")
+		// Single-use: a re-run after a failed install needs a fresh token
+		// (this response hands out the machine's credentials, so tokens
+		// must not be replayable inside their TTL). Say so — "expired" alone
+		// sends the operator down the wrong debugging path.
+		response.BadRequest(w, "invalid, expired, or already-used migration token — generate a new install command from the dashboard")
 		return
 	}
 	machine, err := db.GetMachine(mt.MachineID)
@@ -203,22 +272,72 @@ func (h *BootstrapHandler) Migrate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// noise_pubkey lets migrate.sh ensure the [client.transport] block is
+	// present on the machine before adding the agent service. A pre-noise
+	// machine whose plaintext client.toml survived the upgrade migration
+	// (because it was offline at the time) gets repaired here on the next
+	// agent-install pass — the operator clicking "Install Agent" is the
+	// natural recovery handle for those stragglers.
+	noisePub := ""
+	if settings, sErr := db.GetSettings(); sErr == nil && settings != nil {
+		noisePub = settings.RatholeNoisePubKey
+	}
 	response.Success(w, map[string]any{
-		"machine_id":     machine.ID,
-		"agent_token":    machine.AgentToken,
-		"agent_port":     machine.AgentLocalPort,
-		"rathole_token":  machine.AgentRatholeToken,
+		"machine_id":    machine.ID,
+		"agent_token":   machine.AgentToken,
+		"agent_port":    machine.AgentLocalPort,
+		"rathole_token": machine.AgentRatholeToken,
+		"noise_pubkey":  noisePub,
 	})
 }
 
+// scriptTemplateData is the render context for bootstrap.sh / migrate.sh.
+// Besides the callback URL it carries the authoritative sha256 of every
+// binary the script will download from the edge. The script itself is fetched
+// by the operator over verified TLS, so hashes embedded in its text are
+// trustworthy even though the script's own download steps keep their
+// cert-tolerant fallbacks (--insecure retry for old CA bundles). Empty hash
+// fields (dev builds without staged binaries) make the scripts fall back to
+// the legacy same-channel .sha256 sidecars.
+type scriptTemplateData struct {
+	HostURL           string
+	AgentSHAAmd64     string
+	AgentSHAArm64     string
+	AgentSHAArmv7     string
+	RatholeSHAX8664   string
+	RatholeSHAAarch64 string
+	RatholeSHAArmv7   string
+}
+
+// The hash fields are process-lifetime constants (embedded binaries, hashes
+// published once at startup); only HostURL varies per request, so the base is
+// captured once on first render.
+var (
+	baseScriptDataOnce sync.Once
+	baseScriptData     scriptTemplateData
+)
+
+func scriptDataFor(hostURL string) scriptTemplateData {
+	baseScriptDataOnce.Do(func() {
+		a := agentdist.All()
+		r := embedbin.RatholeSHA256ByTarget()
+		baseScriptData = scriptTemplateData{
+			AgentSHAAmd64:     a["amd64"],
+			AgentSHAArm64:     a["arm64"],
+			AgentSHAArmv7:     a["armv7"],
+			RatholeSHAX8664:   r["x86_64"],
+			RatholeSHAAarch64: r["aarch64"],
+			RatholeSHAArmv7:   r["armv7"],
+		}
+	})
+	d := baseScriptData
+	d.HostURL = hostURL
+	return d
+}
+
 func generateBootstrapScript(hostURL string) string {
-	tmpl, err := template.New("bootstrap").Delims("{{", "}}").Parse(bootstrapScriptTmpl)
-	if err != nil {
-		// Template is embedded from a known-good file — this should never happen.
-		panic("bootstrap template parse error: " + err.Error())
-	}
 	var buf strings.Builder
-	if err := tmpl.Execute(&buf, struct{ HostURL string }{HostURL: hostURL}); err != nil {
+	if err := bootstrapTmpl.Execute(&buf, scriptDataFor(hostURL)); err != nil {
 		panic("bootstrap template execute error: " + err.Error())
 	}
 	return buf.String()

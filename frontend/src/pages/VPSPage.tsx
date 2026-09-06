@@ -1,12 +1,17 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Copy, Check, ExternalLink, RefreshCw, Globe, Lock, ShieldAlert, Server, Network, Activity, AlertTriangle } from 'lucide-react'
+import { ExternalLink, RefreshCw, Globe, Lock, ShieldAlert, Server, Network, Activity, AlertTriangle, Star, Bug, GitPullRequest, Github, Linkedin } from 'lucide-react'
 import { localApi } from '../api/local'
 import { updateApi, type UpdateChannel } from '../api/update'
 import { machinesApi } from '../api/machines'
 import { tunnelsApi } from '../api/tunnels'
 import StatusBadge from '../components/StatusBadge'
 import { toast } from '../lib/toast'
+import { isHealthyStatus } from '../lib/statusColor'
+
+const GITHUB = 'https://github.com/smalex-z/gopher'
+const LINKEDIN = 'https://www.linkedin.com/in/alexzheng04/'
+const WEBSITE = 'https://gopherden.org'
 
 function ServiceRow({ label, active }: { label: string; active: string }) {
   const color =
@@ -24,7 +29,6 @@ function ServiceRow({ label, active }: { label: string; active: string }) {
 
 export default function ServerPage() {
   const qc = useQueryClient()
-  const [keyCopied, setKeyCopied] = useState(false)
   const [bindIPInput, setBindIPInput] = useState<string | null>(null)
 
   const { data: status, refetch, isLoading } = useQuery({
@@ -70,21 +74,16 @@ export default function ServerPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
-  const copyKey = () => {
-    if (!status?.ssh_public_key) return
-    navigator.clipboard.writeText(status.ssh_public_key).then(() => {
-      setKeyCopied(true)
-      setTimeout(() => setKeyCopied(false), 2000)
-    })
-  }
-
   if (isLoading) return <div className="text-gray-400 text-center py-12">Loading…</div>
 
   const machines = machinesData?.data ?? []
   const tunnels = tunnelsData?.data ?? []
   const bothActive = status?.caddy_active === 'active' && status?.rathole_active === 'active'
-  const connectedMachines = machines.filter(m => m.status === 'active' || m.status === 'connected').length
-  const activeTunnels = tunnels.filter(t => t.status === 'active').length
+  const connectedMachines = machines.filter(m => isHealthyStatus(m.status)).length
+  // Was `t.status === 'active'` only — same undercount bug as DashboardPage
+  // had (excluded healthy 'connected' tunnels), found on a separate page
+  // during the same sweep.
+  const activeTunnels = tunnels.filter(t => isHealthyStatus(t.status)).length
 
   return (
     <div className="space-y-6">
@@ -128,10 +127,10 @@ export default function ServerPage() {
 
           {/* Service status */}
           <div className="bg-white rounded-xl shadow-sm border p-6">
-            <h2 className="text-base font-semibold text-gray-900 mb-3">Systemd Services</h2>
+            <h2 className="text-base font-semibold text-gray-900 mb-3">Edge Services</h2>
             <div className="divide-y">
-              <ServiceRow label="caddy.service (reverse proxy)" active={status?.caddy_installed ? (status.caddy_active || 'unknown') : 'not-installed'} />
-              <ServiceRow label="rathole-server.service (tunnel server)" active={status?.rathole_installed ? (status.rathole_active || 'unknown') : 'not-installed'} />
+              <ServiceRow label="Caddy (reverse proxy)" active={status?.caddy_installed ? (status.caddy_active || 'unknown') : 'not-installed'} />
+              <ServiceRow label="rathole (tunnel server)" active={status?.rathole_installed ? (status.rathole_active || 'unknown') : 'not-installed'} />
             </div>
           </div>
 
@@ -172,7 +171,7 @@ export default function ServerPage() {
                   </div>
                   {!status?.domain && (
                     <div className="text-xs text-amber-600 mt-0.5 flex items-center gap-1">
-                      <ShieldAlert size={11} /> No domain configured — dashboard port must stay public.
+                      <ShieldAlert size={11} /> No domain configured — without a proxied route the dashboard port must stay Direct.
                     </div>
                   )}
                 </div>
@@ -186,7 +185,7 @@ export default function ServerPage() {
                         : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50 disabled:opacity-50'
                     }`}
                   >
-                    <Globe size={11} /> Public
+                    <Globe size={11} /> Direct
                   </button>
                   <button
                     onClick={() => dashboardMutation.mutate(true)}
@@ -198,7 +197,7 @@ export default function ServerPage() {
                         : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed'
                     }`}
                   >
-                    <Lock size={11} /> Caddy only
+                    <Lock size={11} /> Proxied
                   </button>
                 </div>
               </div>
@@ -315,6 +314,8 @@ export default function ServerPage() {
                       {updateInfo.latest_version}
                     </span>
                   </div>
+                ) : updateInfo.check_error ? (
+                  <p className="text-xs text-amber-600">{updateInfo.check_error}</p>
                 ) : (
                   <p className="text-xs text-gray-400">Up to date</p>
                 )}
@@ -345,22 +346,71 @@ export default function ServerPage() {
             </div>
           )}
 
-          {/* SSH public key — collapsed by default, for advanced use */}
-          {status?.ssh_public_key && (
-            <div className="bg-white rounded-xl shadow-sm border p-5">
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-sm font-semibold text-gray-700">Server Public Key</h2>
-                <button onClick={copyKey} className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-700">
-                  {keyCopied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
-                  {keyCopied ? 'Copied' : 'Copy'}
-                </button>
-              </div>
-              <p className="text-xs text-gray-400 mb-2">Added to bootstrapped machines' <code className="bg-gray-100 px-0.5 rounded">authorized_keys</code> automatically.</p>
-              <div className="bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-mono text-gray-500 break-all leading-relaxed">
-                {status.ssh_public_key.slice(0, 60)}…
+          {/* Support Gopher */}
+          <div className="bg-white rounded-xl shadow-sm border p-5">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold text-gray-900">Support Gopher</h2>
+              <a
+                href={WEBSITE}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline"
+              >
+                <Globe size={12} /> gopherden.org
+              </a>
+            </div>
+            <p className="text-xs text-gray-400 mt-0.5 mb-2">Free &amp; open source — the best way to help:</p>
+            <div className="space-y-0.5">
+              <a
+                href={GITHUB}
+                target="_blank"
+                rel="noreferrer"
+                className="group -mx-2 flex items-center gap-3 rounded-lg px-2 py-1 transition-colors hover:bg-gray-50"
+              >
+                <div className="p-1.5 bg-amber-50 rounded-lg"><Star size={14} className="text-amber-500" /></div>
+                <span className="flex-1 text-sm font-medium text-gray-800">Star on GitHub</span>
+                <ExternalLink size={12} className="text-gray-300 group-hover:text-gray-400" />
+              </a>
+              <a
+                href={`${GITHUB}/issues`}
+                target="_blank"
+                rel="noreferrer"
+                className="group -mx-2 flex items-center gap-3 rounded-lg px-2 py-1 transition-colors hover:bg-gray-50"
+              >
+                <div className="p-1.5 bg-red-50 rounded-lg"><Bug size={14} className="text-red-500" /></div>
+                <span className="flex-1 text-sm font-medium text-gray-800">Send feedback</span>
+                <ExternalLink size={12} className="text-gray-300 group-hover:text-gray-400" />
+              </a>
+              <a
+                href={`${GITHUB}/contribute`}
+                target="_blank"
+                rel="noreferrer"
+                className="group -mx-2 flex items-center gap-3 rounded-lg px-2 py-1 transition-colors hover:bg-gray-50"
+              >
+                <div className="p-1.5 bg-blue-50 rounded-lg"><GitPullRequest size={14} className="text-blue-500" /></div>
+                <span className="flex-1 text-sm font-medium text-gray-800">Contribute</span>
+                <ExternalLink size={12} className="text-gray-300 group-hover:text-gray-400" />
+              </a>
+            </div>
+            <div className="mt-3 pt-3 border-t flex items-center justify-between">
+              <a
+                href={LINKEDIN}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-gray-400 hover:text-blue-600 transition-colors"
+              >
+                Built by Alex Zheng
+              </a>
+              <div className="flex items-center gap-2">
+                <a href={GITHUB} target="_blank" rel="noreferrer" aria-label="GitHub" className="text-gray-400 hover:text-gray-700 transition-colors">
+                  <Github size={15} />
+                </a>
+                <a href={LINKEDIN} target="_blank" rel="noreferrer" aria-label="LinkedIn" className="text-gray-400 hover:text-blue-600 transition-colors">
+                  <Linkedin size={15} />
+                </a>
               </div>
             </div>
-          )}
+          </div>
 
         </div>
       </div>

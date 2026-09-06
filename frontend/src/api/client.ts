@@ -12,9 +12,14 @@ client.interceptors.response.use(
   res => res,
   err => {
     if (err.response?.status === 401) {
-      // Avoid redirect loop on auth endpoints themselves
       const url: string = err.config?.url ?? ''
-      if (!url.includes('/auth/')) {
+      // Step-up re-auth endpoints (download / delete a private key) return 401
+      // on a wrong TOTP/password — that's a challenge failure, NOT session
+      // expiry. Redirecting to /login there would swallow the "verification
+      // failed" message the modal wants to show AND reload away any banner the
+      // user was acting on. So only bounce to login for genuine auth failures.
+      const isStepUpChallenge = /\/ssh-keys\/[^/]+\/(download|delete-private)$/.test(url)
+      if (!url.includes('/auth/') && !isStepUpChallenge) {
         window.location.href = '/login'
       }
     }

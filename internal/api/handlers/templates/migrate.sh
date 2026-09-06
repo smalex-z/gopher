@@ -17,6 +17,15 @@ set -e
 HOST_URL="{{.HostURL}}"
 TOKEN="$1"
 
+# Consolidated /etc/gopher origin layout. The agent's own config goes here
+# directly; the rathole client.toml is edited wherever it currently lives
+# (legacy /etc/rathole on an already-bootstrapped machine), and the 0.2.1 agent
+# relocates it under /etc/gopher on its first boot.
+AGENT_DIR="/etc/gopher/agent"
+AGENT_CFG="$AGENT_DIR/config.env"
+CLIENT_CFG="/etc/gopher/rathole/client.toml"
+[ -f "$CLIENT_CFG" ] || CLIENT_CFG="/etc/rathole/client.toml"
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: must run as root. Re-run via curl ... | sudo bash -s -- <TOKEN>" >&2
   exit 1
@@ -57,6 +66,8 @@ MACHINE_ID=$(_json machine_id)
 AGENT_TOKEN=$(_json agent_token)
 AGENT_PORT=$(_json agent_port)
 RATHOLE_TOKEN=$(_json rathole_token)
+NOISE_PUBKEY=$(_json noise_pubkey 2>/dev/null || echo "")
+[ "$NOISE_PUBKEY" = "null" ] && NOISE_PUBKEY=""
 
 if [ -z "$MACHINE_ID" ] || [ "$MACHINE_ID" = "null" ]; then
   echo "ERROR: invalid response from /api/migrate" >&2
@@ -89,32 +100,63 @@ chmod 0440 "$SUDOERS_FILE"
 
 # ── 3. Download agent binary ────────────────────────────────────────────────
 ARCH=$(uname -m)
+# AGENT_PIN: sha256 of the agent binary, injected by the edge at render time.
+# It rode the TLS-verified fetch of this script, so it stays authoritative
+# even when the download below falls back to --insecure. Empty on dev builds.
 case "$ARCH" in
-  x86_64)         ARCH_TAG=linux-amd64 ;;
-  aarch64|arm64)  ARCH_TAG=linux-arm64 ;;
+  x86_64)         ARCH_TAG=linux-amd64; AGENT_PIN="{{.AgentSHAAmd64}}" ;;
+  aarch64|arm64)  ARCH_TAG=linux-arm64; AGENT_PIN="{{.AgentSHAArm64}}" ;;
+  armv7l|armv7)   ARCH_TAG=linux-armv7; AGENT_PIN="{{.AgentSHAArmv7}}" ;;
   *) echo "ERROR: unsupported arch $ARCH" >&2; exit 1 ;;
 esac
 
+AGENT_DL_URL="$HOST_URL/static/agents/gopher-agent-$ARCH_TAG"
+# Unique mktemp path, never a fixed /tmp file: /tmp is sticky, so a stale
+# gopher-agent.new from a prior run — or from the agent's self-update, which
+# runs as the `gopher` user — would be un-removable/un-writable here and could
+# even get installed as a stale binary.
+AGENT_TMP=$(mktemp /tmp/gopher-agent.XXXXXX 2>/dev/null || echo "/tmp/gopher-agent.$$.new")
+# Try TLS-verified first; only fall back to no-verify if that fails (e.g. the
+# edge is reached by IP / self-signed cert). Avoids silently MITM-able download
+# of a root-run binary when a valid cert is in fact available.
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL --insecure "$HOST_URL/static/agents/gopher-agent-$ARCH_TAG" -o /tmp/gopher-agent.new
+  curl -fsSL "$AGENT_DL_URL" -o "$AGENT_TMP" \
+    || curl -fsSL --insecure "$AGENT_DL_URL" -o "$AGENT_TMP"
 elif command -v wget >/dev/null 2>&1; then
-  wget -q --no-check-certificate "$HOST_URL/static/agents/gopher-agent-$ARCH_TAG" -O /tmp/gopher-agent.new
+  wget -q "$AGENT_DL_URL" -O "$AGENT_TMP" \
+    || wget -q --no-check-certificate "$AGENT_DL_URL" -O "$AGENT_TMP"
 else
   echo "ERROR: neither curl nor wget is available" >&2
   exit 1
 fi
-install -m 0755 -o root -g root /tmp/gopher-agent.new /usr/local/bin/gopher-agent
-rm -f /tmp/gopher-agent.new
+# Verify against the pinned checksum before the root-owned install — the
+# download above may have used the --insecure fallback, so the pin (delivered
+# with this script over verified TLS) is what makes it trustworthy. Installing
+# the agent is this script's entire job, so a failed check is fatal.
+if [ -n "$AGENT_PIN" ]; then
+  if ! command -v sha256sum >/dev/null 2>&1; then
+    echo "ERROR: sha256sum not found — cannot verify agent download (install coreutils and re-run)" >&2
+    rm -f "$AGENT_TMP"; exit 1
+  fi
+  GOT_SUM=$(sha256sum "$AGENT_TMP" | awk '{print $1}')
+  if [ "$GOT_SUM" != "$AGENT_PIN" ]; then
+    echo "ERROR: agent checksum mismatch (expected $AGENT_PIN, got $GOT_SUM) — refusing to install" >&2
+    rm -f "$AGENT_TMP"; exit 1
+  fi
+  echo "agent checksum verified"
+fi
+install -m 0755 -o root -g root "$AGENT_TMP" /usr/local/bin/gopher-agent
+rm -f "$AGENT_TMP"
 
 # ── 4. Agent config (env file consumed by EnvironmentFile=) ─────────────────
-mkdir -p /etc/gopher-agent
-cat > /etc/gopher-agent/config.env <<EOF
+mkdir -p "$AGENT_DIR"
+cat > "$AGENT_CFG" <<EOF
 GOPHER_AGENT_TOKEN=$AGENT_TOKEN
 GOPHER_AGENT_PORT=$AGENT_PORT
 GOPHER_AGENT_UNIT=rathole-client.service
 EOF
-chmod 640 /etc/gopher-agent/config.env
-chown root:gopher /etc/gopher-agent/config.env
+chmod 640 "$AGENT_CFG"
+chown root:gopher "$AGENT_CFG"
 
 # ── 5. Add agent back-channel to rathole client config ──────────────────────
 # rathole-server already has the matching server-side block (added by the VPS
@@ -122,15 +164,38 @@ chown root:gopher /etc/gopher-agent/config.env
 # allocated AgentRemotePort/AgentRatholeToken on every existing row). All we
 # need on the client is the matching client.services entry pointing local_addr
 # at our agent.
-if [ -f /etc/rathole/client.toml ]; then
+if [ -f "$CLIENT_CFG" ]; then
   awk -v start="# gopher-machine-agent-start: $MACHINE_ID" \
       -v end="# gopher-machine-agent-end: $MACHINE_ID" '
     $0 == start { skip=1; next }
     $0 == end   { skip=0; next }
     !skip       { print }
-  ' /etc/rathole/client.toml > /etc/rathole/client.toml.tmp
+  ' "$CLIENT_CFG" > "$CLIENT_CFG.tmp"
 
-  cat >> /etc/rathole/client.toml.tmp <<EOF
+  # Ensure the [client.transport] noise block is present. Required for any
+  # machine whose original bootstrap predated the noise upgrade — without
+  # this, rathole-client tries to connect plaintext to a noise-only server
+  # and the tunnel never establishes. Strip any stale transport sections
+  # first so re-running migrate.sh with a rotated key is idempotent.
+  if [ -n "$NOISE_PUBKEY" ]; then
+    awk '
+      /^\[client\.transport\]/         { skip=1; next }
+      /^\[client\.transport\.noise\]/  { skip=1; next }
+      skip && /^\[/                    { skip=0 }
+      !skip                            { print }
+    ' "$CLIENT_CFG.tmp" > "$CLIENT_CFG.tmp2"
+    mv "$CLIENT_CFG.tmp2" "$CLIENT_CFG.tmp"
+    cat >> "$CLIENT_CFG.tmp" <<EOF
+
+[client.transport]
+type = "noise"
+
+[client.transport.noise]
+remote_public_key = "$NOISE_PUBKEY"
+EOF
+  fi
+
+  cat >> "$CLIENT_CFG.tmp" <<EOF
 
 # gopher-machine-agent-start: $MACHINE_ID
 [client.services.machine-$MACHINE_ID-agent]
@@ -139,11 +204,11 @@ token = "$RATHOLE_TOKEN"
 local_addr = "127.0.0.1:$AGENT_PORT"
 # gopher-machine-agent-end: $MACHINE_ID
 EOF
-  mv /etc/rathole/client.toml.tmp /etc/rathole/client.toml
+  mv "$CLIENT_CFG.tmp" "$CLIENT_CFG"
   # Hand the file over to gopher so the agent can write it directly going
   # forward (config-push uses os.WriteFile, not sudo tee).
-  chown gopher:gopher /etc/rathole/client.toml
-  chmod 0644 /etc/rathole/client.toml
+  chown gopher:gopher "$CLIENT_CFG"
+  chmod 0644 "$CLIENT_CFG"
 fi
 
 # ── 6. systemd unit + service start ─────────────────────────────────────────
@@ -155,7 +220,7 @@ After=network.target
 [Service]
 Type=simple
 User=gopher
-EnvironmentFile=/etc/gopher-agent/config.env
+EnvironmentFile=$AGENT_CFG
 ExecStart=/usr/local/bin/gopher-agent
 Restart=always
 RestartSec=5

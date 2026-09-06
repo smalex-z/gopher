@@ -1,11 +1,16 @@
 package service
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
+	"github.com/smalex-z/gopher/internal/agentdist"
 	"github.com/smalex-z/gopher/internal/db"
 )
 
@@ -75,7 +80,7 @@ func (i *AgentInstaller) Install(machineID string) (*MigrateInstructions, error)
 	// /api/bootstrap callback pattern. The token is the only thing that
 	// touches shell history.
 	const migrationTokenTTL = 1 * time.Hour
-	token := shortToken()
+	token := secretToken()
 	if err := db.CreateMigrationToken(token, machine.ID, migrationTokenTTL); err != nil {
 		return nil, fmt.Errorf("create migration token: %w", err)
 	}
@@ -89,12 +94,74 @@ func (i *AgentInstaller) Install(machineID string) (*MigrateInstructions, error)
 	}, nil
 }
 
+// UpgradeAgent rolls a machine's agent forward to targetAgentVersion by calling
+// the agent's own bearer-authed /self-update endpoint over the rathole
+// back-channel. The agent (running as gopher = NOPASSWD: ALL) downloads the new
+// binary from the edge, verifies it, and restarts itself — the server has no
+// root on the origin, so the agent is the actor.
+//
+// This is the steady-state, automatic path for v0.2.0+ agents. An agent that
+// predates /self-update (pre-gRPC v0.1.0) returns 404, surfaced as an error so
+// the operator is told to run the one-time manual upgrade (same migrate UX as a
+// fresh install).
+func (i *AgentInstaller) UpgradeAgent(machine *db.Machine) error {
+	if machine.AgentRemotePort == 0 || machine.AgentToken == "" {
+		return fmt.Errorf("machine %s missing agent port/token", machine.ID)
+	}
+	settings, err := db.GetSettings()
+	if err != nil {
+		return fmt.Errorf("settings lookup: %w", err)
+	}
+	baseURL, err := buildAgentDownloadBaseURL(settings)
+	if err != nil {
+		return err
+	}
+	// Carry the expected binary hashes IN the trigger: this request rides the
+	// noise-encrypted rathole back-channel with the per-machine bearer token,
+	// while the agent's actual download of the binary goes over a channel it
+	// can't fully trust (TLS verification is skipped for IP/self-signed edge
+	// certs). With the hash delivered here, the download path needs zero
+	// trust — see cmd/agent/selfupdate.go. Keyed by arch because the edge
+	// doesn't know the origin's arch; the agent picks its own entry. Empty on
+	// dev builds → omitted → the agent falls back to the legacy sidecar.
+	trigger := map[string]any{"base_url": baseURL, "version": targetAgentVersion}
+	if sums := agentdist.All(); len(sums) > 0 {
+		trigger["sha256_by_arch"] = sums
+	}
+	payload, _ := json.Marshal(trigger)
+	url := fmt.Sprintf("http://127.0.0.1:%d/self-update", machine.AgentRemotePort)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+machine.AgentToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("trigger self-update on %s: %w", machine.Name, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("agent on %s predates self-update — one-time manual upgrade required", machine.Name)
+	}
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("self-update on %s: status %d: %s", machine.Name, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
 // allocateAgentFields generates per-machine agent secrets and ports if the
 // machine record is missing them. Pre-agent-era machines have these fields
 // at their zero value; new bootstraps populate them at registration time.
 func (i *AgentInstaller) allocateAgentFields(machine *db.Machine) error {
-	if machine.TunnelPort == 0 {
-		return fmt.Errorf("machine has no tunnel port; bootstrap may be incomplete")
+	// A machine with neither an SSH tunnel nor agent fields was never fully
+	// bootstrapped. Agent-only machines legitimately have TunnelPort==0 but a
+	// valid AgentRemotePort, so gate on both being zero.
+	if machine.TunnelPort == 0 && machine.AgentRemotePort == 0 {
+		return fmt.Errorf("machine has no tunnel or agent port; bootstrap may be incomplete")
 	}
 	dirty := false
 	if machine.AgentLocalPort == 0 {
@@ -110,11 +177,11 @@ func (i *AgentInstaller) allocateAgentFields(machine *db.Machine) error {
 		dirty = true
 	}
 	if machine.AgentToken == "" {
-		machine.AgentToken = shortToken()
+		machine.AgentToken = secretToken()
 		dirty = true
 	}
 	if machine.AgentRatholeToken == "" {
-		machine.AgentRatholeToken = shortToken()
+		machine.AgentRatholeToken = secretToken()
 		dirty = true
 	}
 	if dirty {
@@ -169,11 +236,4 @@ func buildAgentDownloadBaseURL(settings *db.AppSettings) (string, error) {
 		return "", fmt.Errorf("agent install over plain HTTP isn't supported when bind_ip is set and Caddy isn't running yet — finish the local install or expose the dashboard on a public address first")
 	}
 	return fmt.Sprintf("http://%s:%d", host, dashboardPort), nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

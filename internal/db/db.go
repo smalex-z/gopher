@@ -53,13 +53,16 @@ func Initialize(dsn string) error {
 	}
 
 	// SQLite is single-writer and PRAGMAs are connection-scoped. Pinning
-	// the pool to a single connection lets us turn `foreign_keys` ON
-	// after migrations and have the setting stick for every subsequent
-	// query — without this, queries borrowed from a different pooled
-	// connection would silently lose FK enforcement and ON DELETE CASCADE
-	// on tunnels / the bootstrap_tokens.machine_id reference would not
-	// fire. For Gopher's dashboard-scale workload, serializing on one
-	// connection is invisible.
+	// the pool to a single connection lets us turn `foreign_keys` ON after
+	// migrations and have the setting stick for every subsequent query —
+	// without this, queries borrowed from a different pooled connection would
+	// silently lose FK enforcement. NOTE: AutoMigrate creates plain FKs from the
+	// struct relations (no ON DELETE CASCADE despite what the 001 migration's
+	// DDL says — it's a no-op once AutoMigrate already made the table), so
+	// cascading deletes are done explicitly in the service layer
+	// (MachineService.delete removes a machine's tunnels before the machine).
+	// FK enforcement still matters for rejecting orphan inserts. For Gopher's
+	// dashboard-scale workload, serializing on one connection is invisible.
 	sqlDB, err := DB.DB()
 	if err != nil {
 		return fmt.Errorf("failed to access underlying *sql.DB: %w", err)
@@ -73,7 +76,7 @@ func Initialize(dsn string) error {
 
 	// ActivityEvent is now an alias for Event; we only need to register the
 	// underlying type once.
-	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &MigrationToken{}, &AppSettings{}, &SSHKey{}, &FirewallRule{}, &BotSession{}, &TOTPDevice{}, &ExternalMachine{}, &ExternalTunnel{}, &HealthCheck{}, &Event{}); err != nil {
+	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &MigrationToken{}, &AppSettings{}, &SSHKey{}, &FirewallRule{}, &BotSession{}, &DashboardSession{}, &TOTPDevice{}, &ExternalMachine{}, &ExternalTunnel{}, &HealthCheck{}, &Event{}); err != nil {
 		return fmt.Errorf("failed to auto-migrate: %w", err)
 	}
 

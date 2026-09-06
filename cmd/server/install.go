@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -139,6 +141,17 @@ func runInstall(args []string) error {
 		return fmt.Errorf("failed to set data dir ownership: %w", err)
 	}
 
+	// The supervisor extracts the bundled caddy/rathole into /opt/gopher/bin at
+	// startup; gopher runs as cfg.user (unprivileged), so the dir must be
+	// gopher-owned (the install dir itself is root-owned). Mirrors reinstall.sh.
+	binDir := filepath.Join(cfg.installDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		return fmt.Errorf("failed to create %s: %w", binDir, err)
+	}
+	if err := chownRecursive(cfg.user, binDir); err != nil {
+		return fmt.Errorf("failed to set bin dir ownership: %w", err)
+	}
+
 	sudoersPath := filepath.Join("/etc/sudoers.d", cfg.user)
 	sudoersContent := buildSudoers(cfg.user)
 	if err := os.WriteFile(sudoersPath, []byte(sudoersContent), 0440); err != nil {
@@ -194,18 +207,37 @@ func runInstall(args []string) error {
 	fmt.Printf("  Manage:  systemctl status %s\n", cfg.serviceName)
 	fmt.Println()
 
-	ips := detectPublicIPs()
+	publicIP := detectPublicIP()
+	localIPs := detectLocalIPs()
 	fmt.Println("Next step — finish setup in your browser:")
-	if len(ips) == 0 {
-		fmt.Printf("  http://<server-ip>:%d\n", defaultDashboardPort)
-	} else {
-		for _, ip := range ips {
+	switch {
+	case publicIP != "":
+		fmt.Printf("  http://%s:%d\n", publicIP, defaultDashboardPort)
+		// A cloud VM's public IP is NAT'd, so it won't appear in localIPs;
+		// surface the private address too for VPN / private-network access.
+		for _, ip := range localIPs {
+			if ip != publicIP {
+				fmt.Printf("  http://%s:%d   (private network)\n", ip, defaultDashboardPort)
+			}
+		}
+	case len(localIPs) > 0:
+		// No public IP detected (egress blocked, or private-only host).
+		for _, ip := range localIPs {
 			fmt.Printf("  http://%s:%d\n", ip, defaultDashboardPort)
 		}
+	default:
+		fmt.Printf("  http://<server-ip>:%d\n", defaultDashboardPort)
 	}
 	fmt.Println()
-	fmt.Println("If your VPS sits behind a cloud firewall (AWS SG, GCP, etc.),")
-	fmt.Printf("  also allow inbound tcp/%d there before opening the URL.\n", defaultDashboardPort)
+	fmt.Println("Cloud firewalls (AWS Security Groups, OCI Security Lists, GCP rules)")
+	fmt.Println("  are a second layer in front of this server that Gopher cannot manage.")
+	fmt.Printf("  Allow inbound tcp/%d there now to reach setup.\n", defaultDashboardPort)
+	fmt.Println()
+	fmt.Println("Simplest long-term: allow ALL inbound TCP at the cloud layer and let")
+	fmt.Println("  Gopher's own firewall (set up in the wizard) do the enforcement —")
+	fmt.Println("  tunnel ports are assigned dynamically, so per-port cloud rules will")
+	fmt.Println("  fight you on every new tunnel. This assumes the VPS is dedicated to")
+	fmt.Println("  Gopher: Docker-published ports bypass the OS firewall entirely.")
 	return nil
 }
 
@@ -229,7 +261,11 @@ func ensureDashboardPortOpen(iptablesPath string, port int) error {
 // This is a best-effort hint for the operator — on cloud VMs the public IP
 // is usually NAT'd outside the box, but the private one we surface is still
 // useful for confirming "yes the service is bound" before they SSH into it.
-func detectPublicIPs() []string {
+// detectLocalIPs returns the IPv4 addresses bound to local interfaces. On a
+// cloud VM these are the private (RFC1918) addresses — the public IP is NAT'd
+// upstream and never appears here — so this is only useful as a fallback or for
+// VPN / private-network access. See detectPublicIP for the reachable address.
+func detectLocalIPs() []string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
@@ -256,6 +292,44 @@ func detectPublicIPs() []string {
 		}
 	}
 	return ips
+}
+
+// detectPublicIP returns the VPS's public IPv4 as seen from the internet by
+// asking external echo services. This is the address a browser actually uses to
+// reach the dashboard on a NAT'd cloud VM, where detectLocalIPs only surfaces
+// the private IP. Requires outbound HTTPS; returns "" if every probe fails
+// (egress blocked, or a private-only host) so the caller can fall back.
+func detectPublicIP() string {
+	// Plain-text "what's my IP" endpoints; each returns the bare IP. Tried in
+	// order, first valid public IPv4 wins. Short timeout so a blocked-egress
+	// host doesn't stall the install.
+	endpoints := []string{
+		"https://checkip.amazonaws.com",
+		"https://api.ipify.org",
+		"https://icanhazip.com",
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	for _, url := range endpoints {
+		resp, err := client.Get(url)
+		if err != nil {
+			continue
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(strings.TrimSpace(string(body)))
+		if ip == nil {
+			continue
+		}
+		v4 := ip.To4()
+		if v4 == nil || v4.IsPrivate() || v4.IsLoopback() || v4.IsLinkLocalUnicast() || v4.IsUnspecified() {
+			continue
+		}
+		return v4.String()
+	}
+	return ""
 }
 
 func ensureSystemUser(username, homeDir string) error {
@@ -365,6 +439,10 @@ After=network.target
 [Service]
 Type=simple
 User=%s
+# Marks this as a real managed edge: gopher only extracts/supervises the bundled
+# caddy+rathole (and runs the destructive legacy-layout migration) when this is
+# set, so test/dev/stray executions never touch a live edge.
+Environment=GOPHER_MANAGED=1
 ExecStart=%s --db %s
 Restart=always
 RestartSec=5

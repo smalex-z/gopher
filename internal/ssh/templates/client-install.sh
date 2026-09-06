@@ -7,7 +7,7 @@ if command -v rathole &>/dev/null; then
   exit 0
 fi
 
-RATHOLE_VERSION="v0.5.0"
+RATHOLE_VERSION="__RATHOLE_VERSION__"
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64)  ARCH_TAG="x86_64-unknown-linux-gnu" ;;
@@ -16,7 +16,7 @@ case "$ARCH" in
   *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-RATHOLE_URL="https://github.com/rathole-org/rathole/releases/download/${RATHOLE_VERSION}/rathole-${ARCH_TAG}.zip"
+RATHOLE_URL="https://github.com/__RATHOLE_REPO__/releases/download/${RATHOLE_VERSION}/rathole-${ARCH_TAG}.zip"
 echo "Downloading rathole from $RATHOLE_URL ..."
 rm -rf /tmp/rathole-dl && mkdir -p /tmp/rathole-dl
 curl -fsSL "$RATHOLE_URL" -o /tmp/rathole-dl/rathole.zip

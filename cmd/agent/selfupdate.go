@@ -1,0 +1,198 @@
+package main
+
+import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"runtime"
+	"strings"
+	"time"
+)
+
+const maxAgentBinaryBytes = 64 << 20 // 64 MiB cap on the downloaded binary
+
+type selfUpdateRequest struct {
+	BaseURL string `json:"base_url"` // edge URL the origin can reach, e.g. https://router.example.com
+	Version string `json:"version"`  // target version — for logging + same-version no-op
+	// SHA256ByArch maps release arch tag ("amd64", "arm64", "armv7") → expected
+	// hex sha256 of the agent binary the edge serves. It arrives over THIS
+	// request — bearer-authed, riding the noise-encrypted rathole back-channel
+	// — which makes it the trust anchor for the download below: the binary
+	// fetch itself skips TLS verification (IP/self-signed edge certs), so
+	// without a trigger-carried hash an on-path attacker could substitute both
+	// the binary and its same-channel .sha256 sidecar. When this map is
+	// present, the sidecar is not consulted at all. Absent (older edge) →
+	// legacy sidecar behavior.
+	SHA256ByArch map[string]string `json:"sha256_by_arch,omitempty"`
+}
+
+// handleSelfUpdate is the stable, bearer-authed HTTP control endpoint that rolls
+// the agent forward to the binary the edge serves.
+//
+// It lives on the plaintext HTTP surface (not the gRPC service) deliberately:
+// the upgrade trigger must survive across gRPC protocol changes, so a future
+// wire-format break is still self-healing. The agent runs as the gopher user
+// (NOPASSWD: ALL — see migrate.sh / bootstrap.sh), so it has the privilege to
+// install the new binary and restart its own unit. The server's SSH user does
+// NOT have that privilege on the origin, which is why self-update — not an
+// SSH push — is the correct mechanism.
+func (s *agentServer) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	if !s.httpBearerOK(r) {
+		httpJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
+		return
+	}
+	var req selfUpdateRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		httpJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request body"})
+		return
+	}
+	base := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
+	if base == "" {
+		httpJSON(w, http.StatusBadRequest, map[string]string{"error": "base_url required"})
+		return
+	}
+	// The trigger is bearer-authed and base_url is where the server says the
+	// edge lives — persist it as the dial-home recovery address (recover.go)
+	// before any restart, and before the same-version no-op below so even a
+	// no-op trigger teaches an agent that predates GOPHER_EDGE_URL.
+	rememberEdgeURL(base)
+
+	// No-op if we're already the target — prevents a restart loop if the server
+	// and agent briefly disagree about what's current.
+	if req.Version != "" && req.Version == agentVersion {
+		httpJSON(w, http.StatusOK, map[string]any{"updated": false, "reason": "already running " + agentVersion})
+		return
+	}
+
+	// Map GOARCH to the release arch tag the build/CI produces. 32-bit ARM
+	// reports GOARCH "arm" but the binary is built+served as "armv7" (GOARM=7),
+	// matching bootstrap.sh — without this remap an armv7 origin would fetch a
+	// gopher-agent-linux-arm that doesn't exist and self-update would 404 forever.
+	archTag := runtime.GOARCH
+	if archTag == "arm" {
+		archTag = "armv7"
+	}
+	binURL := fmt.Sprintf("%s/static/agents/gopher-agent-linux-%s", base, archTag)
+
+	bin, err := download(binURL, maxAgentBinaryBytes)
+	if err != nil {
+		httpJSON(w, http.StatusBadGateway, map[string]string{"error": "download binary: " + err.Error()})
+		return
+	}
+	// Resolve the expected checksum. Preferred source: the trigger body itself
+	// (see SHA256ByArch) — authenticated end-to-end, so a MITM on the download
+	// channel can't forge it. Legacy fallback (edge predating trigger-carried
+	// hashes): the .sha256 sidecar from the same channel as the binary, which
+	// only guards against corruption (truncated/half-written downloads), not
+	// substitution.
+	var want string
+	if len(req.SHA256ByArch) > 0 {
+		want = req.SHA256ByArch[archTag]
+		if want == "" {
+			httpJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": "edge provided checksums but none for arch " + archTag + " — refusing unverifiable update",
+			})
+			return
+		}
+	} else {
+		wantSum, err := download(binURL+".sha256", 4096)
+		if err != nil {
+			httpJSON(w, http.StatusBadGateway, map[string]string{"error": "download checksum: " + err.Error()})
+			return
+		}
+		want = firstField(string(wantSum))
+	}
+	sum := sha256.Sum256(bin)
+	got := hex.EncodeToString(sum[:])
+	if !strings.EqualFold(want, got) {
+		httpJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": fmt.Sprintf("checksum mismatch: got %s want %s", got, want),
+		})
+		return
+	}
+
+	// Stage to a UNIQUE temp file, not a fixed /tmp path. The agent runs as the
+	// `gopher` user, so a fixed gopher-agent.new left here would be un-removable
+	// by a later bootstrap/migrate run under a different user (/tmp is sticky).
+	stage, err := os.CreateTemp("", "gopher-agent-*") // #nosec G101 — not a credential
+	if err != nil {
+		httpJSON(w, http.StatusInternalServerError, map[string]string{"error": "stage temp: " + err.Error()})
+		return
+	}
+	stagePath := stage.Name()
+	_ = stage.Close()
+	if err := os.WriteFile(stagePath, bin, 0o755); err != nil { // #nosec G306 — must be executable
+		_ = os.Remove(stagePath)
+		httpJSON(w, http.StatusInternalServerError, map[string]string{"error": "stage binary: " + err.Error()})
+		return
+	}
+
+	// Detached worker (setsid) installs the staged binary, restarts the unit, and
+	// removes the staged file. It must outlive this process: `systemctl restart
+	// gopher-agent` kills us mid-call. KillMode=process on the unit (see
+	// migrate.sh) keeps the detached child alive across the stop. The sleep lets
+	// the 202 flush back through the tunnel first. gopher = NOPASSWD: ALL.
+	worker := fmt.Sprintf(
+		"sleep 2; sudo -n install -m 0755 -o root -g root %s /usr/local/bin/gopher-agent && sudo -n systemctl restart gopher-agent; rm -f %s",
+		stagePath, stagePath)
+	cmd := exec.Command("setsid", "sh", "-c", worker) // #nosec G204 — stagePath is an os.CreateTemp name (no shell metachars)
+	if err := cmd.Start(); err != nil {
+		httpJSON(w, http.StatusInternalServerError, map[string]string{"error": "spawn update worker: " + err.Error()})
+		return
+	}
+	go func() { _ = cmd.Process.Release() }()
+
+	httpJSON(w, http.StatusAccepted, map[string]any{"updating": true, "from": agentVersion, "to": req.Version})
+}
+
+func (s *agentServer) httpBearerOK(r *http.Request) bool {
+	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return subtle.ConstantTimeCompare([]byte(got), []byte(s.cfg.Token)) == 1
+}
+
+// download fetches up to max bytes from url. TLS verification is skipped to
+// match migrate.sh's curl --insecure (the edge may present an IP/early-boot
+// cert). This channel is therefore untrusted by design: authenticity of a
+// downloaded binary comes from the sha256 carried in the bearer-authed
+// trigger body (SHA256ByArch), never from this transport.
+func download(url string, max int64) ([]byte, error) {
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 — see godoc
+		},
+	}
+	resp, err := client.Get(url) // #nosec G107 — url derived from operator-configured edge base URL
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, max))
+}
+
+func firstField(s string) string {
+	for _, f := range strings.Fields(s) {
+		return f
+	}
+	return ""
+}
+
+func httpJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}

@@ -11,17 +11,17 @@ import { securityApi } from '../api/security'
 import { updateApi } from '../api/update'
 import client from '../api/client'
 import type { Machine, Tunnel, SSHKey, FirewallEntry } from '../types'
+import { statusBg, isHealthyStatus } from '../lib/statusColor'
 
 // ─── Tiny helpers ─────────────────────────────────────────────────────────────
 
+// Delegates to lib/statusColor so offline/idle/provisioning/config-error
+// render as the same not-gray colors they do everywhere else — this used to
+// have its own switch that fell through to neutral gray for all of those,
+// so a genuinely down machine or tunnel looked identical to "nothing to
+// report" on the one screen meant for at-a-glance health.
 function Dot({ status }: { status: string }) {
-  const s = status.toLowerCase()
-  const c =
-    s === 'active' || s === 'connected' ? 'bg-green-500' :
-    s === 'pending' || s === 'connecting' ? 'bg-yellow-400' :
-    s === 'failed' || s === 'error' ? 'bg-red-500' :
-    'bg-gray-300'
-  return <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${c}`} />
+  return <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${statusBg(status)}`} />
 }
 
 function Chip({ label, color }: { label: string; color: 'green' | 'red' | 'yellow' | 'gray' | 'blue' }) {
@@ -135,8 +135,12 @@ export default function DashboardPage() {
   const domain     = localStatus?.domain ?? ''
   const fwMode     = localStatus?.firewall_mode ?? ''
 
-  const connected   = machines.filter(m => m.status === 'active' || m.status === 'connected').length
-  const activeTuns  = tunnels.filter(t => t.status === 'active').length
+  const connected   = machines.filter(m => isHealthyStatus(m.status)).length
+  // Was `t.status === 'active'` only — undercounted "connected" tunnels
+  // (up, upstream silent; normal for speak-first apps like MySQL/Minecraft
+  // and genuinely healthy per StatusBadge), so a fully working setup could
+  // read e.g. "1/3 active" when only 1 of the other 2 was actually down.
+  const activeTuns  = tunnels.filter(t => isHealthyStatus(t.status)).length
   const defaultKey  = keys.find(k => k.is_default)
   const bannedCount = (fail2ban?.jails ?? []).reduce((n, j) => n + j.currently_banned, 0)
   const customRules = fwEntries.filter(e => e.type === 'custom').length

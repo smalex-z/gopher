@@ -8,21 +8,14 @@ set -euo pipefail
 GOPHER_PORT=8181
 GOPHER_DB="test-idempotency.db"
 COOKIE_JAR=""
+# shellcheck disable=SC2034  # set here, consumed by sourced lib.sh
 GOPHER_PID=""
+GOPHER_LOG=""
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck disable=SC1091
+source "$(dirname "$0")/lib.sh"
 
-pass() { echo -e "${GREEN}✅ $1${NC}"; }
-fail() { echo -e "${RED}❌ $1${NC}"; exit 1; }
-
-cleanup() {
-    [[ -n "$GOPHER_PID" ]] && kill "$GOPHER_PID" 2>/dev/null || true
-    [[ -n "$COOKIE_JAR" ]] && rm -f "$COOKIE_JAR"
-    rm -f "$GOPHER_DB"
-}
-trap cleanup EXIT
+trap cleanup_gopher_artefacts EXIT
 
 echo "🧪 Idempotency Tests"
 echo "===================="
@@ -34,23 +27,14 @@ fi
 command -v jq >/dev/null 2>&1 || fail "jq is required but not installed"
 command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 is required but not installed"
 
-rm -f "$GOPHER_DB"
 COOKIE_JAR=$(mktemp /tmp/gopher-cookies.XXXXX)
+# shellcheck disable=SC2034  # set here, consumed by sourced lib.sh
+GOPHER_LOG=$(mktemp /tmp/gopher-stderr.XXXXX)
 
 # ── Start Server ───────────────────────────────────────────────────────────────
 echo ""
 echo "1. Starting Gopher on port $GOPHER_PORT..."
-./gopher --db "$GOPHER_DB" --port "$GOPHER_PORT" >/dev/null 2>&1 &
-GOPHER_PID=$!
-
-for i in $(seq 1 30); do
-    if curl -sf "http://localhost:$GOPHER_PORT/api/status" >/dev/null 2>&1; then
-        pass "Server ready"
-        break
-    fi
-    sleep 0.5
-    [[ $i -eq 30 ]] && fail "Server did not start within 15 seconds"
-done
+start_gopher_with_retry
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 curl -sf -c "$COOKIE_JAR" \

@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,41 @@ func initTestDB(t *testing.T) {
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
 	if err := Initialize(dsn); err != nil {
 		t.Fatalf("failed to init test db: %v", err)
+	}
+	// Make port allocation deterministic — bypass the OS bind-test, which
+	// depends on what's actually listening on the test host. Tests that want to
+	// exercise the OS-occupancy path override portAvailable themselves.
+	orig := portAvailable
+	portAvailable = func(int) bool { return true }
+	t.Cleanup(func() { portAvailable = orig })
+}
+
+// TestNextRatholePort_SkipsOSOccupiedPort: the allocator must skip a port that's
+// in use at the OS level even though Gopher's DB doesn't know about it.
+func TestNextRatholePort_SkipsOSOccupiedPort(t *testing.T) {
+	initTestDB(t) // stubs portAvailable = always-true
+	portAvailable = func(p int) bool { return p != 1024 }
+
+	got, err := NextRatholePort()
+	if err != nil {
+		t.Fatalf("NextRatholePort: %v", err)
+	}
+	if got != 1025 {
+		t.Fatalf("expected allocator to skip OS-occupied 1024 and return 1025, got %d", got)
+	}
+}
+
+// TestOSPortAvailable_DetectsListener: a port we're actively listening on must
+// be reported unavailable by the real OS check.
+func TestOSPortAvailable_DetectsListener(t *testing.T) {
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer l.Close()
+	busy := l.Addr().(*net.TCPAddr).Port
+	if osPortAvailable(busy) {
+		t.Errorf("port %d is actively listening but osPortAvailable reported it free", busy)
 	}
 }
 
@@ -47,6 +83,51 @@ func TestMachine_CreateAndGet(t *testing.T) {
 	}
 	if got.Name != "test-machine" {
 		t.Errorf("Name = %q, want %q", got.Name, "test-machine")
+	}
+}
+
+func TestSetMachineStatus_ConnectedSinceLifecycle(t *testing.T) {
+	initTestDB(t)
+	// Seed offline so the first "connected" is a genuine up-transition.
+	if err := CreateMachine(&Machine{ID: "m1", Name: "m1", Status: "offline"}); err != nil {
+		t.Fatalf("CreateMachine: %v", err)
+	}
+
+	t0 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := SetMachineStatus("m1", "connected", &t0); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	m, _ := GetMachine("m1")
+	if m.ConnectedSince == nil || !m.ConnectedSince.Equal(t0) {
+		t.Fatalf("connected_since should be stamped at t0=%v, got %v", t0, m.ConnectedSince)
+	}
+
+	// A later connected poll must PRESERVE connected_since (continuous uptime).
+	t1 := t0.Add(30 * time.Minute)
+	if err := SetMachineStatus("m1", "connected", &t1); err != nil {
+		t.Fatalf("re-poll: %v", err)
+	}
+	m, _ = GetMachine("m1")
+	if m.ConnectedSince == nil || !m.ConnectedSince.Equal(t0) {
+		t.Errorf("connected_since should be preserved at t0=%v across polls, got %v", t0, m.ConnectedSince)
+	}
+	if m.LastSeen == nil || !m.LastSeen.Equal(t1) {
+		t.Errorf("last_seen should advance to t1=%v, got %v", t1, m.LastSeen)
+	}
+
+	// Going offline leaves connected_since untouched (unused while offline).
+	if err := SetMachineStatus("m1", "offline", nil); err != nil {
+		t.Fatalf("offline: %v", err)
+	}
+
+	// Reconnecting AFTER an offline gap must reset connected_since to the new time.
+	t2 := t1.Add(time.Hour)
+	if err := SetMachineStatus("m1", "connected", &t2); err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	m, _ = GetMachine("m1")
+	if m.ConnectedSince == nil || !m.ConnectedSince.Equal(t2) {
+		t.Errorf("connected_since should reset to t2=%v on reconnect, got %v", t2, m.ConnectedSince)
 	}
 }
 
@@ -555,16 +636,16 @@ func TestSetMachineStatus_OnlyUpdatesStatusAndLastSeen(t *testing.T) {
 func TestSetMachineAgentSeen_FlipsInstalledAndPreservesNonAgentFields(t *testing.T) {
 	initTestDB(t)
 	m := &Machine{
-		ID:                 "m2",
-		Name:               "agent-seen",
-		Status:             "pending",
-		TunnelPort:         1024,
-		RatholeSSHToken:    "ssh-tok",
-		AgentInstalled:     false,
-		AgentRemotePort:    1025,
-		AgentLocalPort:     4322,
-		AgentRatholeToken:  "agent-rt",
-		AgentInstallError:  "previous error",
+		ID:                "m2",
+		Name:              "agent-seen",
+		Status:            "pending",
+		TunnelPort:        1024,
+		RatholeSSHToken:   "ssh-tok",
+		AgentInstalled:    false,
+		AgentRemotePort:   1025,
+		AgentLocalPort:    4322,
+		AgentRatholeToken: "agent-rt",
+		AgentInstallError: "previous error",
 	}
 	if err := CreateMachine(m); err != nil {
 		t.Fatalf("create: %v", err)
@@ -603,5 +684,48 @@ func TestSetMachineAgentSeen_FlipsInstalledAndPreservesNonAgentFields(t *testing
 	}
 	if got.RatholeSSHToken != "ssh-tok" {
 		t.Errorf("RatholeSSHToken was clobbered")
+	}
+}
+
+// ---- Migration tokens -------------------------------------------------------
+
+// POST /api/migrate returns the machine's agent + rathole credentials, so a
+// migration token must be single-use: replayable-within-TTL tokens were a
+// 1-hour credential-disclosure window for anything that saw the token
+// (shell history, a pasted install command).
+func TestMigrationToken_ClaimIsSingleUse(t *testing.T) {
+	initTestDB(t)
+	if err := CreateMigrationToken("mtok", "m1", time.Hour); err != nil {
+		t.Fatalf("CreateMigrationToken: %v", err)
+	}
+	mt, err := ClaimMigrationToken("mtok")
+	if err != nil {
+		t.Fatalf("first claim should succeed: %v", err)
+	}
+	if mt.MachineID != "m1" {
+		t.Errorf("MachineID = %q, want m1", mt.MachineID)
+	}
+	if mt.UsedAt == nil {
+		t.Error("UsedAt should be set after claim")
+	}
+	if _, err := ClaimMigrationToken("mtok"); err == nil {
+		t.Fatal("second claim of the same token should fail")
+	}
+}
+
+func TestMigrationToken_ClaimRejectsExpired(t *testing.T) {
+	initTestDB(t)
+	if err := CreateMigrationToken("mtok", "m1", -time.Hour); err != nil {
+		t.Fatalf("CreateMigrationToken: %v", err)
+	}
+	if _, err := ClaimMigrationToken("mtok"); err == nil {
+		t.Fatal("claim of expired token should fail")
+	}
+}
+
+func TestMigrationToken_ClaimUnknown(t *testing.T) {
+	initTestDB(t)
+	if _, err := ClaimMigrationToken("nope"); err == nil {
+		t.Fatal("claim of unknown token should fail")
 	}
 }

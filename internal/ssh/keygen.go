@@ -28,6 +28,16 @@ func GenerateRSAKeypair() (string, string, error) {
 	return string(privPEM), pubKey, nil
 }
 
+// ValidatePublicKey checks that publicAuthorizedKey is a well-formed
+// authorized_keys line. Used when a key is registered public-only (no private
+// half stored on the server).
+func ValidatePublicKey(publicAuthorizedKey string) error {
+	if _, _, _, _, err := ssh.ParseAuthorizedKey([]byte(publicAuthorizedKey)); err != nil {
+		return fmt.Errorf("invalid public key: %w", err)
+	}
+	return nil
+}
+
 // ValidateKeyPair checks that privateKeyPEM (PEM or OpenSSH format) and
 // publicAuthorizedKey (authorized_keys line) form a matching pair.
 func ValidateKeyPair(privateKeyPEM, publicAuthorizedKey string) error {

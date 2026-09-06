@@ -53,6 +53,17 @@ func (c *SSHClient) Close() error {
 	return c.client.Close()
 }
 
+// executeTimeout bounds a single short remote command. ClientConfig.Timeout
+// only covers the TCP dial, NOT session.Run — a live-but-hung origin (or one
+// reachable only through a wedged rathole tunnel) would otherwise block the
+// caller forever. Every Execute caller runs a quick status/probe command, and
+// several are on HTTP request goroutines (machine status, network-info, ssh-key
+// reassign, recover), so an unbounded Run there is a handler-wedge waiting to
+// happen. ExecuteWithOutput is deliberately left unbounded — it streams a
+// long-running client install to the deploy log and legitimately runs for
+// minutes.
+const executeTimeout = 20 * time.Second
+
 func (c *SSHClient) Execute(cmd string) (string, error) {
 	session, err := c.client.NewSession()
 	if err != nil {
@@ -64,11 +75,19 @@ func (c *SSHClient) Execute(cmd string) (string, error) {
 	session.Stdout = &stdout
 	session.Stderr = &stderr
 
-	if err := session.Run(cmd); err != nil {
-		return "", fmt.Errorf("command failed: %w (stderr: %s)", err, stderr.String())
-	}
+	done := make(chan error, 1) // buffered so the goroutine never leaks
+	go func() { done <- session.Run(cmd) }()
 
-	return stdout.String(), nil
+	select {
+	case err := <-done:
+		if err != nil {
+			return "", fmt.Errorf("command failed: %w (stderr: %s)", err, stderr.String())
+		}
+		return stdout.String(), nil
+	case <-time.After(executeTimeout):
+		_ = session.Close() // unblock the pending session.Run
+		return "", fmt.Errorf("ssh command timed out after %s: %s", executeTimeout, cmd)
+	}
 }
 
 func (c *SSHClient) ExecuteWithOutput(cmd string, w io.Writer) error {
@@ -171,7 +190,18 @@ func (c *SSHClient) UploadFileSudoInPlace(content []byte, remotePath, owner stri
 	// `sudo tee` truncates+rewrites in place — same inode as before, which
 	// keeps rathole's notify watcher subscribed. Discard tee's stdout so
 	// it doesn't echo the file content back over the SSH session.
-	cmd := fmt.Sprintf("sudo tee %q < %q > /dev/null", remotePath, tmpPath)
+	//
+	// Pre-flight a free-space check: tee opens with O_TRUNC, so a disk-full
+	// write would leave client.toml truncated and the notify watcher would
+	// hot-reload a broken config, dropping every tunnel on the machine (the
+	// corruption the agent path's statfs guard prevents). Fail-open if df can't
+	// be read — this is defense, not a hard gate.
+	neededKB := len(content)/1024 + 64
+	cmd := fmt.Sprintf(
+		`avail=$(df -Pk "$(dirname %q)" 2>/dev/null | awk 'NR==2{print $4}'); `+
+			`if [ "${avail:-999999999}" -lt %d ]; then echo "insufficient disk space (${avail}KB free, need %dKB)" >&2; exit 28; fi; `+
+			`sudo tee %q < %q > /dev/null`,
+		remotePath, neededKB, neededKB, remotePath, tmpPath)
 	if owner != "" {
 		cmd += fmt.Sprintf(" && sudo chown %q %q", owner, remotePath)
 	}

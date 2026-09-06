@@ -30,6 +30,13 @@ export interface LocalServiceStatus {
   bind_ip: string
   /** All non-loopback IPv4 addresses on the host. More than one means multi-homed. */
   host_ips: string[]
+  /** Base64 X25519 public key for rathole's noise transport. Operators copy
+   *  this into hand-rolled rathole-client configs for user-managed services. */
+  rathole_noise_pubkey: string
+  /** Names of user-managed services from server.toml's custom block that
+   *  need a manual noise pubkey update on their client side. Set during
+   *  noise migration. Empty when nothing needs attention or after dismissal. */
+  rathole_custom_services_warning: string[]
 }
 
 export interface FirewallStatus {
@@ -42,22 +49,37 @@ export interface FirewallStatus {
 
 export type FirewallMode = 'gopher' | 'manual' | 'none'
 
+export type DNSCheckStatus = 'pass' | 'warn' | 'fail' | 'skip'
+
+export interface DNSCheck {
+  name: string
+  label: string
+  status: DNSCheckStatus
+  message: string
+}
+
 export interface DNSCheckResult {
   ok: boolean
   message?: string
   resolved_to?: string
   host?: string
+  expected_ip?: string
+  checks?: DNSCheck[]
 }
 
 export const localApi = {
   status: () => client.get<{ data: LocalServiceStatus }>('/local/status').then(r => r.data.data),
-  install: (domain: string, serverHost: string, skipCaddy?: boolean) =>
-    client.post('/local/install', { domain, server_host: serverHost, skip_caddy: Boolean(skipCaddy) }).then(r => r.data),
-  skip: (domain?: string) => client.post('/local/skip', { domain }).then(r => r.data),
+  dismissCustomServicesWarning: () =>
+    client.post('/local/dismiss-custom-services-warning').then(r => r.data),
+  install: (domain: string) =>
+    client.post('/local/install', { domain }).then(r => r.data),
   detectIP: () =>
     client.get<{ data: { ip: string } }>('/local/detect-ip').then(r => r.data.data),
-  checkDNS: (domain: string) =>
-    client.get<{ data: DNSCheckResult }>(`/local/check-dns?domain=${encodeURIComponent(domain)}`).then(r => r.data.data),
+  checkDNS: (domain: string, expectedIP?: string) => {
+    const params = new URLSearchParams({ domain })
+    if (expectedIP) params.set('expected_ip', expectedIP)
+    return client.get<{ data: DNSCheckResult }>(`/local/check-dns?${params.toString()}`).then(r => r.data.data)
+  },
   resolveIP: (host: string) =>
     client.get<{ data: { ip: string } }>(`/local/resolve-ip?host=${encodeURIComponent(host)}`).then(r => r.data.data),
   listSSHKeys: () =>
@@ -77,6 +99,10 @@ export const localApi = {
     client.get<ApiResponse<{ requires: 'totp' | 'password' }>>('/local/ssh-keys/challenge-info').then(r => r.data.data),
   downloadSSHKey: (id: string, challenge: { totp_code?: string; password?: string }) =>
     client.post(`/local/ssh-keys/${id}/download`, challenge, { responseType: 'blob' }).then(r => r.data as Blob),
+  deletePrivateKey: (id: string, challenge: { totp_code?: string; password?: string }) =>
+    client.post(`/local/ssh-keys/${id}/delete-private`, challenge).then(r => r.data),
+  addPrivateKey: (id: string, privateKey: string) =>
+    client.post(`/local/ssh-keys/${id}/private`, { private_key: privateKey }).then(r => r.data),
   detectFirewall: () =>
     client.get<{ data: FirewallStatus }>('/local/firewall/detect').then(r => r.data.data),
   configureFirewall: (mode: FirewallMode) =>
@@ -91,6 +117,8 @@ export const localApi = {
     client.get<ApiResponse<Record<string, string>>>('/local/firewall/live').then(r => r.data),
   reloadFirewall: () =>
     client.post('/local/firewall/reload').then(r => r.data),
+  switchFirewallMode: (mode: FirewallMode) =>
+    client.post<ApiResponse<{ message: string; streaming: boolean }>>('/local/firewall/mode', { mode }).then(r => r.data.data),
   setServerPorts: (dashboardPrivate: boolean) =>
     client.put('/local/server-ports', { dashboard_private: dashboardPrivate }).then(r => r.data),
   setBindIP: (bindIP: string) =>
@@ -103,6 +131,8 @@ export const localApi = {
     client.post<{ data: { key: string } }>('/local/external-api/rotate').then(r => r.data.data),
   revokeExternalAPIKey: () =>
     client.delete('/local/external-api').then(r => r.data),
+  skipFail2ban: () =>
+    client.post('/local/skip-fail2ban').then(r => r.data),
   activity: () =>
     client.get<{ data: ActivityEvent[] }>('/local/activity').then(r => r.data.data),
 }

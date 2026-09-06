@@ -7,11 +7,16 @@ import (
 	"strings"
 
 	"github.com/smalex-z/gopher/internal/db"
+	"github.com/smalex-z/gopher/internal/paths"
+)
+
+// The path aliases follow paths' vars (test-redirectable), so they are vars.
+var (
+	caddyConfigPath = paths.CaddyfilePath
+	caddyManagedDir = paths.CaddyConfDir
 )
 
 const (
-	caddyConfigPath      = "/etc/caddy/Caddyfile"
-	caddyManagedDir      = "/etc/caddy/conf.d"
 	caddyCustomBeginMark = "# ===== BEGIN CUSTOM CONFIGURATION ====="
 	caddyCustomEndMark   = "# ===== END CUSTOM CONFIGURATION ====="
 )
@@ -28,11 +33,24 @@ func buildRouterCaddyBlock(domain, bindIP string) string {
 	return fmt.Sprintf("router.%s {\n    reverse_proxy localhost:%d\n}\n", domain, dashboardPort)
 }
 
+// caddyAvailable reports whether there's a Caddy we can manage: the bundled
+// binary under /opt/gopher/bin on an embedded/supervised install (which is NOT
+// on PATH), or a caddy on PATH for a dev/manual setup. A bare
+// isCommandAvailable("caddy") misses the supervised binary and makes the
+// reconciles below silently no-op on a clean embedded edge. Mirrors caddyReload's
+// own bundled-then-PATH precedence.
+func caddyAvailable() bool {
+	if _, err := os.Stat(paths.CaddyBin); err == nil {
+		return true
+	}
+	return isCommandAvailable("caddy")
+}
+
 // ReconcileRouterCaddyBlock rewrites the managed router Caddy file to reflect
 // the current dashboardPort and bindIP. Called at startup so binary updates that
 // change the default port don't leave a stale Caddy config pointing at the old port.
 func (s *LocalSetupService) ReconcileRouterCaddyBlock() {
-	if !isCommandAvailable("caddy") {
+	if !caddyAvailable() {
 		return
 	}
 	settings, err := db.GetSettings()
@@ -43,35 +61,38 @@ func (s *LocalSetupService) ReconcileRouterCaddyBlock() {
 		log.Printf("startup: failed to reconcile router Caddy block: %v", err)
 		return
 	}
-	if err := systemctlReloadOrRestart("caddy"); err != nil {
-		log.Printf("startup: caddy reload-or-restart failed: %v", err)
+	if err := caddyReload(); err != nil {
+		log.Printf("startup: caddy reload failed: %v", err)
 	}
 }
 
-func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool, botProtected bool, bindIP string, tlsSkipVerify bool) string {
+func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool, proxied bool, bindIP string, tlsSkipVerify bool, private bool) string {
 	scheme := ""
 	if noTLS {
 		scheme = "http://"
 	}
-	// Bot-protected tunnels route through the Gopher server itself (same port
-	// as the dashboard) so the bot-protection middleware can intercept requests
-	// before they reach rathole. Host header routing distinguishes tunnel
-	// traffic from dashboard traffic.
+	// Gated tunnels (bot protection and/or password auth) route through the
+	// Gopher server itself (same port as the dashboard) so the gate middleware
+	// can intercept requests before they reach rathole. Host header routing
+	// distinguishes tunnel traffic from dashboard traffic.
 	// Public tunnel rathole ports bind to bind_ip (or 0.0.0.0), so Caddy proxies
-	// to bind_ip:ratholePort. Bot-protected tunnels route to Gopher itself which
-	// is on 127.0.0.1, so those always use localhost regardless of bind_ip.
+	// to bind_ip:ratholePort. Gated tunnels route to Gopher itself which is on
+	// 127.0.0.1, so those always use localhost regardless of bind_ip.
 	upstreamPort := ratholePort
 	upstream := "localhost"
-	if bindIP != "" {
+	// Public tunnels bind to bind_ip; private tunnels bind to 127.0.0.1 (only
+	// Caddy reaches them), so private must proxy via localhost regardless of
+	// bind_ip — otherwise Caddy would proxy to an address the tunnel isn't on.
+	if bindIP != "" && !private {
 		upstream = bindIP
 	}
-	if botProtected {
+	if proxied {
 		upstreamPort = dashboardPort
 		upstream = "localhost"
 	}
 	// TLS skip verify: only meaningful when the upstream is itself HTTPS (noTLS=false,
-	// botProtected=false) and the backend uses a self-signed cert (e.g. Proxmox).
-	if tlsSkipVerify && !noTLS && !botProtected {
+	// not routed through Gopher) and the backend uses a self-signed cert (e.g. Proxmox).
+	if tlsSkipVerify && !noTLS && !proxied {
 		return fmt.Sprintf("%s%s.%s {\n    reverse_proxy %s:%d {\n        transport http {\n            tls_insecure_skip_verify\n        }\n    }\n}\n",
 			scheme, subdomain, domain, upstream, upstreamPort)
 	}
@@ -87,6 +108,93 @@ func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool
 var caddyCustomHeaderLines = []string{
 	"# Everything below this line will NOT be overwritten.",
 	"# Add your own Caddy site blocks here.",
+}
+
+// managedCaddyCommentLines are Gopher-emitted comment lines that must be
+// stripped from any extracted custom body — a superset of caddyCustomHeaderLines
+// that also includes the top-of-file managed header. The managed header lives
+// OUTSIDE the markers when we write it, but a legacy/whole-file absorb can scoop
+// it into the custom section, and once there it's sticky: every reconsruct
+// re-wraps it, stacking copies. We never write these into the custom block, so
+// dropping every occurrence is always safe and self-heals old accumulation.
+var managedCaddyCommentLines = append([]string{
+	"# Gopher managed Caddyfile",
+}, caddyCustomHeaderLines...)
+
+// managedCaddyHeaderBlock is the commented global-options block emitted below
+// the managed header (the bindIP=="" branch of buildManagedCaddyfile). It is
+// stripped as a contiguous sequence, not line by line, because "# {" / "# }"
+// on their own are too generic to remove from user content safely.
+var managedCaddyHeaderBlock = []string{
+	"# Global options (uncomment and set email to enable HTTPS):",
+	"# {",
+	"#     email you@example.com",
+	"# }",
+}
+
+// ExtractUserCaddyConfig returns the operator's own Caddy configuration from a
+// Gopher Caddyfile: the content between the custom-config markers with all
+// Gopher boilerplate stripped (managed header, "add your own blocks" comments,
+// the managed conf.d import). A file with no markers was never Gopher-wrapped,
+// so the whole thing is the user's and returned as-is. Shared with the uninstall
+// flow so "reset" leaves exactly the user's config and nothing of Gopher's.
+func ExtractUserCaddyConfig(content string) string {
+	if !strings.Contains(content, caddyCustomBeginMark) {
+		return content
+	}
+	body := extractCaddyCustomBody(content)
+	body = strings.TrimSpace(stripManagedCaddyImports(body))
+	body = stripManagedCaddyComments(body)
+	if body == "" {
+		return ""
+	}
+	return body + "\n"
+}
+
+// stripManagedCaddyComments drops every line that exactly matches a Gopher
+// managed comment, anywhere in the body — clears stray/stacked headers that a
+// leading-only strip would miss. Also removes every occurrence of the
+// commented global-options block as a sequence.
+func stripManagedCaddyComments(body string) string {
+	managed := make(map[string]struct{}, len(managedCaddyCommentLines))
+	for _, l := range managedCaddyCommentLines {
+		managed[l] = struct{}{}
+	}
+	lines := stripManagedCaddyHeaderBlocks(strings.Split(body, "\n"))
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if _, ok := managed[strings.TrimSpace(line)]; ok {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
+// stripManagedCaddyHeaderBlocks removes every contiguous occurrence of
+// managedCaddyHeaderBlock (whitespace-trimmed comparison per line).
+func stripManagedCaddyHeaderBlocks(lines []string) []string {
+	matchesAt := func(i int) bool {
+		if i+len(managedCaddyHeaderBlock) > len(lines) {
+			return false
+		}
+		for j, want := range managedCaddyHeaderBlock {
+			if strings.TrimSpace(lines[i+j]) != want {
+				return false
+			}
+		}
+		return true
+	}
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); {
+		if matchesAt(i) {
+			i += len(managedCaddyHeaderBlock)
+			continue
+		}
+		out = append(out, lines[i])
+		i++
+	}
+	return out
 }
 
 func extractCaddyCustomBody(content string) string {
@@ -112,8 +220,8 @@ func extractCaddyCustomBody(content string) string {
 func stripCaddyCustomHeader(s string) string {
 	lines := strings.Split(s, "\n")
 	i := 0
-	headerSet := make(map[string]struct{}, len(caddyCustomHeaderLines))
-	for _, h := range caddyCustomHeaderLines {
+	headerSet := make(map[string]struct{}, len(managedCaddyCommentLines))
+	for _, h := range managedCaddyCommentLines {
 		headerSet[h] = struct{}{}
 	}
 	for i < len(lines) {
@@ -131,6 +239,25 @@ func stripCaddyCustomHeader(s string) string {
 	return strings.TrimSpace(strings.Join(lines[i:], "\n"))
 }
 
+// stripManagedCaddyImports removes any `import .../conf.d/*.caddy` line from
+// custom Caddy content. Gopher manages the import directive itself; a stale one
+// absorbed from a legacy Caddyfile would import the wrong conf.d.
+func stripManagedCaddyImports(body string) string {
+	if body == "" {
+		return ""
+	}
+	lines := strings.Split(body, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "import ") && strings.Contains(t, "conf.d") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
 func buildManagedCaddyfile(existing, bindIP string) string {
 	customBody := extractCaddyCustomBody(existing)
 	if customBody == "" && strings.TrimSpace(existing) != "" && !strings.Contains(existing, caddyCustomBeginMark) {
@@ -141,6 +268,17 @@ func buildManagedCaddyfile(existing, bindIP string) string {
 		// generated header back into the custom section.
 		customBody = strings.TrimSpace(existing)
 	}
+	// A legacy/non-gopher Caddyfile (e.g. the apt default, or a box that already
+	// served its own site) carries its own `import .../conf.d/*.caddy` line.
+	// Absorbed into the custom section it would re-import a stale conf.d (e.g. an
+	// old /etc/caddy/conf.d/gopher-router.caddy), producing "ambiguous site
+	// definition" errors that crash-loop caddy. Gopher owns the import directive
+	// (re-added below), so strip any conf.d import from the custom body.
+	// Managed comment boilerplate gets the same treatment: an absorbed
+	// previously-reset Caddyfile (or old stacked-header accumulation) would
+	// otherwise re-wrap gopher's own headers as "user content" on every
+	// reconcile, sticky forever.
+	customBody = stripManagedCaddyComments(stripManagedCaddyImports(customBody))
 
 	var out strings.Builder
 	out.WriteString("# Gopher managed Caddyfile\n")
@@ -156,7 +294,7 @@ func buildManagedCaddyfile(existing, bindIP string) string {
 		out.WriteString("#     email you@example.com\n")
 		out.WriteString("# }\n\n")
 	}
-	out.WriteString("import /etc/caddy/conf.d/*.caddy\n\n")
+	out.WriteString("import " + paths.CaddyConfDir + "/*.caddy\n\n")
 	out.WriteString(caddyCustomBeginMark + "\n")
 	for _, h := range caddyCustomHeaderLines {
 		out.WriteString(h + "\n")
@@ -186,15 +324,15 @@ func ensureManagedCaddyLayout() error {
 // ReconcileMainCaddyfile rewrites the main Caddyfile global options (e.g.
 // default_bind) to match current settings. Called when bind_ip changes.
 func (s *LocalSetupService) ReconcileMainCaddyfile() {
-	if !isCommandAvailable("caddy") {
+	if !caddyAvailable() {
 		return
 	}
 	if err := ensureManagedCaddyLayout(); err != nil {
 		log.Printf("reconcile main Caddyfile: %v", err)
 		return
 	}
-	if err := systemctlReloadOrRestart("caddy"); err != nil {
-		log.Printf("reconcile main Caddyfile: caddy reload-or-restart failed: %v", err)
+	if err := caddyReload(); err != nil {
+		log.Printf("reconcile main Caddyfile: caddy reload failed: %v", err)
 	}
 }
 
@@ -209,7 +347,7 @@ func (s *LocalSetupService) ReconcileMainCaddyfile() {
 // untouched, the gopher-router.caddy is preserved (its filename has no tunnel
 // ID), and an empty conf.d directory is a no-op.
 func (s *LocalSetupService) ReconcileTunnelCaddyFiles() {
-	if !isCommandAvailable("caddy") {
+	if !caddyAvailable() {
 		return
 	}
 	entries, err := os.ReadDir(caddyManagedDir)
@@ -253,8 +391,8 @@ func (s *LocalSetupService) ReconcileTunnelCaddyFiles() {
 		removed++
 	}
 	if removed > 0 {
-		if err := systemctlReloadOrRestart("caddy"); err != nil {
-			log.Printf("reconcile tunnel caddy files: caddy reload-or-restart failed: %v", err)
+		if err := caddyReload(); err != nil {
+			log.Printf("reconcile tunnel caddy files: caddy reload failed: %v", err)
 		}
 	}
 }

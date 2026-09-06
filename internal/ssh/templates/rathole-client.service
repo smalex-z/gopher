@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User={{.Username}}
-ExecStart={{.RatholeBin}} /etc/rathole/client.toml
+ExecStart={{.RatholeBin}} {{.ConfigPath}}
 Restart=always
 RestartSec=5
 StandardOutput=journal

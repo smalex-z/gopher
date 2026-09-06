@@ -1,9 +1,11 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,12 +17,24 @@ type MonitorService struct {
 	stopOnce  sync.Once
 	stopCh    chan struct{}
 	doneCh    chan struct{}
+	// probes tracks the per-machine / per-tunnel fan-out goroutines spawned by
+	// each check cycle. Stop() waits on it so shutdown can't return while a
+	// status-writer is still mid-flight — closing doneCh only proves the run
+	// loop exited, not that the writers it launched have drained.
+	probes sync.WaitGroup
+
+	// offlineMu guards offlineStreak. checkTunnel runs concurrently across
+	// tunnels (one goroutine per tunnel per cycle), so the debounce counter
+	// needs its own lock independent of probes.
+	offlineMu     sync.Mutex
+	offlineStreak map[string]int // tunnel ID -> consecutive raw "offline" probes
 }
 
 func NewMonitorService() *MonitorService {
 	return &MonitorService{
-		stopCh: make(chan struct{}),
-		doneCh: make(chan struct{}),
+		stopCh:        make(chan struct{}),
+		doneCh:        make(chan struct{}),
+		offlineStreak: make(map[string]int),
 	}
 }
 
@@ -33,23 +47,30 @@ func (s *MonitorService) Start() {
 	})
 }
 
-// Stop signals the polling goroutine to exit and waits up to 5s for it to
-// drain. Idempotent — extra calls return immediately. Wired to the SIGTERM
-// handler in cmd/server/main.go so a `systemctl stop gopher` doesn't kill
-// the goroutine mid-probe and leave a half-written status row.
+// Stop signals the polling goroutine to exit and waits for it — plus the
+// fan-out probe goroutines it spawned — to drain. Idempotent; extra calls
+// return immediately. Wired to the SIGTERM handler in cmd/server/main.go so a
+// `systemctl stop gopher` doesn't kill a goroutine mid-probe and leave a
+// half-written status row. The budget exceeds a single probe's worst case
+// (~10s: 5s dial + 5s banner read) so the drain can actually complete;
+// systemd's SIGTERM grace is 90s, so there's ample headroom.
 func (s *MonitorService) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 	})
 	select {
 	case <-s.doneCh:
-	case <-time.After(5 * time.Second):
+	case <-time.After(12 * time.Second):
 		log.Printf("monitor: stop timeout — goroutine may still be in-flight")
 	}
 }
 
+// run drives the poll loop. It only closes doneCh after the final check
+// cycle's fan-out goroutines have drained, so Stop()'s wait covers the
+// status-writers — not just the loop.
 func (s *MonitorService) run() {
 	defer close(s.doneCh)
+	defer s.probes.Wait()
 	// Check immediately on start, then every 30 seconds.
 	s.checkAll()
 	ticker := time.NewTicker(30 * time.Second)
@@ -77,7 +98,11 @@ func (s *MonitorService) checkMachines() {
 	}
 	for _, machine := range machines {
 		m := machine
-		go goSafe("monitor.checkMachine", func() { s.checkMachine(m) })
+		s.probes.Add(1)
+		go goSafe("monitor.checkMachine", func() {
+			defer s.probes.Done()
+			s.checkMachine(m)
+		})
 	}
 }
 
@@ -85,11 +110,15 @@ func (s *MonitorService) checkMachine(machine db.Machine) {
 	if machine.TunnelPort == 0 {
 		return
 	}
-	// Skip machines the HealthService is already polling via the agent —
-	// running both writers against the same row was clobbering agent fields
-	// every 30s. Health owns agent-installed machines; monitor stays the
-	// fallback for legacy / un-migrated ones.
-	if machine.AgentInstalled {
+	// Skip machines the HealthService owns — any machine with an agent
+	// back-channel allocated, installed or not. Gating on AgentInstalled alone
+	// left a two-writer conflict for machines whose agent install failed but
+	// whose SSH tunnel works: health's WatchStatus stream marked them offline
+	// (agent unreachable) while this probe marked them connected (SSH banner
+	// OK), flapping the status every 30-60s. Health is the single status
+	// writer for every agent-provisioned machine; monitor stays the fallback
+	// for pre-agent legacy machines only (AgentRemotePort == 0).
+	if machine.AgentInstalled || machine.AgentRemotePort > 0 {
 		return
 	}
 	// Use an SSH banner grab rather than a full SSH handshake.
@@ -144,7 +173,11 @@ func (s *MonitorService) checkTunnels() {
 	}
 	for _, t := range tunnels {
 		tunnel := t
-		go goSafe("monitor.checkTunnel", func() { s.checkTunnel(tunnel) })
+		s.probes.Add(1)
+		go goSafe("monitor.checkTunnel", func() {
+			defer s.probes.Done()
+			s.checkTunnel(tunnel)
+		})
 	}
 }
 
@@ -171,16 +204,24 @@ func (s *MonitorService) checkTunnel(t db.Tunnel) {
 		return
 	}
 	start := time.Now()
-	status := probeTunnel(t)
+
+	status := s.debounceOffline(t.ID, tunnelStatus(t))
 	latency := int(time.Since(start) / time.Millisecond)
 
-	// Resolve the ambiguous "connected" against the machine's own status.
-	// probeTunnel returns "connected" whenever it can't tell whether the
-	// upstream is silent or absent; if the machine itself is offline, the
-	// truth is "absent" and we relabel.
-	if status == "connected" && t.MachineID != "" {
-		if machine, err := db.GetMachine(t.MachineID); err == nil && machine != nil && machine.Status == "offline" {
-			status = "offline"
+	// Provisioning fallback (#93): the create-time verifier normally clears
+	// CaddyPending within seconds, but it dies with the process — after a
+	// restart or a >90s certificate stall this is what un-sticks the flag.
+	if t.CaddyPending {
+		if settings, err := db.GetSettings(); err == nil && tunnelHasHTTPRoute(&t, settings.Domain) {
+			if caddyRouteServing(t.Subdomain+"."+settings.Domain, t.NoTLS, settings.BindIP) {
+				if err := db.SetTunnelCaddyPending(t.ID, false); err != nil {
+					log.Printf("monitor: clear caddy-pending for %s: %v", t.ID, err)
+				}
+			}
+		} else if err == nil {
+			// Route no longer exists (subdomain cleared, domain removed) —
+			// nothing to verify; don't present provisioning forever.
+			_ = db.SetTunnelCaddyPending(t.ID, false)
 		}
 	}
 
@@ -204,6 +245,137 @@ func (s *MonitorService) checkTunnel(t db.Tunnel) {
 		LatencyMS: latency,
 		ErrorMsg:  "",
 	})
+}
+
+// debounceOffline suppresses a single transient "offline" reading before it
+// reaches the dashboard. "offline" can only come from tunnelStatus's very
+// first edge-side dial failing outright — every other branch (including the
+// disambiguate fallback when the agent hop itself fails) resolves to
+// "connected" as long as the owning machine is up. For a public tunnel that
+// dial targets the VPS's own public bind address rather than loopback
+// (tunnelProbeHost), which is a known-flaky path (hairpin NAT / provider
+// security-group quirks on a box connecting to its own public IP) — a single
+// blip there shouldn't flip the badge red for one 30s cycle and back the
+// next. Two consecutive raw "offline" reads are required before we actually
+// report it; any non-offline read resets the streak immediately, so a real
+// outage still surfaces within one extra cycle (~60s worst case).
+func (s *MonitorService) debounceOffline(tunnelID, raw string) string {
+	s.offlineMu.Lock()
+	defer s.offlineMu.Unlock()
+	if raw != "offline" {
+		delete(s.offlineStreak, tunnelID)
+		return raw
+	}
+	s.offlineStreak[tunnelID]++
+	if s.offlineStreak[tunnelID] < 2 {
+		return "connected"
+	}
+	return "offline"
+}
+
+// tunnelStatus determines a tunnel's status with a hybrid probe:
+//
+//  1. Pass real traffic end-to-end through the tunnel's own rathole port. A
+//     positive result (response bytes for TCP, a datagram back for UDP) proves
+//     the whole path — VPS bind → service tunnel → origin → back — so it's
+//     "active" with no inference.
+//  2. When the probe connects but the service stays silent (TCP speak-first
+//     apps; UDP no reply — both ambiguous), ask the origin's agent whether the
+//     local port is actually bound: listening → "connected", not → "idle". This
+//     is the only reliable idle signal for UDP and de-muddies the TCP timeout.
+//  3. With no reachable agent, fall back to the owning machine's status.
+//
+// Shared by the monitor and the manual Test action so they never disagree.
+func tunnelStatus(t db.Tunnel) string {
+	if t.RatholePort == 0 {
+		return "offline"
+	}
+	if t.Transport == "udp" {
+		if probeUDPPath(t) == "active" {
+			return "active" // origin replied through the tunnel — full path proven
+		}
+		return disambiguate(t) // no reply — ambiguous, resolve via the agent
+	}
+	switch p := probeTunnel(t); p {
+	case "active", "idle", "offline":
+		return p // definitive from the edge round-trip
+	default: // "connected": reachable but silent — ambiguous
+		return disambiguate(t)
+	}
+}
+
+// disambiguate resolves a "reachable but silent" probe. It prefers the origin
+// agent's view of whether the local service port is bound (listening →
+// "connected", not → "idle"); with no reachable agent it treats an offline
+// machine as "offline", otherwise "connected".
+func disambiguate(t db.Tunnel) string {
+	if listening, ok := agentPortListening(t); ok {
+		if listening {
+			return "connected"
+		}
+		return "idle"
+	}
+	if machineOffline(t) {
+		return "offline"
+	}
+	return "connected"
+}
+
+// probeUDPPath sends a datagram through the tunnel's rathole port and reads for
+// a reply. A reply proves the full path works ("active"); no reply is ambiguous
+// ("silent") — a UDP service may simply ignore an unrecognised probe — so the
+// caller disambiguates via the agent. UDP is connectionless, so this alone
+// never yields "idle"/"offline".
+func probeUDPPath(t db.Tunnel) string {
+	addr := net.JoinHostPort(tunnelProbeHost(t), strconv.Itoa(t.RatholePort))
+	conn, err := net.DialTimeout("udp", addr, 3*time.Second)
+	if err != nil {
+		return "silent"
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Write([]byte{0}); err != nil {
+		return "silent"
+	}
+	buf := make([]byte, 8)
+	if n, rerr := conn.Read(buf); rerr == nil && n > 0 {
+		return "active"
+	}
+	return "silent"
+}
+
+// agentPortListening asks the origin's agent whether the tunnel's local service
+// port is bound (read from /proc/net). Returns ok=false when the machine has no
+// reachable/new-enough agent (no agent, port 0, unreachable, or pre-0.2.3
+// returning Unimplemented) so the caller falls back.
+func agentPortListening(t db.Tunnel) (listening bool, ok bool) {
+	if t.MachineID == "" {
+		return false, false
+	}
+	machine, err := db.GetMachine(t.MachineID)
+	if err != nil || machine == nil || !machine.AgentInstalled || machine.AgentRemotePort == 0 {
+		return false, false
+	}
+	proto := t.Transport
+	if proto == "" {
+		proto = "tcp"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	l, err := NewAgentClient(machine).PortListening(ctx, t.LocalPort, proto)
+	if err != nil {
+		return false, false
+	}
+	return l, true
+}
+
+// machineOffline reports whether the tunnel's owning machine is marked offline.
+func machineOffline(t db.Tunnel) bool {
+	if t.MachineID == "" {
+		return false
+	}
+	m, err := db.GetMachine(t.MachineID)
+	return err == nil && m != nil && m.Status == "offline"
 }
 
 // probeTunnel connects directly to the rathole port and classifies the result.

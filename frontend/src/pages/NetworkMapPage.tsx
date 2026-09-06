@@ -4,6 +4,7 @@ import { tunnelsApi } from '../api/tunnels'
 import { localApi } from '../api/local'
 import { vpsApi } from '../api/vps'
 import type { Machine, Tunnel } from '../types'
+import { statusHex, statusBg, statusPillClasses, statusBucket, isHealthyStatus } from '../lib/statusColor'
 import { useState, useMemo, useRef, useEffect } from 'react'
 import {
   Search, ZoomIn, ZoomOut, Maximize2,
@@ -23,13 +24,14 @@ function isPrivateIP(ip: string): boolean {
 }
 
 function isOnlineMachine(m: Machine): boolean {
-  return m.status === 'connected' || m.status === 'active'
+  return isHealthyStatus(m.status)
 }
 
+// Delegates to lib/statusColor — was its own switch that fell through to
+// neutral gray for offline/pending/config-error, so a down tunnel looked
+// the same as one with nothing to report.
 function tunnelStatusDot(status: string): string {
-  if (status === 'active') return 'bg-green-500'
-  if (status === 'idle') return 'bg-amber-500'
-  return 'bg-gray-300'
+  return statusBg(status)
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -83,7 +85,9 @@ export default function NetworkMapPage() {
   })
   const domainIP = domainIPData?.ip ?? ''
   const routerIP = routerIPData?.ip ?? ''
-  const displayHost = domainIP && routerIP && domainIP === routerIP ? domain : (routerHost || domain)
+  // The edge transport host is the backend's ServerHost (defaults to
+  // router.<domain>); the IP queries above stay only to annotate the map node.
+  const displayHost = localStatus?.server_host || routerHost || domain
 
   const netInfoResults = useQueries({
     queries: machines.map(m => ({
@@ -593,8 +597,7 @@ function OverviewSVG({
                 {card.machines.map((m, i) => {
                   const ry = top + OV_LAN_HEADER_H + OV_LAN_PAD_Y + i * OV_LAN_MACHINE_ROW_H + OV_LAN_MACHINE_ROW_H / 2
                   const mt = tunnels.filter(t => t.machine_id === m.id)
-                  const dotColor = m.status === 'active' || m.status === 'connected' ? '#22c55e'
-                    : m.status === 'pending' || m.status === 'connecting' ? '#eab308' : '#9ca3af'
+                  const dotColor = statusHex(m.status)
                   const lastSeenSub = isOffline && card.offlineSubGroups
                     ? card.offlineSubGroups.find(g => g.machines.includes(m))?.lastKnownIP
                     : undefined
@@ -630,7 +633,11 @@ function OverviewSVG({
 
 function tunnelAggStatus(card: LanCardData, tunnels: Tunnel[]): 'active' | 'idle' | 'offline' {
   const cardTunnels = tunnels.filter(t => card.machines.some(m => m.id === t.machine_id))
-  if (cardTunnels.some(t => t.status === 'active')) return 'active'
+  // isHealthyStatus also counts 'connected' (up, upstream silent — normal
+  // for speak-first apps like MySQL/Minecraft) as active. Without this, a
+  // LAN whose tunnels are ALL healthy-but-silent fell through both checks
+  // and rendered identically to a LAN with zero working tunnels.
+  if (cardTunnels.some(t => isHealthyStatus(t.status))) return 'active'
   if (cardTunnels.some(t => t.status === 'idle')) return 'idle'
   return 'offline'
 }
@@ -648,11 +655,18 @@ const VPS_HEADER = 70
 const MACH_GAP = 12
 const V_PAD = 32
 
+// Machine boxes on the detail map. machine.status is only ever
+// pending/connected/offline, so this used to treat "offline" as the generic
+// fallback — the same neutral gray as a machine with no data at all, instead
+// of a visually distinct "down" style like StatusBadge gives it everywhere
+// else.
 function statusStyleSVG(status: string) {
   if (status === 'active' || status === 'connected')
     return { fill: '#f0fdf4', stroke: '#16a34a', text: '#14532d', dot: '#22c55e' }
   if (status === 'pending' || status === 'connecting')
     return { fill: '#fefce8', stroke: '#ca8a04', text: '#92400e', dot: '#eab308' }
+  if (status === 'offline' || status === 'failed' || status === 'error')
+    return { fill: '#fef2f2', stroke: '#dc2626', text: '#7f1d1d', dot: '#ef4444' }
   return { fill: '#f9fafb', stroke: '#d1d5db', text: '#6b7280', dot: '#d1d5db' }
 }
 
@@ -845,24 +859,29 @@ function DetailView({
           <g transform={`translate(${transform.tx} ${transform.ty}) scale(${transform.scale})`}>
             {/* Tunnel lines */}
             {tunnelLines.map(({ tunnel, vpsY, machY }) => {
-              const active = tunnel.status === 'active'
-              const idle = tunnel.status === 'idle'
+              // healthy = isHealthyStatus (active OR connected — up, upstream
+              // silent, normal for speak-first apps like Minecraft/MySQL).
+              // Was `tunnel.status === 'active'` only, so a healthy
+              // 'connected' tunnel's own connector line rendered dashed grey
+              // — visually identical to a dead one.
+              const healthy = isHealthyStatus(tunnel.status)
+              const idle = statusBucket(tunnel.status) === 'idle'
               const isUdp = tunnel.transport === 'udp'
               const cy = (vpsY + machY) / 2
               const label = `:${tunnel.rathole_port}`
               const lw = label.length * 6.2 + 10
-              const lineColor  = (active || idle) ? (isUdp ? '#a855f7' : '#4ade80') : '#d1d5db'
-              const pillFill   = active ? (isUdp ? '#faf5ff' : '#f0fdf4') : idle ? '#fffbeb' : '#f9fafb'
-              const pillStroke = active ? (isUdp ? '#a855f7' : '#4ade80') : idle ? '#f59e0b' : '#d1d5db'
-              const textColor  = active ? (isUdp ? '#7e22ce' : '#16a34a') : idle ? '#b45309' : '#6b7280'
+              const lineColor  = (healthy || idle) ? (isUdp ? '#a855f7' : '#4ade80') : '#d1d5db'
+              const pillFill   = healthy ? (isUdp ? '#faf5ff' : '#f0fdf4') : idle ? '#fffbeb' : '#f9fafb'
+              const pillStroke = healthy ? (isUdp ? '#a855f7' : '#4ade80') : idle ? '#f59e0b' : '#d1d5db'
+              const textColor  = healthy ? (isUdp ? '#7e22ce' : '#16a34a') : idle ? '#b45309' : '#6b7280'
               return (
                 <g key={tunnel.id}>
                   <path
                     d={`M ${VPS_RIGHT} ${vpsY} C ${midX} ${vpsY}, ${midX} ${machY}, ${MACHINE_X} ${machY}`}
                     fill="none"
                     stroke={lineColor}
-                    strokeWidth={(active || idle) ? 2.5 : 1.5}
-                    strokeDasharray={active || idle ? undefined : '5 4'}
+                    strokeWidth={(healthy || idle) ? 2.5 : 1.5}
+                    strokeDasharray={healthy || idle ? undefined : '5 4'}
                     opacity={0.9}
                   />
                   <rect x={midX - lw / 2} y={cy - 9} width={lw} height={17} rx={4}
@@ -940,8 +959,12 @@ function DetailView({
                             fontFamily="ui-monospace,monospace" fontWeight={700}>
                             :{t.rathole_port}
                           </text>
+                          {/* statusHex — was its own ad hoc mapping that treated 'idle'
+                              as healthy-green and lumped 'connected'/'offline'/everything
+                              else into one indigo color, disagreeing with the machine-side
+                              endpoint of this exact same tunnel drawn below. */}
                           <circle cx={VPS_RIGHT} cy={ry} r={4.5}
-                            fill={t.status === 'active' || t.status === 'idle' ? '#22c55e' : '#818cf8'}
+                            fill={statusHex(t.status)}
                             stroke="white" strokeWidth={1.5} />
                           {urlLabel && (
                             <text x={VPS_X + 14} y={cur + ROW_H + 9} fontSize={8.5} fill="#6366f1"
@@ -1027,7 +1050,10 @@ function DetailView({
 
                   {mt.map((t, j) => {
                     const ry = top + MACH_HEADER + j * ROW_H + ROW_H / 2
-                    const tDot = t.status === 'active' ? '#22c55e' : t.status === 'idle' ? '#f59e0b' : '#d1d5db'
+                    // statusHex — must match the VPS-side endpoint of this same
+                    // tunnel (drawn earlier); this used to be a separate ad hoc
+                    // mapping that disagreed with it for 'connected'/'offline'.
+                    const tDot = statusHex(t.status)
                     const name = t.name.length > 13 ? t.name.slice(0, 11) + '…' : t.name
                     return (
                       <g key={`mr-${t.id}`}>
@@ -1104,11 +1130,9 @@ function TunnelRow({ tunnel, domain }: { tunnel: Tunnel; domain: string }) {
       <span className="text-xs font-mono text-green-700 bg-green-50 border border-green-200 rounded px-1.5 py-0.5 shrink-0">
         :{tunnel.local_port}
       </span>
-      <span className={`text-xs font-medium px-1.5 py-0.5 rounded shrink-0 ${
-        tunnel.status === 'active' ? 'bg-green-100 text-green-700'
-        : tunnel.status === 'idle' ? 'bg-amber-100 text-amber-700'
-        : 'bg-gray-100 text-gray-500'
-      }`}>{tunnel.status === 'idle' ? 'no service' : tunnel.status}</span>
+      <span className={`text-xs font-medium px-1.5 py-0.5 rounded shrink-0 ${statusPillClasses(tunnel.status)}`}>
+        {tunnel.status === 'idle' ? 'no service' : tunnel.status}
+      </span>
       {hasUrl && (
         <a href={`https://${tunnel.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
           className="text-indigo-500 hover:text-indigo-700 text-xs font-mono truncate max-w-[180px] shrink-0">

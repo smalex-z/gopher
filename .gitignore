@@ -1,8 +1,13 @@
-# Go binaries
+# Go binaries dropped at the repo root. build.sh emits ./gopher; a bare
+# `go build ./cmd/<x>` emits ./<x> named after the package dir (agent, server,
+# dnsprobe). Leading slashes anchor to the root so these can't match the
+# cmd/<x>/ SOURCE directories. Prefer `go build ./...` (compiles, no output) or
+# `go build -o /dev/null ./cmd/<x>` to avoid littering in the first place.
 gopher
 gopher.exe
-# Stray `go build` output from cmd/agent/ if invoked from repo root
 /agent
+/server
+/dnsprobe
 
 # Database
 *.db
@@ -36,3 +41,9 @@ coverage.out
 
 # Temporary files
 /tmp/
+
+# Fetched embedded binaries (populated by scripts/fetch-deps.sh, embedded via go:embed).
+# Ignore everything in bin/ except the committed .gitkeep that keeps the dir
+# present for go:embed on fresh checkouts.
+internal/embedbin/bin/*
+!internal/embedbin/bin/.gitkeep

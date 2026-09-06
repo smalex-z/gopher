@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smalex-z/gopher/internal/api/dto"
 	"github.com/smalex-z/gopher/internal/db"
 	apperrors "github.com/smalex-z/gopher/internal/errors"
 )
@@ -29,6 +30,20 @@ func (f *fakeLocalOps) ReconcileServerConfig() error {
 func (f *fakeLocalOps) RemoveServiceTunnelCaddy(tunnel *db.Tunnel) error {
 	f.calls = append(f.calls, "caddy:"+tunnel.ID)
 	return nil
+}
+
+func (f *fakeLocalOps) WriteServiceTunnelCaddy(tunnel *db.Tunnel) error {
+	f.calls = append(f.calls, "caddy-write:"+tunnel.ID)
+	return nil
+}
+
+func (f *fakeLocalOps) hasCall(want string) bool {
+	for _, c := range f.calls {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakeLocalOps) RemoveMachineClient(machine *db.Machine) error {
@@ -174,6 +189,156 @@ func TestTunnelList_IncludesMachineSSHTunnel(t *testing.T) {
 	}
 	if !foundMachineTunnel {
 		t.Fatalf("expected synthesized machine SSH tunnel in list, got: %+v", tunnels)
+	}
+}
+
+func seedDomain(t *testing.T, domain string) {
+	t.Helper()
+	if err := db.SaveSettings(&db.AppSettings{Domain: domain}); err != nil {
+		t.Fatalf("failed to seed settings: %v", err)
+	}
+}
+
+// Regression for the subdomain-edit Caddy bug: editing a tunnel's subdomain
+// updated the DB but left Caddy serving the old subdomain, because oldSubdomain
+// was captured *after* the value had already been mutated (so the
+// "did the subdomain change?" compare was always false and the Caddy rewrite
+// never fired). This locks in that a subdomain change rewrites the Caddy block.
+func TestTunnelUpdate_SubdomainChangeRewritesCaddy(t *testing.T) {
+	initTestDB(t)
+	seedDomain(t, "example.com")
+	seedMachine(t, "m1", 10031)
+	seedTunnel(t, "t1", "m1", 3000, 20031)
+	tun, err := db.GetTunnel("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tun.Subdomain = "old"
+	tun.Transport = "tcp"
+	if err := db.UpdateTunnel(tun); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeLocalOps{}
+	svc := NewTunnelService(fake)
+	if _, err := svc.Update("t1", dto.UpdateTunnelRequest{Name: "t1", Subdomain: "new", LocalPort: 3000}); err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+
+	got, err := db.GetTunnel("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Subdomain != "new" {
+		t.Fatalf("expected subdomain persisted as 'new', got %q", got.Subdomain)
+	}
+	if !fake.hasCall("caddy-write:t1") {
+		t.Fatalf("subdomain change must rewrite the Caddy block; got calls %v", fake.calls)
+	}
+}
+
+// A name-only edit shouldn't touch Caddy (name isn't part of the Caddy block).
+func TestTunnelUpdate_NameOnlyChangeLeavesCaddyAlone(t *testing.T) {
+	initTestDB(t)
+	seedDomain(t, "example.com")
+	seedMachine(t, "m1", 10041)
+	seedTunnel(t, "t1", "m1", 3000, 20041)
+	tun, err := db.GetTunnel("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tun.Subdomain = "keep"
+	tun.Transport = "tcp"
+	if err := db.UpdateTunnel(tun); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeLocalOps{}
+	svc := NewTunnelService(fake)
+	if _, err := svc.Update("t1", dto.UpdateTunnelRequest{Name: "renamed", Subdomain: "keep", LocalPort: 3000}); err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+
+	got, err := db.GetTunnel("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "renamed" {
+		t.Fatalf("expected name persisted as 'renamed', got %q", got.Name)
+	}
+	if fake.hasCall("caddy-write:t1") {
+		t.Fatalf("name-only edit must not touch Caddy; got calls %v", fake.calls)
+	}
+}
+
+// Regression for "private mode removes URL hint": toggling a tunnel to private
+// must KEEP its subdomain (private = reverse-proxy-only, not fully hidden) and
+// rewrite the Caddy block (the upstream depends on privacy). The old code wiped
+// the subdomain on private, so the dashboard URL hint vanished.
+func TestTunnelUpdate_ToggleToPrivateKeepsSubdomainAndRewritesCaddy(t *testing.T) {
+	initTestDB(t)
+	seedDomain(t, "example.com")
+	seedMachine(t, "m1", 10051)
+	seedTunnel(t, "t1", "m1", 3000, 20051)
+	tun, err := db.GetTunnel("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tun.Subdomain = "api"
+	tun.Transport = "tcp"
+	if err := db.UpdateTunnel(tun); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeLocalOps{}
+	svc := NewTunnelService(fake)
+	if _, err := svc.Update("t1", dto.UpdateTunnelRequest{Name: "t1", Subdomain: "api", LocalPort: 3000, Private: true}); err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+
+	got, err := db.GetTunnel("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Subdomain != "api" {
+		t.Fatalf("toggle-to-private must KEEP the subdomain; got %q", got.Subdomain)
+	}
+	if !got.Private {
+		t.Fatalf("expected tunnel to be private")
+	}
+	if !fake.hasCall("caddy-write:t1") {
+		t.Fatalf("toggle-to-private must rewrite the Caddy block (upstream depends on privacy); got %v", fake.calls)
+	}
+}
+
+// Bot protection is bypassable unless the raw port is closed, so enabling it
+// must force the tunnel private even when the request asks for public.
+func TestTunnelUpdate_BotProtectionForcesPrivate(t *testing.T) {
+	initTestDB(t)
+	seedDomain(t, "example.com")
+	seedMachine(t, "m1", 10061)
+	seedTunnel(t, "t1", "m1", 3000, 20061)
+	tun, err := db.GetTunnel("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tun.Subdomain = "api"
+	tun.Transport = "tcp"
+	if err := db.UpdateTunnel(tun); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeLocalOps{}
+	svc := NewTunnelService(fake)
+	got, err := svc.Update("t1", dto.UpdateTunnelRequest{Name: "t1", Subdomain: "api", LocalPort: 3000, Private: false, BotProtectionEnabled: true})
+	if err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+	if !got.BotProtectionEnabled {
+		t.Fatalf("expected bot protection enabled")
+	}
+	if !got.Private {
+		t.Fatalf("bot protection must coerce a public tunnel to private; got Private=false")
 	}
 }
 

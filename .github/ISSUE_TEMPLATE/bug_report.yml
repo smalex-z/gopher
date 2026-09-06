@@ -1,0 +1,51 @@
+name: Bug report
+description: Something broke — help us reproduce it
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Gopher version
+      description: Paste the output of `gopher version` (falls back to the release tag you installed).
+      placeholder: "gopher v0.1.0 (caddy 2.10.2, rathole v0.5.0, embedded: true)"
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - curl | bash quick installer
+        - Manual download from releases
+        - Built from source
+        - Other (say in description)
+    validations:
+      required: true
+  - type: input
+    id: edge-os
+    attributes:
+      label: Edge distro + architecture
+      description: The VPS gopher runs on.
+      placeholder: Ubuntu 24.04, arm64 (Oracle Cloud)
+    validations:
+      required: true
+  - type: input
+    id: origin-os
+    attributes:
+      label: Origin distro + architecture (if relevant)
+      description: The machine being exposed, when the bug involves bootstrap/agents/tunnels.
+      placeholder: Debian 12, amd64
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what actually happened. Exact commands and URLs help a lot.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        On the edge: `journalctl -u gopher -n 100 --no-pager`. For agent issues, on the origin: `journalctl -u gopher-agent -n 50 --no-pager`. Redact tokens/domains if you prefer.
+      render: text

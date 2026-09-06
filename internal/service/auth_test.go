@@ -92,6 +92,30 @@ func TestAuthService_ValidateSession(t *testing.T) {
 	}
 }
 
+// Regression for the setup-wizard 401: step 2's install ends with a
+// `systemctl restart gopher`, and in-memory sessions died with it — the first
+// authed call on step 3 bounced the operator to the login page. Sessions are
+// persisted now; a fresh AuthService over the same DB (= a restarted process)
+// must still accept the token.
+func TestAuthService_SessionSurvivesRestart(t *testing.T) {
+	initTestDB(t)
+	svc := NewAuthService()
+	_ = svc.Setup("password123")
+
+	result, _ := svc.Login("password123", "127.0.0.1")
+	token := result.Token
+
+	restarted := NewAuthService()
+	if !restarted.ValidateSession(token) {
+		t.Error("session should survive a service restart (new AuthService, same DB)")
+	}
+
+	restarted.Logout(token)
+	if svc.ValidateSession(token) {
+		t.Error("logout must revoke the session across instances")
+	}
+}
+
 func TestAuthService_ValidateSession_InvalidToken(t *testing.T) {
 	initTestDB(t)
 	svc := NewAuthService()
@@ -177,20 +201,25 @@ func TestClientIP_FromRemoteAddr(t *testing.T) {
 	}
 }
 
-func TestClientIP_XForwardedFor(t *testing.T) {
+// From a trusted loopback peer (our Caddy), take the LAST XFF entry — the real
+// client Caddy appended. Earlier entries are client-supplied and forgeable.
+func TestClientIP_XForwardedFor_TrustedLoopback(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("X-Forwarded-For", "10.0.0.1, 10.0.0.2")
+	r.Header.Set("X-Forwarded-For", "10.0.0.1, 203.0.113.5")
 	r.RemoteAddr = "127.0.0.1:9999"
-	if got := ClientIP(r); got != "10.0.0.1" {
-		t.Errorf("ClientIP = %q, want %q (first XFF entry)", got, "10.0.0.1")
+	if got := ClientIP(r); got != "203.0.113.5" {
+		t.Errorf("ClientIP = %q, want %q (last XFF entry from trusted proxy)", got, "203.0.113.5")
 	}
 }
 
-func TestClientIP_XForwardedForSingle(t *testing.T) {
+// SECURITY: a spoofed XFF from a NON-loopback (direct) connection must be
+// ignored — RemoteAddr wins, so an attacker can't forge their IP.
+func TestClientIP_XForwardedFor_UntrustedPeerIgnored(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.Header.Set("X-Forwarded-For", "203.0.113.5")
-	if got := ClientIP(r); got != "203.0.113.5" {
-		t.Errorf("ClientIP = %q, want %q", got, "203.0.113.5")
+	r.Header.Set("X-Forwarded-For", "1.2.3.4")
+	r.RemoteAddr = "198.51.100.9:5555"
+	if got := ClientIP(r); got != "198.51.100.9" {
+		t.Errorf("ClientIP = %q, want %q (spoofed XFF from non-loopback peer must be ignored)", got, "198.51.100.9")
 	}
 }
 

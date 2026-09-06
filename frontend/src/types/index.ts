@@ -3,7 +3,6 @@ export interface VPSConfig {
   host: string
   port: number
   username: string
-  private_key: string
   domain: string
   ssh_public_key: string
   created_at: string
@@ -16,7 +15,6 @@ export interface Machine {
   host?: string
   port?: number
   username: string
-  private_key?: string
   tunnel_port: number
   rathole_ssh_token?: string
   ssh_key_id?: string
@@ -24,6 +22,9 @@ export interface Machine {
   status: string
   public_ip?: string
   last_seen: string | null
+  // When the machine most recently became connected — used to render uptime
+  // while up; last_seen is shown once it's offline.
+  connected_since?: string | null
   // gopher-agent fields
   agent_local_port?: number
   agent_remote_port?: number
@@ -31,9 +32,24 @@ export interface Machine {
   agent_version?: string
   agent_last_seen?: string | null
   agent_install_error?: string
+  // agent reachable but older than the server target, or pre-gRPC skew — the
+  // dashboard shows the same Install one-liner, relabeled "Upgrade".
+  agent_outdated?: boolean
+  // config_push_pending — set when an earlier config push (typically the
+  // noise migration) couldn't land. The health loop retries on reconnect;
+  // the dashboard surfaces a Recover button until cleared.
+  config_push_pending?: boolean
   created_at: string
   updated_at: string
   tunnels?: Tunnel[]
+  // Same active/inactive/pending vocabulary the Tunnels page shows for this
+  // machine's built-in SSH/agent tunnels — use these (not `status`) when
+  // labeling those specific rows, so they can't disagree with the Tunnels
+  // page for the identical underlying tunnel. `status` itself stays the
+  // machine's own reachability ("connected"/"offline"/"pending"), a
+  // different concept.
+  ssh_tunnel_status?: string
+  agent_tunnel_status?: string
 }
 
 export interface HealthCheck {
@@ -97,8 +113,14 @@ export interface Tunnel {
   bot_protection_enabled?: boolean
   bot_protection_ttl?: number      // seconds; 0 = default (86400)
   bot_protection_allow_ip?: string // JSON array of CIDR/IP strings
+  auth_enabled?: boolean
+  auth_password_set?: boolean      // read-only: whether a password hash exists
+  auth_password?: string           // write-only: set/change the password ('' = keep)
+  auth_ttl?: number                // seconds; 0 = default (86400)
+  auth_allow_ip?: string           // JSON array of CIDR/IP strings
   tls_skip_verify?: boolean        // skip upstream TLS cert verification (e.g. Proxmox)
   status: string
+  caddy_pending?: boolean          // true while the URL is provisioning (status shows "provisioning")
   managed?: boolean
   kind?: string
   created_at: string
@@ -111,6 +133,8 @@ export interface SSHKey {
   public_key: string
   is_default: boolean
   machine_count?: number
+  /** false = private half was deleted from the server; public-only key */
+  has_private_key?: boolean
   created_at: string
   updated_at: string
 }

@@ -1,14 +1,17 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/smalex-z/gopher/internal/db"
+	"github.com/smalex-z/gopher/internal/paths"
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
@@ -67,10 +70,14 @@ func (h *LogHub) Subscribe() chan string {
 }
 
 func (h *LogHub) Unsubscribe(ch chan string) {
+	// Close under the write lock (not after releasing it). broadcastSentinel
+	// sends under the read lock, so closing here — mutually exclusive with any
+	// in-flight send — is what prevents the send-on-closed-channel panic that
+	// would otherwise crash the whole daemon.
 	h.mu.Lock()
 	delete(h.subscribers, ch)
-	h.mu.Unlock()
 	close(ch)
+	h.mu.Unlock()
 }
 
 // Broadcast delivers msg to every current subscriber. Regular log lines use
@@ -101,15 +108,17 @@ func (h *LogHub) Broadcast(msg string) {
 // eventually be torn down by Unsubscribe when the handler returns, so the
 // damage is bounded to "this one slow client never sees DONE."
 func (h *LogHub) broadcastSentinel(msg string) {
+	// Hold the read lock across the whole dispatch — including wg.Wait(). Because
+	// Unsubscribe closes channels under the write lock, keeping RLock until every
+	// per-subscriber send has completed or timed out guarantees no goroutine ever
+	// sends on a channel being closed (which would panic and crash the daemon).
+	// Other broadcasts still proceed concurrently (they also hold only RLock);
+	// only Unsubscribe blocks, and only until the bounded sentinel timeout.
 	h.mu.RLock()
-	subs := make([]chan string, 0, len(h.subscribers))
-	for ch := range h.subscribers {
-		subs = append(subs, ch)
-	}
-	h.mu.RUnlock()
+	defer h.mu.RUnlock()
 
 	var wg sync.WaitGroup
-	for _, ch := range subs {
+	for ch := range h.subscribers {
 		wg.Add(1)
 		go func(c chan string) {
 			defer wg.Done()
@@ -149,96 +158,136 @@ func NewDeployService() *DeployService {
 }
 
 // ratholeHostFromSettings returns the address that should appear as
-// `remote_addr` in client rathole configs. ServerHost wins when set
-// (covers skipCaddy installs where Domain is empty), then Domain. Returns
-// "" when neither is set; callers should treat that as "we have nothing
-// useful to write into a fresh client.toml" and either fail loudly or
-// preserve the existing value.
+// `remote_addr` in client rathole configs. ServerHost wins when set (covers
+// skipCaddy installs where Domain is empty; a scheme prefix is stripped since
+// the value lands in a host:port). With only Domain set, the answer is
+// router.<domain> — the name the edge actually serves at — NEVER the bare
+// apex: apex DNS frequently points at an org's main site on entirely
+// different hosting (uclaacm.com is the club website; router.uclaacm.com is
+// the VPS), and a client aimed at the apex can never connect.
+// MigrateServerHostToRouter rewrote persisted apex ServerHosts for exactly
+// that reason, but installs with an EMPTY ServerHost fell through to the raw
+// Domain here and kept the bug. Returns "" when neither is set; callers
+// should treat that as "we have nothing useful to write into a fresh
+// client.toml" and either fail loudly or preserve the existing value.
 func ratholeHostFromSettings(settings *db.AppSettings) string {
 	if settings == nil {
 		return ""
 	}
-	if settings.ServerHost != "" {
-		return settings.ServerHost
+	if host := strings.TrimSpace(settings.ServerHost); host != "" {
+		host = strings.TrimPrefix(host, "https://")
+		host = strings.TrimPrefix(host, "http://")
+		return strings.TrimSuffix(host, "/")
 	}
-	return settings.Domain
+	if settings.Domain != "" {
+		return "router." + settings.Domain
+	}
+	return ""
 }
 
 func (s *DeployService) logWriter() io.Writer {
 	return &hubWriter{hub: s.Hub}
 }
 
-func (s *DeployService) Bootstrap(vpsConfig *db.VPSConfig) error {
-	w := s.logWriter()
-	client, err := sshpkg.NewClient(vpsConfig.Host, vpsConfig.Port, vpsConfig.Username, vpsConfig.PrivateKey)
-	if err != nil {
-		fmt.Fprintf(w, "ERROR: Failed to connect: %v\n", err)
-		s.Hub.Broadcast("\x00DONE")
-		return err
+// DeployClient re-syncs a machine's rathole client.toml (agent push first, SSH
+// fallback), streaming progress to the shared hub. Like Install/Fail2ban it
+// takes the hub's op-lock so its log lines — and its terminating \x00DONE —
+// can't interleave with a concurrent install or firewall op on the same WS
+// bus. Returns ErrOpInProgress if another op is already streaming; otherwise
+// the work runs in a background goroutine that releases the lock and fires a
+// single sentinel when done.
+func (s *DeployService) DeployClient(machine *db.Machine) error {
+	if !s.Hub.TryAcquireOp() {
+		return ErrOpInProgress
 	}
-	defer client.Close()
-
-	err = sshpkg.BootstrapVPS(client, w)
-	s.Hub.Broadcast("\x00DONE")
-	return err
+	go goSafe("deployClient", func() {
+		defer s.Hub.ReleaseOp()
+		w := s.logWriter()
+		if err := s.doDeployClient(machine, w); err != nil {
+			fmt.Fprintf(w, "ERROR: %v\n", err)
+		}
+		s.Hub.Broadcast("\x00DONE")
+	})
+	return nil
 }
 
-func (s *DeployService) DeployClient(machine *db.Machine) error {
-	w := s.logWriter()
-
+// doDeployClient performs the actual config re-sync and returns an error rather
+// than broadcasting — DeployClient owns the op-lock and the single terminating
+// sentinel, so this body must never emit \x00DONE itself.
+func (s *DeployService) doDeployClient(machine *db.Machine, w io.Writer) error {
 	settings, err := db.GetSettings()
 	if err != nil {
-		fmt.Fprintf(w, "ERROR: Failed to get settings: %v\n", err)
-		s.Hub.Broadcast("\x00DONE")
-		return err
+		return fmt.Errorf("failed to get settings: %w", err)
 	}
 
 	tunnels, err := db.GetTunnelsByMachine(machine.ID)
 	if err != nil {
-		fmt.Fprintf(w, "ERROR: Failed to get tunnels: %v\n", err)
-		s.Hub.Broadcast("\x00DONE")
-		return err
+		return fmt.Errorf("failed to get tunnels: %w", err)
 	}
 
-	var sshKey *db.SSHKey
-	if machine.TunnelPort > 0 {
-		var keyErr error
-		sshKey, keyErr = db.GetSSHKeyForMachine(machine)
-		if keyErr != nil {
-			// Surface the lookup failure rather than silently falling through
-			// to the legacy direct-host path. Without this, the caller sees a
-			// generic "no SSH access" / "SSH dial failed" error and has no
-			// signal that the actual cause is a missing or detached SSH key.
-			fmt.Fprintf(w, "WARN: SSH key lookup for machine %s failed: %v\n", machine.ID, keyErr)
+	ratholeHost := ratholeHostFromSettings(settings)
+	noisePub := settings.RatholeNoisePubKey
+
+	// Agent-first: on an agent machine, rathole is already installed — a
+	// "redeploy" is just a config re-sync. Read the current client.toml via the
+	// agent, merge the managed sections, push it back. No SSH, no private key.
+	if machine.AgentInstalled && machine.AgentRemotePort > 0 {
+		fmt.Fprintln(w, "Syncing rathole client config via agent...")
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ac := NewAgentClient(machine)
+		existing, gerr := ac.GetRatholeConfig(ctx)
+		if gerr == nil {
+			merged, merr := mergeClientManagedConfig(existing, machine, tunnels, ratholeHost, noisePub)
+			if merr != nil {
+				cancel()
+				return fmt.Errorf("failed to generate client config: %w", merr)
+			}
+			perr := ac.PutRatholeConfig(ctx, merged)
+			cancel()
+			if perr == nil {
+				fmt.Fprintln(w, "✓ Client config synced via agent (rathole reloads in place)")
+				_ = db.SetMachineConfigPushPending(machine.ID, false)
+				return nil
+			}
+			fmt.Fprintf(w, "WARN: agent config push failed (%v) — trying SSH\n", perr)
+		} else {
+			cancel()
+			fmt.Fprintf(w, "WARN: agent unreachable (%v) — trying SSH\n", gerr)
 		}
 	}
 
-	var client *sshpkg.SSHClient
-	if machine.TunnelPort > 0 && sshKey != nil {
-		fmt.Fprintln(w, "Connecting to machine via tunnel...")
-		client, err = sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
-	} else if machine.Host != "" {
-		fmt.Fprintln(w, "Connecting directly to machine...")
-		client, err = sshpkg.NewClient(machine.Host, machine.Port, machine.Username, machine.PrivateKey)
-	} else {
-		err = fmt.Errorf("no SSH access: machine has no host and tunnel is not established")
+	// SSH fallback — agent-down machines, needs a stored private key over the
+	// tunnel. No key → don't attempt SSH; the agent is the only transport.
+	var sshKey *db.SSHKey
+	if machine.TunnelPort > 0 {
+		sshKey, _ = db.GetSSHKeyForMachine(machine)
 	}
+	if sshKey == nil || sshKey.PrivateKey == "" {
+		// Same retry semantics as updateClientToml: the machine's config may be
+		// stale and nothing pushed — flag it so the health loop re-pushes via
+		// the agent once it reconnects.
+		_ = db.SetMachineConfigPushPending(machine.ID, true)
+		return fmt.Errorf("no agent and no stored SSH private key (public-only machine) — nothing to redeploy over; the agent keeps config in sync automatically once reachable")
+	}
+
+	fmt.Fprintln(w, "Connecting to machine via tunnel...")
+	client, err := sshpkg.NewClient(TunnelDialHost(machine), machine.TunnelPort, machine.Username, sshKey.PrivateKey)
 	if err != nil {
-		fmt.Fprintf(w, "ERROR: Failed to connect to machine: %v\n", err)
-		s.Hub.Broadcast("\x00DONE")
-		return err
+		_ = db.SetMachineConfigPushPending(machine.ID, true)
+		return fmt.Errorf("failed to connect to machine: %w", err)
 	}
 	defer client.Close()
 
-	existingConfig, _ := client.Execute("cat /etc/rathole/client.toml 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
-	clientConfig, err := mergeClientManagedConfig(existingConfig, machine, tunnels, ratholeHostFromSettings(settings))
+	existingConfig, _ := client.Execute("cat " + paths.RatholeClientConfig + " 2>/dev/null || cat " + paths.LegacyRatholeClientConfig + " 2>/dev/null || cat ~/.config/rathole/client.toml 2>/dev/null")
+	clientConfig, err := mergeClientManagedConfig(existingConfig, machine, tunnels, ratholeHost, noisePub)
 	if err != nil {
-		fmt.Fprintf(w, "ERROR: Failed to generate client config: %v\n", err)
-		s.Hub.Broadcast("\x00DONE")
-		return err
+		return fmt.Errorf("failed to generate client config: %w", err)
 	}
 
-	err = sshpkg.DeployClient(client, machine.ID, machine.Username, clientConfig, w)
-	s.Hub.Broadcast("\x00DONE")
-	return err
+	if err := sshpkg.DeployClient(client, machine.ID, machine.Username, clientConfig, w); err != nil {
+		_ = db.SetMachineConfigPushPending(machine.ID, true)
+		return err
+	}
+	_ = db.SetMachineConfigPushPending(machine.ID, false)
+	return nil
 }

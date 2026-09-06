@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -10,9 +11,12 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/smalex-z/gopher/internal/db"
+	"github.com/smalex-z/gopher/internal/embedbin"
+	"github.com/smalex-z/gopher/internal/paths"
 	sshpkg "github.com/smalex-z/gopher/internal/ssh"
 )
 
@@ -24,6 +28,23 @@ var dashboardPort = 4321
 // functions can reference it without hardcoding.
 func SetDashboardPort(port int) {
 	dashboardPort = port
+}
+
+// devMode, when true, makes every system-state mutation in this package a no-op.
+// Set once at startup via SetDevMode when gopher is launched with --dev so a
+// dev process running from a repo with a stale ./gopher.db can't reconcile
+// production's /etc/rathole/server.toml or /etc/caddy/conf.d/* on tunnel
+// create/delete and silently kill every live tunnel.
+var devMode bool
+
+// SetDevMode toggles dev mode for the service package. Idempotent.
+func SetDevMode(on bool) {
+	devMode = on
+}
+
+// DevMode reports whether the service package is running in dev mode.
+func DevMode() bool {
+	return devMode
 }
 
 // TunnelDialHost returns the host Gopher should dial to reach a machine's
@@ -39,7 +60,6 @@ func TunnelDialHost(m *db.Machine) string {
 	return "localhost"
 }
 
-
 // LocalServiceStatus is returned by GET /api/local/status.
 type LocalServiceStatus struct {
 	CaddyInstalled       bool   `json:"caddy_installed"`
@@ -52,39 +72,109 @@ type LocalServiceStatus struct {
 	HasInstallPermission bool   `json:"has_install_permission"`
 	SSHPublicKey         string `json:"ssh_public_key"`
 	// FirewallMode is the persisted firewall strategy: "gopher", "manual", "none", or "" (not configured).
-	FirewallMode         string `json:"firewall_mode"`
+	FirewallMode string `json:"firewall_mode"`
 	// DashboardPrivate is true when the dashboard port is restricted to localhost (Caddy-only access).
-	DashboardPrivate     bool   `json:"dashboard_private"`
+	DashboardPrivate bool `json:"dashboard_private"`
 	// DashboardPort is the port Gopher's HTTP server listens on.
-	DashboardPort        int    `json:"dashboard_port"`
+	DashboardPort int `json:"dashboard_port"`
 	// OSUser is the OS username Gopher runs as (e.g. "gopher"). Used for
 	// path/ownership checks and as a fallback for jumpbox commands when
 	// the dedicated jumpbox user isn't installed yet (legacy deployments).
-	OSUser               string `json:"os_user"`
+	OSUser string `json:"os_user"`
 	// JumpboxUser is the dedicated, privilege-free user whose authorized_keys
 	// holds Gopher-managed keys. Frontend pre-fills SSH jumpbox commands
 	// with this. Empty string means the user hasn't been created yet — the
 	// frontend should warn the operator to re-run `gopher install`.
-	JumpboxUser          string `json:"jumpbox_user"`
+	JumpboxUser string `json:"jumpbox_user"`
 	// Fail2banSetupDone is true once fail2ban has been installed and configured
 	// by Gopher. Used to prompt existing installs to run the fail2ban setup step.
-	Fail2banSetupDone    bool     `json:"fail2ban_setup_done"`
+	Fail2banSetupDone bool `json:"fail2ban_setup_done"`
 	// BindIP is the IP address Gopher binds public listeners to. Empty = 0.0.0.0.
-	BindIP               string   `json:"bind_ip"`
+	BindIP string `json:"bind_ip"`
 	// HostIPs lists all non-loopback IPs detected on the host's network interfaces.
 	// Used by the frontend to warn when the host has multiple IPs and BindIP is unset.
-	HostIPs              []string `json:"host_ips"`
+	HostIPs []string `json:"host_ips"`
+	// RatholeNoisePubKey is the base64 X25519 server public key. Surfaced
+	// here (not behind a separate endpoint) so the dashboard can show it
+	// near the custom-services warning without an extra round trip. Operators
+	// updating hand-rolled rathole-client configs copy this into their
+	// [client.transport.noise] remote_public_key field.
+	RatholeNoisePubKey string `json:"rathole_noise_pubkey"`
+	// RatholeCustomServicesWarning carries the names of user-managed
+	// services detected in /etc/rathole/server.toml's custom block during
+	// the noise migration. When non-empty AND not dismissed, the dashboard
+	// renders a banner instructing the operator to update those clients.
+	// Empty slice (not absent) when nothing needs attention.
+	RatholeCustomServicesWarning []string `json:"rathole_custom_services_warning"`
 }
 
 type LocalSetupService struct {
 	hub *LogHub
+
+	// reconcileMu serializes ReconcileServerConfig — see that method's doc
+	// comment. It's called concurrently from tunnel/machine create, update,
+	// delete, bootstrap, and agent-install, all with no other coordination;
+	// without a lock, two overlapping calls' read-DB-then-write-file
+	// sequences can interleave so the loser's write (even if invoked first)
+	// lands last, regressing server.toml to a state that doesn't match
+	// either caller's DB read until some unrelated later event reconciles
+	// again.
+	reconcileMu sync.Mutex
+
+	// statusCache memoizes Status() for a short window. /api/local/status is
+	// polled by several dashboard pages (Dashboard 15s, VPS 15s, NetworkMap
+	// 30s, the custom-services banner 60s) and each uncached call runs 2–4
+	// systemctl/pgrep shell-outs. Caching (+ the single-flight in ttlCache)
+	// collapses concurrent polls from every open page/client to one bounded
+	// refresh per window — the payload is system-wide, identical for all
+	// callers, so a couple seconds of staleness is invisible. This is the
+	// second-highest self-DoS surface after the fail2ban endpoints, same
+	// shape as the outage.
+	statusCache *ttlCache[*LocalServiceStatus]
 }
 
 func NewLocalSetupService(hub *LogHub) *LocalSetupService {
-	return &LocalSetupService{hub: hub}
+	return &LocalSetupService{
+		hub:         hub,
+		statusCache: newTTLCache[*LocalServiceStatus](3 * time.Second),
+	}
+}
+
+// SetupWizardState is the public (unauthenticated) subset of Status used by
+// the frontend's pre-login wizard gating — booleans only. The full
+// LocalServiceStatus is auth-gated: it carries host_ips, OS users, ports,
+// bind IP and the default SSH public key, which together are a free
+// reconnaissance payload for anything that can reach the dashboard port.
+type SetupWizardState struct {
+	LocalSetupDone     bool `json:"local_setup_done"`
+	FirewallConfigured bool `json:"firewall_configured"`
+	Fail2banSetupDone  bool `json:"fail2ban_setup_done"`
+	SSHKeyConfigured   bool `json:"ssh_key_configured"`
+}
+
+func (s *LocalSetupService) SetupState() (*SetupWizardState, error) {
+	settings, err := db.GetSettings()
+	if err != nil {
+		return nil, err
+	}
+	state := &SetupWizardState{
+		LocalSetupDone:     settings.LocalSetupDone,
+		FirewallConfigured: settings.FirewallMode != "",
+		// Same "installed-and-present OR deliberately skipped" rule as
+		// Status() — keep the two in sync.
+		Fail2banSetupDone: (settings.Fail2banSetupDone && isCommandAvailable("fail2ban-client")) || settings.Fail2banSkipped,
+	}
+	if key, kerr := db.GetDefaultSSHKey(); kerr == nil && key.PublicKey != "" {
+		state.SSHKeyConfigured = true
+	}
+	return state, nil
 }
 
 func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
+	return s.statusCache.get(s.fetchStatus)
+}
+
+func (s *LocalSetupService) fetchStatus() (*LocalServiceStatus, error) {
 	settings, err := db.GetSettings()
 	if err != nil {
 		return nil, err
@@ -93,11 +183,20 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 	if u, err := user.Current(); err == nil {
 		osUser = u.Username
 	}
+	// When gopher supervises caddy/rathole as children there are no
+	// caddy.service/rathole-server.service units to query — report the actual
+	// supervised process state instead, so the dashboard doesn't show them down.
+	caddyInstalled, caddyActive := isCommandAvailable("caddy"), systemctlStatus("caddy")
+	ratholeInstalled, ratholeActive := isCommandAvailable("rathole"), systemctlStatus("rathole-server")
+	if embedbin.Embedded() && os.Getenv("GOPHER_MANAGED") == "1" {
+		caddyInstalled, caddyActive = true, processActive(paths.CaddyBin)
+		ratholeInstalled, ratholeActive = true, processActive(paths.RatholeBin)
+	}
 	status := &LocalServiceStatus{
-		CaddyInstalled:       isCommandAvailable("caddy"),
-		CaddyActive:          systemctlStatus("caddy"),
-		RatholeInstalled:     isCommandAvailable("rathole"),
-		RatholeActive:        systemctlStatus("rathole-server"),
+		CaddyInstalled:       caddyInstalled,
+		CaddyActive:          caddyActive,
+		RatholeInstalled:     ratholeInstalled,
+		RatholeActive:        ratholeActive,
 		Domain:               settings.Domain,
 		ServerHost:           settings.ServerHost,
 		LocalSetupDone:       settings.LocalSetupDone,
@@ -107,14 +206,36 @@ func (s *LocalSetupService) Status() (*LocalServiceStatus, error) {
 		DashboardPort:        dashboardPort,
 		OSUser:               osUser,
 		JumpboxUser:          s.JumpboxUser(),
-		Fail2banSetupDone:    settings.Fail2banSetupDone,
-		BindIP:               settings.BindIP,
-		HostIPs:              detectHostIPs(),
+		// "Step satisfied" = installed-and-actually-present, OR deliberately
+		// skipped. The AND guards against a manual `apt remove fail2ban`
+		// leaving the DB flag stale forever (no in-dashboard uninstall flow
+		// exists to clear it); the skip flag lets an operator decline the
+		// wizard step without that same AND looping them back into it.
+		Fail2banSetupDone: (settings.Fail2banSetupDone && isCommandAvailable("fail2ban-client")) || settings.Fail2banSkipped,
+		BindIP:            settings.BindIP,
+		HostIPs:           detectHostIPs(),
 	}
 	if key, kerr := db.GetDefaultSSHKey(); kerr == nil {
 		status.SSHPublicKey = key.PublicKey
 	}
+	status.RatholeNoisePubKey = settings.RatholeNoisePubKey
+	status.RatholeCustomServicesWarning = decodeCustomServicesWarning(settings)
 	return status, nil
+}
+
+// decodeCustomServicesWarning returns the list of detected custom services
+// when there's an active warning, or an empty slice when none / dismissed.
+// JSON decode failures degrade silently — a corrupted JSON cell shouldn't
+// prevent the dashboard from rendering.
+func decodeCustomServicesWarning(s *db.AppSettings) []string {
+	if s == nil || s.RatholeCustomServicesWarningDismissed || s.RatholeCustomServicesWarning == "" {
+		return []string{}
+	}
+	var list []string
+	if err := json.Unmarshal([]byte(s.RatholeCustomServicesWarning), &list); err != nil {
+		return []string{}
+	}
+	return list
 }
 
 // ListSSHKeys returns all stored SSH key records (private keys excluded).
@@ -133,7 +254,17 @@ func (s *LocalSetupService) GenerateSSHKey(name string, setDefault bool) (*db.SS
 
 // AddSSHKey validates an uploaded key pair and stores it.
 func (s *LocalSetupService) AddSSHKey(name, privateKey, publicKey string, setDefault bool) (*db.SSHKey, error) {
-	if err := sshpkg.ValidateKeyPair(privateKey, publicKey); err != nil {
+	if publicKey == "" {
+		return nil, fmt.Errorf("public key is required")
+	}
+	// Private key is optional. Public-only keys are usable for authorized_keys
+	// and the jumpbox; the server just can't SSH with them (agent-managed). When
+	// a private key IS supplied, it must match the public key.
+	if privateKey == "" {
+		if err := sshpkg.ValidatePublicKey(publicKey); err != nil {
+			return nil, err
+		}
+	} else if err := sshpkg.ValidateKeyPair(privateKey, publicKey); err != nil {
 		return nil, err
 	}
 	return s.storeSSHKey(name, privateKey, publicKey, setDefault)
@@ -201,7 +332,45 @@ func (s *LocalSetupService) DownloadSSHKey(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if key.PrivateKey == "" {
+		return "", fmt.Errorf("private key was deleted from the server; only the public key remains")
+	}
 	return key.PrivateKey, nil
+}
+
+// AddPrivateKey stores (or restores) the private half of an existing key,
+// verifying it matches the stored public key first. Lets an operator re-upload
+// a private key they previously deleted, or attach one to a public-only key —
+// no step-up needed: the match check means only the legitimate private key can
+// be added, so a session alone can't plant an arbitrary credential.
+func (s *LocalSetupService) AddPrivateKey(id, privateKey string) error {
+	key, err := db.GetSSHKey(id)
+	if err != nil {
+		return err
+	}
+	if privateKey == "" {
+		return fmt.Errorf("private key is required")
+	}
+	if err := sshpkg.ValidateKeyPair(privateKey, key.PublicKey); err != nil {
+		return fmt.Errorf("this private key does not match the stored public key: %w", err)
+	}
+	return db.SetSSHPrivateKey(id, privateKey)
+}
+
+// DeletePrivateKey clears the stored private half of a key while keeping the
+// public key and the row. The public key stays usable for authorized_keys and
+// the jumpbox; the server simply no longer holds a secret that could SSH into
+// origins. Irreversible — callers should have downloaded it first if they want
+// to keep it. Server→origin control still works because it runs over the agent.
+func (s *LocalSetupService) DeletePrivateKey(id string) error {
+	key, err := db.GetSSHKey(id)
+	if err != nil {
+		return err
+	}
+	if key.PrivateKey == "" {
+		return nil // already public-only
+	}
+	return db.BlankSSHPrivateKey(id)
 }
 
 // jumpboxUsername is the dedicated, privilege-free system user whose
@@ -362,8 +531,8 @@ func addToAuthorizedKeysFor(username, pubKey, options string) error {
 		if err2 := exec.Command("sudo", "mkdir", "-p", sshDir).Run(); err2 != nil { // #nosec G204
 			return fmt.Errorf("mkdir %s: %w", sshDir, err2)
 		}
-		_ = exec.Command("sudo", "chmod", "700", sshDir).Run()                       // #nosec G204
-		_ = exec.Command("sudo", "chown", username+":"+username, sshDir).Run()       // #nosec G204
+		_ = exec.Command("sudo", "chmod", "700", sshDir).Run()                 // #nosec G204
+		_ = exec.Command("sudo", "chown", username+":"+username, sshDir).Run() // #nosec G204
 	}
 
 	var existing []byte
@@ -415,8 +584,8 @@ func addToAuthorizedKeysFor(username, pubKey, options string) error {
 		if err2 := cmd.Run(); err2 != nil {
 			return err2
 		}
-		_ = exec.Command("sudo", "chmod", "600", path).Run()                       // #nosec G204
-		_ = exec.Command("sudo", "chown", username+":"+username, path).Run()       // #nosec G204
+		_ = exec.Command("sudo", "chmod", "600", path).Run()                 // #nosec G204
+		_ = exec.Command("sudo", "chown", username+":"+username, path).Run() // #nosec G204
 	}
 	return nil
 }
@@ -464,8 +633,8 @@ func removeFromAuthorizedKeysFor(username, pubKey string) error {
 		if err2 := cmd.Run(); err2 != nil {
 			return err2
 		}
-		_ = exec.Command("sudo", "chmod", "600", path).Run()                       // #nosec G204
-		_ = exec.Command("sudo", "chown", username+":"+username, path).Run()       // #nosec G204
+		_ = exec.Command("sudo", "chmod", "600", path).Run()                 // #nosec G204
+		_ = exec.Command("sudo", "chown", username+":"+username, path).Run() // #nosec G204
 	}
 	return nil
 }
@@ -615,6 +784,10 @@ func skipOptionsList(line string) string {
 // Two backends: direct os.WriteFile + os.Rename when the process owns the
 // directory, sudo-tee + sudo-mv when it doesn't.
 func writeLocalFile(path, content string) error {
+	if devMode {
+		log.Printf("dev mode: refusing to write %s (%d bytes)", path, len(content))
+		return nil
+	}
 	// Try direct atomic write first.
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err == nil {
 		tmp := fmt.Sprintf("%s.tmp.%d", path, time.Now().UnixNano())
@@ -666,6 +839,10 @@ func writeLocalFile(path, content string) error {
 // O_CREATE which is exactly what we want: same inode, new content,
 // inotify fires IN_MODIFY, rathole hot-reloads without dropping clients.
 func writeLocalFileInPlace(path, content string) error {
+	if devMode {
+		log.Printf("dev mode: refusing to write %s in place (%d bytes)", path, len(content))
+		return nil
+	}
 	// Direct write first (process owns the file).
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err == nil {
 		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
@@ -708,11 +885,15 @@ func sudoMkdir(path string) error {
 // stdin so sudo password prompts work correctly.
 // For sudo commands, we connect to the real terminal directly to allow password prompts.
 // Args are all hardcoded constants — no user input reaches this function.
-func runLocalCmd(logWriter io.Writer, name string, args ...string) error {
+//
+// Var, not func: tests of code that shells out under sudo (the layout
+// migration's systemctl/pkill/chown sequence) swap in an interceptor — a test
+// suite must never actually pkill rathole on the host running it.
+var runLocalCmd = func(logWriter io.Writer, name string, args ...string) error {
 	cmd := exec.Command(name, args...) // #nosec G204
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
-	
+
 	if err := cmd.Run(); err != nil {
 		return err
 	}
@@ -801,20 +982,37 @@ func migrateRatholeConfig(existing string) string {
 	return base + "\n\n" + custom
 }
 
+// processActive reports "active"/"inactive" by whether a process running the
+// given binary path exists. Used for caddy/rathole when gopher supervises them
+// as children — there's no systemd unit to query. pgrep excludes its own PID, so
+// the pattern appearing in pgrep's own argv doesn't self-match.
+// processActive / systemctlStatus are reached from the frontend-polled
+// /api/local/status handler. They MUST be time-bounded: an unbounded
+// `systemctl`/`pgrep` on a wedged systemd/dbus would block the request
+// goroutine, and with several pages polling this endpoint that's the exact
+// self-DoS shape that took the dashboard down. Results are also cached at the
+// Status() level (statusCache) so polls don't re-run these every few seconds.
+func processActive(binPath string) string {
+	if _, err := runOutputCtx(defaultCmdTimeout, "pgrep", "-f", binPath); err == nil { // #nosec G204 — fixed path
+		return "active"
+	}
+	return "inactive"
+}
+
 func systemctlStatus(service string) string {
-	out, err := exec.Command("systemctl", "is-active", service).Output() // #nosec G204
+	out, err := runOutputCtx(defaultCmdTimeout, "systemctl", "is-active", service) // #nosec G204
 	if err != nil {
-		check, _ := exec.Command("systemctl", "status", service).CombinedOutput() // #nosec G204
-		if strings.Contains(string(check), "could not be found") || strings.Contains(string(check), "not-found") {
+		check, _ := runOutputCtx(defaultCmdTimeout, "systemctl", "status", service) // #nosec G204
+		if strings.Contains(check, "could not be found") || strings.Contains(check, "not-found") {
 			return "not-found"
 		}
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(out)
 		if s == "" {
 			return "inactive"
 		}
 		return s
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(out)
 }
 
 // detectHostIPs returns all non-loopback unicast IPv4 addresses on the host's
@@ -844,12 +1042,54 @@ func detectHostIPs() []string {
 	return ips
 }
 
+// hostHasIP reports whether the target IP is assigned to any local interface
+// (loopback included — deliberately: binding everything to 127.0.0.1 is a
+// legitimate "nothing public" configuration).
+func hostHasIP(target net.IP) bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return true // can't enumerate — don't lock the operator out over a lookup failure
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip != nil && ip.Equal(target) {
+			return true
+		}
+	}
+	return false
+}
+
 // SetBindIP persists the bind IP, immediately reconciles rathole + Caddy, and
 // schedules a self-restart so the HTTP server rebinds (0.0.0.0 ↔ 127.0.0.1).
 func (s *LocalSetupService) SetBindIP(bindIP string) error {
 	if bindIP != "" {
-		if net.ParseIP(bindIP) == nil {
+		ip := net.ParseIP(bindIP)
+		if ip == nil {
 			return fmt.Errorf("invalid IP address: %q", bindIP)
+		}
+		// Reject IPv6: bind_addr is built as bare "host:port" (no brackets), so an
+		// IPv6 host produces malformed TOML that fails validation and wedges every
+		// rathole reconcile. Only IPv4 bind addresses are supported.
+		if ip.To4() == nil {
+			return fmt.Errorf("bind IP must be IPv4: %q is IPv6, which rathole bind_addr does not support here", bindIP)
+		}
+		// The IP must actually be assigned to an interface. On cloud VPSes the
+		// public IP is often 1:1 NAT and NOT on the NIC — binding it fails, and
+		// the failure mode is a full lockout: rathole and Caddy can't bind
+		// (every tunnel down) while the dashboard retreats to 127.0.0.1, and
+		// undoing it needs SSH. Refuse up front and name the real choices.
+		if !hostHasIP(ip) {
+			hint := "check `ip addr` on the VPS"
+			if ips := detectHostIPs(); len(ips) > 0 {
+				hint = "this host has: " + strings.Join(ips, ", ")
+			}
+			return fmt.Errorf("IP %s is not assigned to any interface on this host, so nothing could bind to it (cloud public IPs are often 1:1 NAT — use the interface IP; %s)", bindIP, hint)
 		}
 	}
 	if err := db.MutateSettings(func(s *db.AppSettings) error {
@@ -885,10 +1125,12 @@ func (s *LocalSetupService) reconcileAllTunnelCaddyBlocks(settings *db.AppSettin
 	}
 	reloaded := false
 	for _, t := range tunnels {
-		if t.Subdomain == "" || t.Private || t.Transport == "udp" {
+		// Private tunnels keep a Caddy block (reverse-proxy-only); only skip
+		// tunnels with no subdomain or UDP (no HTTP routing).
+		if t.Subdomain == "" || t.Transport == "udp" {
 			continue
 		}
-		block := buildTunnelCaddyBlock(t.Subdomain, settings.Domain, t.RatholePort, t.NoTLS, t.BotProtectionEnabled, settings.BindIP, t.TLSSkipVerify)
+		block := buildTunnelCaddyBlock(t.Subdomain, settings.Domain, t.RatholePort, t.NoTLS, t.BotProtectionEnabled || t.AuthEnabled, settings.BindIP, t.TLSSkipVerify, t.Private)
 		path := managedTunnelCaddyPath(t.ID)
 		if err := writeLocalFile(path, block); err != nil {
 			return fmt.Errorf("failed to rewrite Caddy block for tunnel %s: %w", t.ID, err)
@@ -896,7 +1138,7 @@ func (s *LocalSetupService) reconcileAllTunnelCaddyBlocks(settings *db.AppSettin
 		reloaded = true
 	}
 	if reloaded {
-		if err := systemctlReload("caddy"); err != nil {
+		if err := caddyReload(); err != nil {
 			log.Printf("reconcile all tunnel caddy: caddy reload failed: %v", err)
 		}
 	}
@@ -920,8 +1162,22 @@ func (s *LocalSetupService) ReconcileAllTunnelCaddyBlocks() error {
 }
 
 // SetDashboardPrivate persists the dashboard port visibility setting and applies
-// the iptables rule for dashboardPort when in Gopher-managed firewall mode.
+// the iptables rule for dashboardPort. Restricting (private=true) is rejected
+// outside Gopher-managed firewall mode: it's enforced by iptables alone, so
+// persisting it on a manual/none host would make status report a privacy
+// nothing provides — "dashboard: private" while the port sits wide open.
+// Clearing to public is allowed in ANY mode: it aligns the DB with what the
+// host actually does when gopher isn't managing the firewall, and is the
+// escape hatch for a private=true persisted before the operator switched to
+// (or chose) manual/none.
 func (s *LocalSetupService) SetDashboardPrivate(private bool) error {
+	settings, err := db.GetSettings()
+	if err != nil {
+		return err
+	}
+	if private && settings.FirewallMode != "gopher" {
+		return ErrFirewallNotManaged
+	}
 	if err := db.MutateSettings(func(s *db.AppSettings) error {
 		s.DashboardPrivate = private
 		return nil

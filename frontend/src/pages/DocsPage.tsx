@@ -230,7 +230,8 @@ export default function DocsPage() {
           description="Generates a one-time bootstrap token and returns a bootstrap_url. Run that URL on the target VM to install the rathole client and register the machine with Gopher. All fields are optional."
           requestFields={[
             { name: 'public_ssh', type: 'boolean', description: 'Expose the SSH back-tunnel publicly (default false — VPS-local only).' },
-            { name: 'ssh_key_id', type: 'string', description: "ID of the SSH key to install on the machine. Defaults to the server's default key." },
+            { name: 'ssh_key_id', type: 'string', description: "ID of the SSH key to install on the machine. Defaults to the server's default key. Ignored when ssh_enabled is false." },
+            { name: 'ssh_enabled', type: 'boolean', description: 'Provision an SSH back-tunnel (default true). Set false for an agent-only machine with no SSH exposure and no SSH key required.' },
           ]}
           responseFields={[
             { name: 'id', type: 'string', description: 'Machine record ID — use for GET and DELETE.' },

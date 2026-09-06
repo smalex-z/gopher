@@ -38,25 +38,14 @@ func (h *BackupHandler) Download(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// POST /api/security/backup/restore — accepts a multipart upload "file" containing
-// a SQLite backup, validates it, swaps it onto the live DB path, and schedules
-// a service restart.
+// POST /api/security/backup/restore — DISABLED for now (route unregistered in
+// router.go). Restoring a WAL-mode SQLite DB by renaming the file under the
+// live connection is reverted on restart by the old connection's
+// checkpoint-on-close via stale -wal/-shm sidecars, so a "successful" restore
+// silently loses data. Re-enable only alongside a startup-time swap
+// (pending-restore file applied before any connection opens). The handler is
+// kept and guarded so re-registering the route without that fix still refuses.
+// The upload/validate/swap implementation lives in BackupService.Restore.
 func (h *BackupHandler) Restore(w http.ResponseWriter, r *http.Request) {
-	const maxMem = 16 << 20 // 16 MiB in memory before spilling to disk
-	if err := r.ParseMultipartForm(maxMem); err != nil {
-		response.BadRequest(w, "invalid multipart payload")
-		return
-	}
-	file, _, err := r.FormFile("file")
-	if err != nil {
-		response.BadRequest(w, "missing 'file' field")
-		return
-	}
-	defer file.Close()
-
-	if err := h.svc.Restore(file); err != nil {
-		response.BadRequest(w, err.Error())
-		return
-	}
-	response.Success(w, map[string]string{"status": "restored", "message": "Database replaced. Service restarting..."})
+	response.Error(w, http.StatusNotImplemented, "restore is temporarily disabled in this build")
 }

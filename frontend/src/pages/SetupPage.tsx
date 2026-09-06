@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 
 const toKeyFilename = (name: string) =>
   name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '')
-import { Lock, Eye, EyeOff, CheckCircle2, XCircle, Loader2, SkipForward, Key, RefreshCw, Upload, Download, ClipboardCopy, Shield, ShieldAlert, ShieldCheck, ShieldOff, ShieldBan } from 'lucide-react'
+import { Lock, Eye, EyeOff, CheckCircle2, XCircle, Loader2, Key, RefreshCw, Upload, Download, ClipboardCopy, Shield, ShieldAlert, ShieldCheck, ShieldOff, ShieldBan, AlertTriangle, MinusCircle, HelpCircle, ChevronDown } from 'lucide-react'
 import client from '../api/client'
 import { useAuth } from '../lib/auth'
-import { localApi, type LocalServiceStatus, type FirewallStatus, type FirewallMode } from '../api/local'
+import { localApi, type LocalServiceStatus, type FirewallStatus, type FirewallMode, type DNSCheckResult, type DNSCheck } from '../api/local'
 import { toast } from '../lib/toast'
+import { stripKeyComment } from '../lib/sshkey'
 import DeployLogModal from '../components/DeployLogModal'
 import DownloadKeyButton from '../components/DownloadKeyButton'
 import type { SSHKey } from '../types'
@@ -39,7 +40,7 @@ function PasswordStep({ onDone }: { onDone: () => void }) {
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
       <div className="flex items-center gap-2 mb-6 text-blue-600">
         <Lock size={18} />
-        <span className="font-semibold text-sm uppercase tracking-wide">Step 1 of 4 — Admin password</span>
+        <span className="font-semibold text-sm uppercase tracking-wide">Step 1 of 5 — Admin password</span>
       </div>
       <form onSubmit={handleSubmit} className="space-y-5">
         <div>
@@ -106,16 +107,139 @@ function ServicePill({ state, label }: { state: string; label: string }) {
   )
 }
 
+// ─── DNS preflight UI ────────────────────────────────────────────────────────
+
+function DNSCheckRow({ check }: { check: DNSCheck }) {
+  const iconMap = {
+    pass: <CheckCircle2 size={14} className="text-green-600" />,
+    warn: <AlertTriangle size={14} className="text-amber-600" />,
+    fail: <XCircle size={14} className="text-red-600" />,
+    skip: <MinusCircle size={14} className="text-gray-400" />,
+  }
+  const labelColor = {
+    pass: 'text-green-800',
+    warn: 'text-amber-800',
+    fail: 'text-red-800',
+    skip: 'text-gray-500',
+  }[check.status]
+  return (
+    <li className="flex items-start gap-2 text-xs">
+      <span className="mt-0.5 shrink-0">{iconMap[check.status]}</span>
+      <span>
+        <span className={`font-medium ${labelColor}`}>{check.label}</span>
+        <span className="text-gray-600"> — {check.message}</span>
+      </span>
+    </li>
+  )
+}
+
+function DNSPreflightBanner({
+  domain,
+  serverIP,
+  status,
+  message,
+  result,
+}: {
+  domain: string
+  serverIP: string
+  status: 'idle' | 'checking' | 'ok' | 'fail'
+  message: string
+  result: DNSCheckResult | null
+}) {
+  const wrapperCls =
+    status === 'ok'
+      ? 'bg-green-50 border-green-200 text-green-800'
+      : status === 'fail'
+      ? 'bg-red-50 border-red-200 text-red-800'
+      : 'bg-blue-50 border-blue-200 text-blue-800'
+
+  const headerIcon =
+    status === 'checking' ? <Loader2 size={15} className="animate-spin" /> :
+    status === 'ok' ? <CheckCircle2 size={15} /> :
+    status === 'fail' ? <XCircle size={15} /> :
+    <span>📋</span>
+
+  const headerText =
+    status === 'checking' ? 'Checking DNS…' :
+    status === 'ok' ? 'DNS looks good' :
+    status === 'fail' ? 'DNS not ready' :
+    'DNS setup required'
+
+  const serverIPDisplay = serverIP || '<your server IP>'
+
+  return (
+    <div className={`rounded-lg p-4 text-sm border space-y-2 ${wrapperCls}`}>
+      <div className="flex items-center gap-2 font-semibold">
+        {headerIcon}
+        {headerText}
+      </div>
+
+      {/* Setup-guidance code block — shown when there's no result yet or the
+          top-level check failed. Skipped when the preflight is happy. */}
+      {(status === 'idle' || status === 'fail') && (
+        <>
+          <p>Point a <strong>wildcard A record</strong> at your DNS provider to this server's IP:</p>
+          <code className="block bg-white border border-current/20 rounded px-3 py-1.5 text-xs font-mono text-gray-800">
+            *.{domain}  →  {serverIPDisplay}
+          </code>
+          {status === 'idle' && (
+            <p className="text-xs text-blue-600 mt-1">
+              Every subdomain (e.g. <code>router.{domain}</code>) will resolve here automatically.
+            </p>
+          )}
+        </>
+      )}
+
+      {/* One-line summary on the happy path */}
+      {status === 'ok' && message && (
+        <p className="text-xs">{message}</p>
+      )}
+
+      {/* Structured per-check results from the preflight */}
+      {result?.checks && result.checks.length > 0 && (
+        <ul className="space-y-1.5 pt-1 border-t border-current/15">
+          {result.checks.map(c => (
+            <DNSCheckRow key={c.name} check={c} />
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+// WildcardDNSHelp is a collapsible how-to for the wildcard record: a thin grey
+// outlined disclosure (? icon + chevron) that expands to numbered steps. Minimal
+// color — it's a quiet helper under the domain field, not a banner.
+function WildcardDNSHelp({ serverIP }: { serverIP: string }) {
+  const ip = serverIP || '<your server IP>'
+  return (
+    <details className="group rounded-lg border border-gray-200">
+      <summary className="cursor-pointer select-none flex items-center gap-2 px-3 py-2 text-sm text-gray-600 hover:text-gray-800 list-none [&::-webkit-details-marker]:hidden">
+        <HelpCircle size={14} className="text-gray-400 shrink-0" />
+        How to set up wildcard DNS
+        <ChevronDown size={14} className="ml-auto text-gray-400 transition-transform group-open:rotate-180" />
+      </summary>
+      <ol className="list-decimal px-3 pb-3 pl-8 pt-1 space-y-1.5 text-xs text-gray-600 leading-relaxed border-t border-gray-100">
+        <li>Open your DNS provider (where your domain's DNS is hosted).</li>
+        <li>Add an <strong>A</strong> record — Name <code>*</code>, Value <code>{ip}</code>, TTL auto.</li>
+        <li>The bare domain (<code>@</code>) is <strong>not</strong> used — leave it pointing wherever your main site lives. Gopher only needs <code>router.</code> and tunnel subdomains, and the wildcard covers both.</li>
+        <li>If the record is proxied (e.g. Cloudflare's orange cloud), switch it to “DNS only”.</li>
+      </ol>
+    </details>
+  )
+}
+
 function ServicesStep({ onDone }: { onDone: () => void }) {
   const [domain, setDomain] = useState('')
-  const [serverHost, setServerHost] = useState('')
-  const [detectingIP, setDetectingIP] = useState(false)
-  const [skipCaddy, setSkipCaddy] = useState(false)
   const [status, setStatus] = useState<LocalServiceStatus | null>(null)
   const [showLogs, setShowLogs] = useState(false)
-  const [skipping, setSkipping] = useState(false)
   const [dnsStatus, setDnsStatus] = useState<'idle' | 'checking' | 'ok' | 'fail'>('idle')
   const [dnsMessage, setDnsMessage] = useState('')
+  const [dnsResult, setDnsResult] = useState<DNSCheckResult | null>(null)
+  // Public IP of this VPS — detected once on mount and passed to /check-dns
+  // so the preflight's ip_match check can flag parking-page IPs and stale
+  // records pointing at the wrong host.
+  const [serverIP, setServerIP] = useState('')
   const [installComplete, setInstallComplete] = useState(false)
   const dnsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -129,7 +253,6 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       setStatus(s)
       if (s.domain) {
         setDomain(s.domain)
-        setSkipCaddy(false)
       }
     }).catch(() => {})
   }, [])
@@ -139,48 +262,49 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
     return () => clearInterval(t)
   }, [])
 
-  // Auto-detect public IP when switching to rathole-only mode
+  // Detect the public IP once on mount — the DNS
+  // preflight needs it for the ip_match check (catches parking-page IPs
+  // and stale records pointing at the wrong host). Cheap, runs in parallel
+  // with everything else, swallows errors silently.
   useEffect(() => {
-    if (!skipCaddy || serverHost) return
-    setDetectingIP(true)
     localApi.detectIP()
-      .then(({ ip }) => { if (ip) setServerHost(ip) })
+      .then(({ ip }) => { if (ip) setServerIP(ip) })
       .catch(() => {})
-      .finally(() => setDetectingIP(false))
-  }, [skipCaddy, serverHost])
+  }, [])
 
-  // Debounced DNS check whenever domain changes
+  // Debounced DNS preflight whenever domain (or detected server IP) changes.
+  // Re-runs when serverIP arrives so the ip_match check has something to
+  // compare against; the wizard would otherwise have to wait for the user
+  // to retype the domain before the check became aware of the IP.
   useEffect(() => {
     if (dnsTimerRef.current) clearTimeout(dnsTimerRef.current)
-    if (skipCaddy) {
-      setDnsStatus('idle')
-      setDnsMessage('')
-      return
-    }
     const trimmed = domain.trim()
     if (!trimmed || !trimmed.includes('.')) {
       setDnsStatus('idle')
       setDnsMessage('')
+      setDnsResult(null)
       return
     }
     setDnsStatus('checking')
     dnsTimerRef.current = setTimeout(async () => {
       try {
-        const result = await localApi.checkDNS(trimmed)
+        const result = await localApi.checkDNS(trimmed, serverIP || undefined)
+        setDnsResult(result)
         if (result.ok) {
           setDnsStatus('ok')
-          setDnsMessage(result.resolved_to ? `Resolves to ${result.resolved_to}` : 'DNS resolves ✓')
+          setDnsMessage(result.resolved_to ? `Resolves to ${result.resolved_to}` : 'DNS resolves')
         } else {
           setDnsStatus('fail')
-          setDnsMessage(result.message ?? 'DNS not found')
+          setDnsMessage(result.message ?? 'DNS not ready')
         }
       } catch {
         setDnsStatus('fail')
         setDnsMessage('DNS check failed')
+        setDnsResult(null)
       }
     }, 1200)
     return () => { if (dnsTimerRef.current) clearTimeout(dnsTimerRef.current) }
-  }, [domain, skipCaddy])
+  }, [domain, serverIP])
 
   // Advance to step 3 (firewall) once install completes. We deliberately do NOT
   // redirect to https://router.{domain} here — port 80/443 may still be blocked by
@@ -192,82 +316,30 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
     return () => clearTimeout(t)
   }, [installComplete, onDone])
 
-  const allGood = status?.caddy_active === 'active' && status?.rathole_active === 'active'
+  // caddy + rathole are bundled and supervised, so they're up on every run — the
+  // meaningful distinction is whether this edge has already been configured
+  // (domain set), not whether the processes are alive.
+  const alreadyConfigured = status?.local_setup_done === true && Boolean(status?.domain)
 
-  const handleSkip = async () => {
-    setSkipping(true)
-    await localApi.skip(domain || undefined).catch(() => {})
-    onDone()
-  }
-
-  const canInstall = skipCaddy
-    ? Boolean(serverHost.trim() && (status == null || status.has_install_permission))
-    : Boolean(domain && dnsStatus === 'ok' && (status == null || status.has_install_permission))
+  const canInstall = Boolean(domain && dnsStatus === 'ok' && (status == null || status.has_install_permission))
 
   return (
+    <div className="space-y-3">
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-6">
       <div className="flex items-center gap-2 text-blue-600">
-        <span className="font-semibold text-sm uppercase tracking-wide">Step 2 of 4 — Local services</span>
+        <span className="font-semibold text-sm uppercase tracking-wide">Step 2 of 5 — Local services</span>
       </div>
 
-      <p className="text-sm text-gray-600">
-        Gopher can install <strong>Caddy</strong> (HTTPS reverse proxy) and <strong>rathole</strong> (tunnel server)
-        as local systemd services. Enable Caddy for domain/subdomain routing, or skip it for raw rathole-only ports.
-      </p>
-
-      <label className="flex items-start gap-3 text-sm text-gray-700">
-        <input
-          type="checkbox"
-          checked={skipCaddy}
-          onChange={e => setSkipCaddy(e.target.checked)}
-          className="mt-0.5"
-        />
-        <span>
-          <strong>Skip Caddy / reverse proxy</strong>
-          <span className="block text-xs text-gray-500 mt-0.5">
-            Use rathole only. URL/subdomain routing is disabled and tunnels use server ports directly.
-          </span>
-        </span>
-      </label>
-
-      {/* VPS host input (rathole-only mode) */}
-      {skipCaddy && (
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            VPS hostname or IP <span className="text-red-500">*</span>
-          </label>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={serverHost}
-              onChange={e => setServerHost(e.target.value)}
-              placeholder={detectingIP ? 'Detecting…' : '203.0.113.10 or vps.example.com'}
-              disabled={detectingIP}
-              className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-50 disabled:text-gray-400"
-              autoFocus
-            />
-            <button
-              type="button"
-              onClick={() => {
-                setServerHost('')
-                setDetectingIP(true)
-                localApi.detectIP()
-                  .then(({ ip }) => { if (ip) setServerHost(ip) })
-                  .catch(() => {})
-                  .finally(() => setDetectingIP(false))
-              }}
-              disabled={detectingIP}
-              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition-colors"
-              title="Re-detect public IP"
-            >
-              {detectingIP ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-            </button>
-          </div>
-          <p className="text-xs text-gray-400 mt-1">
-            Used as the rathole server address in client configs — must be reachable from your private machines.
-          </p>
-        </div>
-      )}
+      {/* Lead: the one thing the operator MUST do for any of this to work. */}
+      <div className="space-y-2">
+        <p className="text-sm text-gray-800">
+          Point a <strong>wildcard DNS record</strong> <code>*.{domain || 'yourdomain.com'}</code> at this server.
+          Every tunnel and the dashboard (<code>router.{domain || 'yourdomain.com'}</code>) resolve through it — without it nothing routes.
+        </p>
+        <p className="text-xs text-gray-400">
+          Caddy and rathole are bundled into Gopher; HTTPS and subdomain routing are then configured automatically.
+        </p>
+      </div>
 
       {/* Permission warning */}
       {status && !status.has_install_permission && (
@@ -292,74 +364,38 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
       )}
 
       {/* Domain input */}
-      {!skipCaddy && (
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Your domain <span className="text-red-500">*</span>{' '}
-            <span className="text-gray-400 font-normal">(e.g. <code>example.com</code>)</span>
-          </label>
-          <input
-            type="text"
-            value={domain}
-            onChange={e => setDomain(e.target.value)}
-            placeholder="example.com"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            required
-            autoFocus
-          />
-          {domain ? (
-            <p className="text-xs text-gray-400 mt-1">
-              Dashboard will be accessible at <strong>https://router.{domain}</strong>
-            </p>
-          ) : (
-            <p className="text-xs text-orange-500 mt-1">Required — used to configure the Caddy reverse proxy</p>
-          )}
-        </div>
-      )}
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Your domain <span className="text-red-500">*</span>{' '}
+          <span className="text-gray-400 font-normal">(e.g. <code>example.com</code>)</span>
+        </label>
+        <input
+          type="text"
+          value={domain}
+          onChange={e => setDomain(e.target.value)}
+          placeholder="example.com"
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          required
+          autoFocus
+        />
+        {domain ? (
+          <p className="text-xs text-gray-400 mt-1">
+            Dashboard will be accessible at <strong>https://router.{domain}</strong>
+          </p>
+        ) : (
+          <p className="text-xs text-orange-500 mt-1">Required — Caddy needs it for HTTPS + subdomain routing</p>
+        )}
+      </div>
 
-      {/* DNS check banner */}
-      {!skipCaddy && domain && domain.includes('.') && (
-        <div className={`rounded-lg p-4 text-sm border space-y-2 ${
-          dnsStatus === 'ok'
-            ? 'bg-green-50 border-green-200 text-green-800'
-            : dnsStatus === 'fail'
-            ? 'bg-red-50 border-red-200 text-red-800'
-            : 'bg-blue-50 border-blue-200 text-blue-800'
-        }`}>
-          <div className="flex items-center gap-2 font-semibold">
-            {dnsStatus === 'checking' && <Loader2 size={15} className="animate-spin" />}
-            {dnsStatus === 'ok' && <CheckCircle2 size={15} />}
-            {dnsStatus === 'fail' && <XCircle size={15} />}
-            {dnsStatus === 'idle' && '📋'}
-            {dnsStatus === 'checking' ? 'Checking DNS…' :
-             dnsStatus === 'ok' ? 'Wildcard DNS is set up ✓' :
-             dnsStatus === 'fail' ? 'Wildcard DNS not detected' :
-             'DNS setup required'}
-          </div>
-          {dnsStatus === 'ok' && (
-            <p className="text-xs">{dnsMessage}</p>
-          )}
-          {dnsStatus === 'fail' && (
-            <>
-              <p>Point a <strong>wildcard A record</strong> at your DNS provider to this server's IP:</p>
-              <code className="block bg-white border border-red-200 rounded px-3 py-1.5 text-xs font-mono">
-                *.{domain}  →  {'<your server IP>'}
-              </code>
-              <p className="text-xs mt-1">{dnsMessage}</p>
-            </>
-          )}
-          {(dnsStatus === 'idle') && (
-            <>
-              <p>Point a <strong>wildcard A record</strong> at your DNS provider to this server's IP:</p>
-              <code className="block bg-white border border-blue-200 rounded px-3 py-1.5 text-xs font-mono">
-                *.{domain}  →  {'<your server IP>'}
-              </code>
-              <p className="text-xs text-blue-600 mt-1">
-                This lets every subdomain (e.g. <code>router.{domain}</code>) resolve here automatically.
-              </p>
-            </>
-          )}
-        </div>
+      {/* DNS preflight banner */}
+      {domain && domain.includes('.') && (
+        <DNSPreflightBanner
+          domain={domain}
+          serverIP={serverIP}
+          status={dnsStatus}
+          message={dnsMessage}
+          result={dnsResult}
+        />
       )}
 
       {/* Post-install advance notice */}
@@ -370,35 +406,27 @@ function ServicesStep({ onDone }: { onDone: () => void }) {
         </div>
       )}
 
-      <div className="flex gap-3">
-        <button
-          onClick={() => setShowLogs(true)}
-          disabled={!canInstall}
-          className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          title={!skipCaddy && dnsStatus !== 'ok' ? 'Waiting for DNS to resolve before installing…' : undefined}
-        >
-          {skipCaddy
-            ? (status?.rathole_active === 'active' ? '↻ Re-configure Rathole' : '⚙ Install Rathole Only')
-            : (allGood ? '↻ Re-configure' : '⚙ Install & Configure')}
-        </button>
-        <button
-          onClick={handleSkip}
-          disabled={skipping}
-          className="flex items-center gap-1.5 px-4 py-2.5 border border-gray-300 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
-        >
-          <SkipForward size={15} /> Skip
-        </button>
-      </div>
+      <button
+        onClick={() => setShowLogs(true)}
+        disabled={!canInstall}
+        className="w-full bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        title={dnsStatus !== 'ok' ? 'Waiting for DNS to resolve before installing…' : undefined}
+      >
+        {alreadyConfigured ? '↻ Re-configure' : '⚙ Install & Configure'}
+      </button>
 
       <DeployLogModal
         isOpen={showLogs}
         onClose={() => { setShowLogs(false); load() }}
         onComplete={() => setInstallComplete(true)}
         title="Installing Local Services"
-        onStart={() => localApi.install(skipCaddy ? '' : domain, skipCaddy ? serverHost.trim() : domain, skipCaddy)}
+        onStart={() => localApi.install(domain)}
         wsPath="/api/local/logs/ws"
         autoStart
       />
+    </div>
+
+      <WildcardDNSHelp serverIP={serverIP} />
     </div>
   )
 }
@@ -513,7 +541,7 @@ function FirewallStep({ onDone }: { onDone: () => void }) {
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-4">
         <div className="flex items-center gap-2 text-blue-600">
           <ShieldCheck size={18} />
-          <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 4 — Firewall</span>
+          <span className="font-semibold text-sm uppercase tracking-wide">Step 5 of 5 — Firewall</span>
         </div>
         <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-start gap-3">
           <CheckCircle2 size={18} className="text-green-600 mt-0.5 shrink-0" />
@@ -553,7 +581,7 @@ function FirewallStep({ onDone }: { onDone: () => void }) {
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-5">
         <div className="flex items-center gap-2 text-blue-600">
           <ShieldCheck size={18} />
-          <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 4 — Firewall</span>
+          <span className="font-semibold text-sm uppercase tracking-wide">Step 5 of 5 — Firewall</span>
         </div>
 
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 space-y-3 text-sm text-amber-900">
@@ -601,7 +629,7 @@ function FirewallStep({ onDone }: { onDone: () => void }) {
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-6">
       <div className="flex items-center gap-2 text-blue-600">
         <Shield size={18} />
-        <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 4 — Firewall</span>
+        <span className="font-semibold text-sm uppercase tracking-wide">Step 5 of 5 — Firewall</span>
       </div>
 
       <p className="text-sm text-gray-600">
@@ -663,21 +691,13 @@ function FirewallStep({ onDone }: { onDone: () => void }) {
         ))}
       </div>
 
-      <div className="flex gap-3">
-        <button
-          onClick={handleContinue}
-          disabled={skipping}
-          className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-        >
-          {skipping ? <span className="flex items-center justify-center gap-2"><Loader2 size={14} className="animate-spin" /> Saving…</span> : 'Continue →'}
-        </button>
-        <button
-          onClick={onDone}
-          className="flex items-center gap-1.5 px-4 py-2.5 border border-gray-300 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
-        >
-          <SkipForward size={15} /> Skip
-        </button>
-      </div>
+      <button
+        onClick={handleContinue}
+        disabled={skipping}
+        className="w-full bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >
+        {skipping ? <span className="flex items-center justify-center gap-2"><Loader2 size={14} className="animate-spin" /> Saving…</span> : 'Continue →'}
+      </button>
     </div>
   )
 }
@@ -712,10 +732,10 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
     setLoading(true)
     try {
       await localApi.uploadSSHKey(keyName || 'Uploaded key', privKeyText, pubKeyText, true)
-      toast.success('SSH key pair saved')
+      toast.success(privKeyText ? 'SSH key pair saved' : 'Public key saved')
       onDone()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Invalid key pair — ensure private and public keys match')
+      toast.error(err instanceof Error ? err.message : 'Invalid key — check the format')
     } finally {
       setLoading(false)
     }
@@ -734,11 +754,12 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-6">
         <div className="flex items-center gap-2 text-blue-600">
           <Key size={18} />
-          <span className="font-semibold text-sm uppercase tracking-wide">Step 4 of 4 — SSH key</span>
+          <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 5 — SSH key</span>
         </div>
         <p className="text-sm text-gray-600">
-          Gopher uses an SSH key pair to connect back into bootstrapped machines through their
-          reverse tunnels. Generate a fresh key or bring your own.
+          Control of your machines runs over the agent — this SSH key is optional. It authorizes
+          jumpbox access (<code className="bg-gray-100 px-1 rounded">ssh -J</code> into a machine) and,
+          if you store its private half, an SSH fallback for the server. Generate a fresh key or bring your own.
         </p>
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Key name</label>
@@ -775,12 +796,6 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
             </div>
           </button>
         </div>
-        <button
-          onClick={onDone}
-          className="w-full text-sm text-gray-400 hover:text-gray-600 py-2 transition-colors"
-        >
-          Skip — I'll set this up later
-        </button>
       </div>
     )
   }
@@ -791,7 +806,7 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-5">
         <div className="flex items-center gap-2 text-blue-600">
           <Key size={18} />
-          <span className="font-semibold text-sm uppercase tracking-wide">Step 4 of 4 — Key generated</span>
+          <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 5 — Key generated</span>
         </div>
         <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-start gap-3">
           <CheckCircle2 size={18} className="text-green-600 mt-0.5 shrink-0" />
@@ -803,9 +818,9 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
         <div>
           <div className="text-xs font-medium text-gray-500 mb-1">Public key</div>
           <div className="bg-gray-50 rounded-lg p-3 flex items-center gap-2">
-            <code className="text-xs text-gray-700 break-all flex-1">{generatedKey?.public_key}</code>
+            <code className="text-xs text-gray-700 break-all flex-1">{stripKeyComment(generatedKey?.public_key ?? '')}</code>
             <button
-              onClick={() => { navigator.clipboard.writeText(generatedKey?.public_key ?? ''); toast.success('Copied!') }}
+              onClick={() => { navigator.clipboard.writeText(stripKeyComment(generatedKey?.public_key ?? '')); toast.success('Copied!') }}
               className="shrink-0 text-gray-400 hover:text-gray-600"
             >
               <ClipboardCopy size={14} />
@@ -825,7 +840,7 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
           onClick={onDone}
           className="w-full bg-green-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors"
         >
-          Continue to Dashboard →
+          Continue →
         </button>
       </div>
     )
@@ -836,7 +851,7 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-5">
       <div className="flex items-center gap-2 text-blue-600">
         <Upload size={18} />
-        <span className="font-semibold text-sm uppercase tracking-wide">Step 4 of 4 — Upload SSH key</span>
+        <span className="font-semibold text-sm uppercase tracking-wide">Step 3 of 5 — Upload SSH key</span>
       </div>
       <p className="text-sm text-gray-500">Paste your key contents or click Browse to select files.</p>
       <div>
@@ -851,39 +866,43 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
       </div>
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-1">
-          Private key <span className="text-gray-400 font-normal">(id_rsa — PEM or OpenSSH format)</span>
-        </label>
-        <div className="flex gap-2">
-          <textarea
-            value={privKeyText}
-            onChange={e => setPrivKeyText(e.target.value)}
-            rows={5}
-            placeholder={'-----BEGIN RSA PRIVATE KEY-----\n...'}
-            className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          <label className="cursor-pointer flex flex-col items-center justify-center px-3 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 text-xs gap-1">
-            <Upload size={14} />
-            Browse
-            <input type="file" className="hidden" onChange={e => { if (e.target.files?.[0]) readFile(e.target.files[0], setPrivKeyText) }} />
-          </label>
-        </div>
-      </div>
-      <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">
-          Public key <span className="text-gray-400 font-normal">(id_rsa.pub — authorized_keys format)</span>
+          Public key <span className="text-red-500">*</span>{' '}
+          <span className="text-gray-400 font-normal">(id_rsa.pub — authorized_keys format)</span>
         </label>
         <div className="flex gap-2">
           <textarea
             value={pubKeyText}
             onChange={e => setPubKeyText(e.target.value)}
             rows={3}
-            placeholder="ssh-rsa AAAA..."
+            placeholder="ssh-rsa AAAA... or ssh-ed25519 AAAA..."
             className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
           <label className="cursor-pointer flex flex-col items-center justify-center px-3 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 text-xs gap-1">
             <Upload size={14} />
             Browse
             <input type="file" className="hidden" onChange={e => { if (e.target.files?.[0]) readFile(e.target.files[0], setPubKeyText) }} />
+          </label>
+        </div>
+      </div>
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Private key <span className="text-gray-400 font-normal">(optional — id_rsa, PEM or OpenSSH format)</span>
+        </label>
+        <p className="text-xs text-gray-400 mb-1">
+          Leave blank for a public-only key. Add it only if you want the server to SSH with this key or to download it later.
+        </p>
+        <div className="flex gap-2">
+          <textarea
+            value={privKeyText}
+            onChange={e => setPrivKeyText(e.target.value)}
+            rows={5}
+            placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----\n...'}
+            className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <label className="cursor-pointer flex flex-col items-center justify-center px-3 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-500 text-xs gap-1">
+            <Upload size={14} />
+            Browse
+            <input type="file" className="hidden" onChange={e => { if (e.target.files?.[0]) readFile(e.target.files[0], setPrivKeyText) }} />
           </label>
         </div>
       </div>
@@ -896,15 +915,12 @@ function SSHKeyStep({ onDone }: { onDone: () => void }) {
         </button>
         <button
           onClick={handleUploadSave}
-          disabled={loading || !privKeyText || !pubKeyText}
+          disabled={loading || !pubKeyText}
           className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
-          {loading ? 'Validating…' : 'Save key pair'}
+          {loading ? 'Validating…' : (privKeyText ? 'Save key pair' : 'Save public key')}
         </button>
       </div>
-      <button onClick={onDone} className="w-full text-sm text-gray-400 hover:text-gray-600 py-1 transition-colors">
-        Skip
-      </button>
     </div>
   )
 }
@@ -915,20 +931,22 @@ function Fail2banStep({ onDone }: { onDone: () => void }) {
   const [showLogs, setShowLogs] = useState(false)
   const [skipping, setSkipping] = useState(false)
 
-  const handleSkip = () => {
+  const skip = async () => {
     setSkipping(true)
-    // Mark done server-side by calling the endpoint with a no-op flag,
-    // or just advance — the flag won't be set, user can re-trigger from Security page.
-    // For skip, we call the skip-fail2ban endpoint (or we can accept the unset state
-    // and let them come back). Simplest: just refetch, which will re-check the flag.
-    onDone()
+    try {
+      await localApi.skipFail2ban()
+      onDone()
+    } catch {
+      toast.error('Failed to skip — try again')
+      setSkipping(false)
+    }
   }
 
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 space-y-6">
       <div className="flex items-center gap-2 text-blue-600">
         <ShieldBan size={18} />
-        <span className="font-semibold text-sm uppercase tracking-wide">New: fail2ban protection</span>
+        <span className="font-semibold text-sm uppercase tracking-wide">Step 4 of 5 — fail2ban</span>
       </div>
 
       <div className="space-y-3 text-sm text-gray-600">
@@ -943,21 +961,22 @@ function Fail2banStep({ onDone }: { onDone: () => void }) {
         </ul>
       </div>
 
-      <div className="flex gap-3">
-        <button
-          onClick={() => setShowLogs(true)}
-          className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors"
-        >
-          Install fail2ban
-        </button>
-        <button
-          onClick={handleSkip}
-          disabled={skipping}
-          className="flex items-center gap-1.5 px-4 py-2.5 border border-gray-300 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
-        >
-          <SkipForward size={15} /> Skip for now
-        </button>
-      </div>
+      <button
+        onClick={() => setShowLogs(true)}
+        className="w-full bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors"
+      >
+        Install fail2ban
+      </button>
+      <button
+        onClick={skip}
+        disabled={skipping}
+        className="w-full text-gray-500 hover:text-gray-700 py-1 text-sm font-medium transition-colors disabled:opacity-50 -mt-2"
+      >
+        {skipping ? 'Skipping…' : 'Skip for now'}
+      </button>
+      <p className="text-xs text-gray-400 text-center -mt-4">
+        You can install it later from the Security page.
+      </p>
 
       <DeployLogModal
         isOpen={showLogs}
@@ -982,9 +1001,9 @@ export default function SetupPage({ initialStep = 1 }: { initialStep?: SetupStep
   const subtitle =
     step === 1 ? 'Create an admin password to get started'
     : step === 2 ? 'Set up local tunnel services'
-    : step === 3 ? 'Configure firewall rules'
-    : step === 5 ? 'Automatic IP banning for your server'
-    : 'Configure SSH key for machine access'
+    : step === 3 ? 'Configure SSH key for machine access'
+    : step === 4 ? 'Automatic IP banning for your server'
+    : 'Configure firewall rules'
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
@@ -1000,10 +1019,10 @@ export default function SetupPage({ initialStep = 1 }: { initialStep?: SetupStep
           : step === 2
           ? <ServicesStep onDone={() => setStep(3)} />
           : step === 3
-          ? <FirewallStep onDone={refetch} />
-          : step === 5
+          ? <SSHKeyStep onDone={refetch} />
+          : step === 4
           ? <Fail2banStep onDone={refetch} />
-          : <SSHKeyStep onDone={refetch} />
+          : <FirewallStep onDone={refetch} />
         }
       </div>
     </div>

@@ -12,11 +12,15 @@ npm ci
 echo "→ Building frontend..."
 npm run build
 
-echo "→ Building gopher-agent (linux/amd64 + linux/arm64)..."
+echo "→ Building gopher-agent (linux amd64 + arm64 + armv7)..."
 cd "$ROOT"
 mkdir -p cmd/server/agents
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o cmd/server/agents/gopher-agent-linux-amd64 ./cmd/agent/
 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o cmd/server/agents/gopher-agent-linux-arm64 ./cmd/agent/
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o cmd/server/agents/gopher-agent-linux-armv7 ./cmd/agent/
+
+echo "→ Fetching bundled caddy + rathole (embedded via go:embed; idempotent)..."
+bash "$ROOT/scripts/fetch-deps.sh"
 
 echo "→ Building Go binary..."
 VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")

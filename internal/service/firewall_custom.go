@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os/exec"
 	"strings"
 	"time"
@@ -13,6 +14,21 @@ import (
 
 // gopherCustomChain holds user-defined rules, jumped to before gopherChain.
 const gopherCustomChain = "GOPHER_CUSTOM"
+
+// requireGopherMode gates every firewall-mutating entry point: in "manual" or
+// "none" mode the operator owns iptables and gopher must neither touch it nor
+// accept rules it can't apply (a saved-but-never-applied rule is worse than a
+// rejected one — it looks like protection that isn't there).
+func requireGopherMode() error {
+	settings, err := db.GetSettings()
+	if err != nil {
+		return fmt.Errorf("load settings: %w", err)
+	}
+	if settings.FirewallMode != "gopher" {
+		return ErrFirewallNotManaged
+	}
+	return nil
+}
 
 // -- Chain lifecycle ---------------------------------------------------------
 
@@ -70,23 +86,28 @@ func reloadCustomChain() error {
 		return fmt.Errorf("flush %s: %w (%s)", gopherCustomChain, err, strings.TrimSpace(string(out)))
 	}
 
-	// Apply structured rules from DB.
+	// Apply structured + raw rules best-effort: the chain was just flushed, so a
+	// single failing rule must NOT abort the loop — that would leave the other
+	// (valid) rules unapplied. Collect failures and report them, but apply
+	// everything that's valid.
 	rules, err := db.GetFirewallRules()
 	if err != nil {
 		return fmt.Errorf("load firewall rules: %w", err)
 	}
+	var applyErrs []string
 	for _, rule := range rules {
 		if err := applyStructuredRule(rule, sudo); err != nil {
-			return fmt.Errorf("apply rule %s: %w", rule.ID, err)
+			applyErrs = append(applyErrs, fmt.Sprintf("rule %s: %v", rule.ID, err))
 		}
 	}
-
-	// Apply raw custom iptables text from settings (already loaded above).
 	if err := applyRawCustomRules(settings.CustomIPTables, sudo); err != nil {
-		return err
+		applyErrs = append(applyErrs, err.Error())
 	}
 
 	persistRules()
+	if len(applyErrs) > 0 {
+		return fmt.Errorf("%d custom rule(s) failed to apply (the rest were applied): %s", len(applyErrs), strings.Join(applyErrs, "; "))
+	}
 	return nil
 }
 
@@ -125,6 +146,7 @@ func applyStructuredRule(rule db.FirewallRule, sudo []string) error {
 // to `iptables -A GOPHER_CUSTOM`. Lines that already start with a chain name
 // or "-A"/"-I" are passed through as-is (allowing full flexibility).
 func applyRawCustomRules(text string, sudo []string) error {
+	var errs []string
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -137,9 +159,13 @@ func applyRawCustomRules(text string, sudo []string) error {
 		} else {
 			cmdArgs = append(append([]string{}, sudo...), append([]string{"iptables", "-A", gopherCustomChain}, strings.Fields(line)...)...)
 		}
+		// Best-effort: a bad line is skipped, not allowed to abort the rest.
 		if out, err := exec.Command(cmdArgs[0], cmdArgs[1:]...).CombinedOutput(); err != nil { // #nosec G204
-			return fmt.Errorf("custom rule %q: %w (%s)", line, err, strings.TrimSpace(string(out)))
+			errs = append(errs, fmt.Sprintf("custom rule %q: %v (%s)", line, err, strings.TrimSpace(string(out))))
 		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
 	return nil
 }
@@ -150,7 +176,7 @@ func applyRawCustomRules(text string, sudo []string) error {
 type FirewallEntry struct {
 	// "system" | "tunnel" | "machine-ssh" | "custom"
 	Type        string `json:"type"`
-	ID          string `json:"id,omitempty"`   // set for custom rules (FirewallRule.ID)
+	ID          string `json:"id,omitempty"` // set for custom rules (FirewallRule.ID)
 	Description string `json:"description"`
 	Protocol    string `json:"protocol"`
 	PortRange   string `json:"port_range"`
@@ -258,6 +284,9 @@ func (s *LocalSetupService) ListFirewallRules() ([]db.FirewallRule, error) {
 
 // CreateFirewallRule saves a structured rule and applies it.
 func (s *LocalSetupService) CreateFirewallRule(description, protocol, portRange, source, action string) (*db.FirewallRule, error) {
+	if err := requireGopherMode(); err != nil {
+		return nil, err
+	}
 	if err := validateFirewallRule(protocol, portRange, source, action); err != nil {
 		return nil, err
 	}
@@ -281,8 +310,17 @@ func (s *LocalSetupService) CreateFirewallRule(description, protocol, portRange,
 
 // CreateRawFirewallRule saves a raw iptables rule spec and applies it.
 func (s *LocalSetupService) CreateRawFirewallRule(description, rawSpec string) (*db.FirewallRule, error) {
+	if err := requireGopherMode(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(rawSpec) == "" {
 		return nil, fmt.Errorf("raw rule spec cannot be empty")
+	}
+	// The spec is applied as `iptables -A GOPHER_CUSTOM <spec>`, so an unqualified
+	// -j DROP/REJECT here is still a drop-all in a chain that precedes the SSH
+	// allow. Reject the lockout shapes.
+	if err := rawRuleLockoutCheck(strings.TrimSpace(rawSpec)); err != nil {
+		return nil, err
 	}
 	rule := &db.FirewallRule{
 		ID:          firewallRuleID(),
@@ -301,6 +339,10 @@ func (s *LocalSetupService) CreateRawFirewallRule(description, rawSpec string) (
 }
 
 // DeleteFirewallRule removes a rule from the DB and reloads the chain.
+//
+// Deliberately NOT gated on gopher mode: rules saved before a switch to
+// manual/none are latent DB rows, and deleting is the only way to clean them
+// up — reloadCustomChain's own mode guard makes the iptables side a no-op.
 func (s *LocalSetupService) DeleteFirewallRule(id string) error {
 	if err := db.DeleteFirewallRule(id); err != nil {
 		return err
@@ -317,8 +359,16 @@ func (s *LocalSetupService) GetCustomIPTables() (string, error) {
 	return settings.CustomIPTables, nil
 }
 
-// SetCustomIPTables saves raw custom iptables text and reloads the chain.
+// SetCustomIPTables saves raw custom iptables text and reloads the chain. This
+// blob is applied verbatim (lines may name a chain), so it's the strongest
+// lockout vector — validate every line before persisting.
 func (s *LocalSetupService) SetCustomIPTables(text string) error {
+	if err := requireGopherMode(); err != nil {
+		return err
+	}
+	if err := validateRawCustomText(text); err != nil {
+		return err
+	}
 	if err := db.MutateSettings(func(s *db.AppSettings) error {
 		s.CustomIPTables = text
 		return nil
@@ -348,7 +398,16 @@ func (s *LocalSetupService) GetLiveRules() (map[string]string, error) {
 // ReloadFirewall rebuilds both chains from scratch: ensures chain/jump
 // exists (deduplicating any stale jumps), flushes both chains, then
 // re-applies all tunnel ports and custom rules.
+//
+// Gated on gopher mode: without this, POST /api/local/firewall/reload on a
+// manual/none host would create the GOPHER_TUNNELS chain, jump INPUT to it,
+// open every tunnel port, and persistRules() would overwrite the operator's
+// own saved ruleset. (The startup caller in cmd/server/main.go checks the
+// mode itself, so it never sees this error.)
 func (s *LocalSetupService) ReloadFirewall() error {
+	if err := requireGopherMode(); err != nil {
+		return err
+	}
 	sudo := privilegedCmdPrefix()
 	if err := firewallCreateChain(nil, sudo); err != nil {
 		return err
@@ -379,6 +438,24 @@ func validateFirewallRule(protocol, portRange, source, action string) error {
 	if !validActions[action] {
 		return fmt.Errorf("action must be one of: ACCEPT, DROP, REJECT")
 	}
+	// Reject an unqualified terminating rule. The custom chain is jumped from
+	// INPUT position 1 — ahead of the loopback/established/SSH allows — so a
+	// DROP/REJECT with neither a port nor a source is a drop-everything that
+	// instantly locks the operator out of SSH and the dashboard. A DROP scoped
+	// to a port and/or a source (e.g. block an attacker CIDR) is still allowed.
+	if action != "ACCEPT" && portRange == "" && (source == "" || source == "0.0.0.0/0") {
+		return fmt.Errorf("a %s rule must specify a port and/or a source — an unqualified %s would drop all traffic and lock you out", action, action)
+	}
+	// Validate source up front — an invalid `-s` value makes the iptables -A
+	// fail, and since reloadCustomChain flushes before re-applying, a bad source
+	// would otherwise take down every other custom rule with it.
+	if source != "" && source != "0.0.0.0/0" {
+		if _, _, err := net.ParseCIDR(source); err != nil {
+			if net.ParseIP(source) == nil {
+				return fmt.Errorf("invalid source %q: expected an IP or CIDR (e.g. 1.2.3.4 or 1.2.3.0/24)", source)
+			}
+		}
+	}
 	if portRange != "" {
 		for _, part := range strings.Split(portRange, ":") {
 			for _, p := range strings.Split(part, ",") {
@@ -392,6 +469,60 @@ func validateFirewallRule(protocol, portRange, source, action string) error {
 					}
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// rawRuleLockoutCheck rejects a single raw iptables fragment that could lock the
+// operator out of the box. Custom rules only ever belong in the GOPHER_CUSTOM
+// chain (jumped from INPUT position 1), so anything that manipulates the
+// INPUT/FORWARD/OUTPUT chains directly, changes a default policy, flushes, uses
+// a different table, or is an unqualified drop-all is refused. A DROP/REJECT
+// scoped by a port and/or source (e.g. ban an attacker CIDR) is still allowed.
+func rawRuleLockoutCheck(line string) error {
+	f := strings.Fields(line)
+	if len(f) == 0 || strings.HasPrefix(f[0], "#") {
+		return nil
+	}
+	switch f[0] {
+	case "-P", "-F", "-X", "-N", "-E", "-Z", "-t", "--policy", "--flush", "--table":
+		return fmt.Errorf("raw rule may not use %q — custom rules can only add filter rules to the %s chain", f[0], gopherCustomChain)
+	}
+	if f[0] == "-A" || f[0] == "-I" || f[0] == "-D" || f[0] == "--append" || f[0] == "--insert" || f[0] == "--delete" {
+		if len(f) < 2 {
+			return fmt.Errorf("raw rule %q is incomplete", line)
+		}
+		if f[1] != gopherCustomChain {
+			return fmt.Errorf("raw rule may only target the %s chain, not %q — that could drop management traffic and lock you out", gopherCustomChain, f[1])
+		}
+	}
+	up := strings.ToUpper(line)
+	if strings.Contains(up, "-J DROP") || strings.Contains(up, "-J REJECT") {
+		hasMatch := false
+		for _, tok := range []string{"-p ", "--protocol", "--dport", "--sport", "-s ", "--source", "-d ", "--destination", "-m ", "-i ", "-o "} {
+			if strings.Contains(line, tok) {
+				hasMatch = true
+				break
+			}
+		}
+		if !hasMatch {
+			return fmt.Errorf("raw rule %q is an unqualified DROP/REJECT — it would drop all traffic and lock you out; scope it with a port or source", line)
+		}
+	}
+	return nil
+}
+
+// validateRawCustomText runs rawRuleLockoutCheck over every non-empty,
+// non-comment line of a raw custom-iptables blob.
+func validateRawCustomText(text string) error {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if err := rawRuleLockoutCheck(line); err != nil {
+			return err
 		}
 	}
 	return nil

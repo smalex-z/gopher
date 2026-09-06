@@ -34,17 +34,29 @@ jobs:
         run: npm run build
         working-directory: frontend
 
-      - name: Build gopher-agent (linux/amd64 + linux/arm64)
+      - name: Build gopher-agent (linux/amd64 + linux/arm64 + linux/armv7)
         # Embedded into the server via //go:embed all:agents — without this
         # step the CI artifact 404s on /static/agents/<arch> like the broken
-        # release builds did before this fix.
+        # release builds did before this fix. Arch list mirrors release.yml.
         run: |
           mkdir -p cmd/server/agents
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o cmd/server/agents/gopher-agent-linux-amd64 ./cmd/agent/
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o cmd/server/agents/gopher-agent-linux-arm64 ./cmd/agent/
+          GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o cmd/server/agents/gopher-agent-linux-armv7 ./cmd/agent/
+
+      - name: Stage bundled caddy + rathole
+        # release.yml runs fetch-deps.sh before its builds; without this the
+        # CI artifact had no embedded caddy/rathole and differed from every
+        # released binary (supervised edge can't start from it).
+        run: GOARCH=amd64 ./scripts/fetch-deps.sh
 
       - name: Build Go binary
         run: go build -o gopher ./cmd/server/...
+
+      - name: Smoke-check embedded payload
+        run: |
+          ./gopher version
+          ./gopher version | grep -q 'embedded: true'
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4

@@ -111,31 +111,39 @@ func externalMachineToResponse(em *db.ExternalMachine) externalMachineResponse {
 
 // POST /api/v1/machines
 // Generates a bootstrap token and returns a one-time bootstrap_url.
-// Body (all optional): { "public_ssh": false, "ssh_key_id": "" }
+// Body (all optional): { "public_ssh": false, "ssh_key_id": "", "ssh_enabled": true }
 func (h *ExternalAPIHandler) CreateMachine(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		PublicSSH bool   `json:"public_ssh"`
-		SSHKeyID  string `json:"ssh_key_id"`
+		PublicSSH  bool   `json:"public_ssh"`
+		SSHKeyID   string `json:"ssh_key_id"`
+		SSHEnabled *bool  `json:"ssh_enabled"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
+	// Mirrors the dashboard default: SSH back-tunnel on unless the caller
+	// explicitly opts into an agent-only machine. Agent-only machines need no
+	// SSH key at all, so the key resolution below is skipped for them.
+	sshEnabled := req.SSHEnabled == nil || *req.SSHEnabled
+
 	// Resolve the SSH key: caller-specified → server default.
 	sshKeyID := req.SSHKeyID
-	if sshKeyID == "" {
-		key, err := db.GetDefaultSSHKey()
-		if err != nil {
-			response.BadRequest(w, "no SSH key configured; add a key in Settings before using the external API")
-			return
-		}
-		sshKeyID = key.ID
-	} else {
-		if _, err := db.GetSSHKey(sshKeyID); err != nil {
-			response.BadRequest(w, fmt.Sprintf("ssh_key_id %q not found", sshKeyID))
-			return
+	if sshEnabled {
+		if sshKeyID == "" {
+			key, err := db.GetDefaultSSHKey()
+			if err != nil {
+				response.BadRequest(w, "no SSH key configured; add a key in Settings before using the external API")
+				return
+			}
+			sshKeyID = key.ID
+		} else {
+			if _, err := db.GetSSHKey(sshKeyID); err != nil {
+				response.BadRequest(w, fmt.Sprintf("ssh_key_id %q not found", sshKeyID))
+				return
+			}
 		}
 	}
 
-	bt, err := h.bootstrapSvc.GenerateToken(0, sshKeyID, req.PublicSSH)
+	bt, err := h.bootstrapSvc.GenerateToken(0, sshKeyID, req.PublicSSH, sshEnabled)
 	if err != nil {
 		response.InternalError(w, fmt.Sprintf("failed to generate bootstrap token: %v", err))
 		return
@@ -247,12 +255,12 @@ func (h *ExternalAPIHandler) DeleteMachine(w http.ResponseWriter, r *http.Reques
 // ─── Tunnel responses ─────────────────────────────────────────────────────────
 
 type externalTunnelResponse struct {
-	ID         string    `json:"id"`
-	MachineID  string    `json:"machine_id"`
-	Status     string    `json:"status"`
-	Subdomain  string    `json:"subdomain,omitempty"`
-	TargetIP   string    `json:"target_ip"`
-	TargetPort int       `json:"target_port"`
+	ID         string `json:"id"`
+	MachineID  string `json:"machine_id"`
+	Status     string `json:"status"`
+	Subdomain  string `json:"subdomain,omitempty"`
+	TargetIP   string `json:"target_ip"`
+	TargetPort int    `json:"target_port"`
 	// Transport is the L4 protocol the tunnel forwards. "tcp" (default) for
 	// HTTP/SSH/etc., "udp" for raw datagram services. UDP tunnels skip
 	// Caddy + subdomain routing — they're surfaced on a fixed gateway port.
@@ -269,12 +277,12 @@ type externalTunnelResponse struct {
 	// Alpha features — bot protection (PoW JS challenge gating HTTP traffic)
 	// requires a subdomain and TCP. Acknowledged-and-coerced server-side, so
 	// these reflect the actual stored state, not just what the caller asked.
-	BotProtectionEnabled bool   `json:"bot_protection_enabled,omitempty"`
-	BotProtectionTTL     int    `json:"bot_protection_ttl,omitempty"`
-	BotProtectionAllowIP string `json:"bot_protection_allow_ip,omitempty"`
-	TLSSkipVerify        bool   `json:"tls_skip_verify,omitempty"`
-	TunnelURL            string `json:"tunnel_url,omitempty"`
-	Error                string `json:"error,omitempty"`
+	BotProtectionEnabled bool      `json:"bot_protection_enabled,omitempty"`
+	BotProtectionTTL     int       `json:"bot_protection_ttl,omitempty"`
+	BotProtectionAllowIP string    `json:"bot_protection_allow_ip,omitempty"`
+	TLSSkipVerify        bool      `json:"tls_skip_verify,omitempty"`
+	TunnelURL            string    `json:"tunnel_url,omitempty"`
+	Error                string    `json:"error,omitempty"`
 	CreatedAt            time.Time `json:"created_at"`
 }
 

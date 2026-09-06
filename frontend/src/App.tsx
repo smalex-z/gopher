@@ -4,6 +4,7 @@ import { LayoutDashboard, Server, Monitor, Network, LogOut, Map, RefreshCw, Key,
 import { useState, useEffect, useCallback, useRef } from 'react'
 import ToastContainer from './components/ToastContainer'
 import AgentMigrationBanner from './components/AgentMigrationBanner'
+import CustomServicesWarningBanner from './components/CustomServicesWarningBanner'
 import DashboardPage from './pages/DashboardPage'
 import VPSPage from './pages/VPSPage' // repurposed as Server Info page
 import MachinesPage from './pages/MachinesPage'
@@ -17,6 +18,7 @@ import LogsPage from './pages/LogsPage'
 import SetupPage from './pages/SetupPage'
 import LoginPage from './pages/LoginPage'
 import { AuthProvider, useAuth } from './lib/auth'
+import { useStatusEvents } from './lib/statusEvents'
 import { toast } from './lib/toast'
 import client from './api/client'
 import { updateApi, type UpdateInfo } from './api/update'
@@ -81,6 +83,10 @@ function AppShell() {
     updateApi.check().then(setUpdateInfo).catch(() => {})
   }, [isAuthenticated])
 
+  // Live badge updates — must be called before the early returns below
+  // (hooks run unconditionally); the enabled flag gates the socket itself.
+  useStatusEvents(isAuthenticated && localSetupDone)
+
   const handleUpdate = useCallback(async () => {
     setIsUpdating(true)
     try {
@@ -113,9 +119,13 @@ function AppShell() {
   if (!isSetup) return <SetupPage initialStep={1} />
   if (!isAuthenticated) return <LoginPage />
   if (!localSetupDone) return <SetupPage initialStep={2} />
-  if (!firewallConfigured) return <SetupPage initialStep={3} />
-  if (!sshKeyConfigured) return <SetupPage initialStep={4} />
-  if (!fail2banSetupDone) return <SetupPage initialStep={5} />
+  // Firewall is intentionally LAST: its "gopher" takeover locks the dashboard
+  // port and redirects the browser to router.<domain>. Doing SSH-key + fail2ban
+  // first means that redirect is a clean one-way handoff to a fully-configured
+  // dashboard, not a bounce back into the wizard at the new URL.
+  if (!sshKeyConfigured) return <SetupPage initialStep={3} />
+  if (!fail2banSetupDone) return <SetupPage initialStep={4} />
+  if (!firewallConfigured) return <SetupPage initialStep={5} />
 
   const handleLogout = async () => {
     await client.post('/auth/logout').catch(() => {})
@@ -128,7 +138,7 @@ function AppShell() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex h-16 items-center justify-between">
             <div className="flex items-center gap-6">
-              <img src="/gopher_banner.png" alt="Gopher" className="h-8 w-auto" />
+              <img src="/gopher_banner.png" alt="Gopher Banner" className="h-10 w-auto" />
               <div className="flex gap-1">
                 <NavLink to="/" end className={navClass}><LayoutDashboard size={16} /> Dashboard</NavLink>
                 <NavDropdown
@@ -178,6 +188,7 @@ function AppShell() {
       </nav>
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <AgentMigrationBanner />
+        <CustomServicesWarningBanner />
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/vps" element={<VPSPage />} />

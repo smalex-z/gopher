@@ -5,13 +5,6 @@ import (
 	"io"
 )
 
-func UploadFile(client *SSHClient, localContent []byte, remotePath string) error {
-	if err := client.UploadFile(localContent, remotePath); err != nil {
-		return fmt.Errorf("failed to upload %s: %w", remotePath, err)
-	}
-	return nil
-}
-
 func ExecuteWithOutput(client *SSHClient, cmd string, w io.Writer) error {
 	fmt.Fprintf(w, "$ %s\n", cmd)
 	return client.ExecuteWithOutput(cmd, w)

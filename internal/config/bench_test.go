@@ -39,7 +39,7 @@ func benchmarkGenerate(b *testing.B, nMachines, nTunnels int) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		GenerateRatholeServerConfig(machines, tunnels, "")
+		GenerateRatholeServerConfig(machines, tunnels, "", "")
 	}
 }
 
@@ -52,7 +52,7 @@ func BenchmarkParseRatholeConfig_100Entries(b *testing.B) {
 	for i := range tunnels {
 		tunnels[i] = db.Tunnel{ID: fmt.Sprintf("t%d", i), RatholePort: 3000 + i, RatholeToken: fmt.Sprintf("tok%d", i)}
 	}
-	cfg := GenerateRatholeServerConfig(machines, tunnels, "")
+	cfg := GenerateRatholeServerConfig(machines, tunnels, "", "")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		parseRatholeConfig(cfg)

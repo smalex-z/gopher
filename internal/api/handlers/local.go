@@ -41,6 +41,32 @@ func (h *LocalHandler) Status(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, status)
 }
 
+// GET /api/local/setup-state — public. The boolean-only wizard-gating subset
+// of Status; everything else about the host now requires a session.
+func (h *LocalHandler) SetupState(w http.ResponseWriter, r *http.Request) {
+	state, err := h.svc.SetupState()
+	if err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, state)
+}
+
+// POST /api/local/dismiss-custom-services-warning — clears the
+// "user-managed services need manual noise pubkey update" banner. Doesn't
+// touch the underlying service list (operator may want to re-show it later
+// by clicking a button — out of scope for now; just dismisses).
+func (h *LocalHandler) DismissCustomServicesWarning(w http.ResponseWriter, r *http.Request) {
+	if err := db.MutateSettings(func(s *db.AppSettings) error {
+		s.RatholeCustomServicesWarningDismissed = true
+		return nil
+	}); err != nil {
+		response.InternalError(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"message": "warning dismissed"})
+}
+
 // guardSetupOnly rejects the request with 403 when setup has already
 // progressed past the point where the endpoint makes sense. Used to lock
 // down the public first-run wizard endpoints once the operator has finished
@@ -76,23 +102,27 @@ func (h *LocalHandler) Install(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Domain     string `json:"domain"`
-		ServerHost string `json:"server_host"`
-		SkipCaddy  bool   `json:"skip_caddy"`
+		Domain string `json:"domain"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		response.BadRequest(w, "invalid request body")
 		return
 	}
-	if !body.SkipCaddy && body.Domain == "" {
+	// A domain is always required — Caddy (HTTPS + subdomain routing) is integral
+	// to the edge; there's no rathole-only mode. Without it, it's just a rathole
+	// UI, not an edge.
+	if body.Domain == "" {
 		response.BadRequest(w, "domain is required")
 		return
 	}
-	if body.SkipCaddy && body.ServerHost == "" {
-		response.BadRequest(w, "server_host is required when skipping Caddy")
+	// Validate charset before it's persisted and flows into Caddy config text.
+	// Without this a domain with whitespace/braces/newlines could inject Caddy
+	// directives (the same validDomain regex already guards the DNS endpoints).
+	if len(body.Domain) > 253 || !validDomain.MatchString(body.Domain) {
+		response.BadRequest(w, "invalid domain")
 		return
 	}
-	if err := h.svc.Install(body.Domain, body.ServerHost, body.SkipCaddy); err != nil {
+	if err := h.svc.Install(body.Domain); err != nil {
 		if errors.Is(err, service.ErrOpInProgress) {
 			response.Error(w, http.StatusConflict, err.Error())
 			return
@@ -116,21 +146,15 @@ func (h *LocalHandler) SetupFail2ban(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, map[string]string{"message": "fail2ban setup started"})
 }
 
-// POST /api/local/skip
-func (h *LocalHandler) Skip(w http.ResponseWriter, r *http.Request) {
-	if !guardSetupOnly(w, "install") {
-		return
-	}
-	var body struct {
-		Domain string `json:"domain"`
-	}
-	// Ignore decode errors — domain is optional
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	if err := h.svc.Skip(body.Domain); err != nil {
+// POST /api/local/skip-fail2ban — operator declines the wizard's fail2ban
+// step. Records the choice so the wizard advances; fail2ban stays installable
+// later from the Security page.
+func (h *LocalHandler) SkipFail2ban(w http.ResponseWriter, r *http.Request) {
+	if err := h.svc.SkipFail2ban(); err != nil {
 		response.InternalError(w, err.Error())
 		return
 	}
-	response.Success(w, map[string]string{"message": "skipped"})
+	response.Success(w, map[string]string{"message": "fail2ban step skipped"})
 }
 
 // POST /api/local/reconcile — rebuild server.toml AND every tunnel's
@@ -200,8 +224,8 @@ func (h *LocalHandler) UploadSSHKey(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, "invalid request body")
 		return
 	}
-	if req.PrivateKey == "" || req.PublicKey == "" {
-		response.BadRequest(w, "private_key and public_key are required")
+	if req.PublicKey == "" {
+		response.BadRequest(w, "public_key is required")
 		return
 	}
 	if req.Name == "" {
@@ -264,12 +288,68 @@ func (h *LocalHandler) DownloadSSHKey(w http.ResponseWriter, r *http.Request) {
 	// Audit-log the successful download so the operator can see exactly which
 	// key was pulled and from where, alongside the failed attempts (logged
 	// inside VerifySensitiveOp).
-	h.auth.LogAuditEvent("SSH_KEY_DOWNLOADED", fmt.Sprintf("%s key=%s", ip, id))
+	h.auth.LogAuditEvent("SSH_KEY_DOWNLOADED", ip+" "+sshKeyAuditRef(id))
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="gopher_id_rsa"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(key))
+}
+
+// POST /api/local/ssh-keys/{id}/private — store/restore the private half of an
+// existing key. Verified against the stored public key server-side, so no
+// step-up challenge is needed (only the matching private key is accepted).
+func (h *LocalHandler) AddPrivateKey(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PrivateKey string `json:"private_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		response.BadRequest(w, "invalid request body")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if err := h.svc.AddPrivateKey(id, body.PrivateKey); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	response.Success(w, map[string]string{"message": "private key stored"})
+}
+
+// POST /api/local/ssh-keys/{id}/delete-private — clear the stored private key,
+// keeping the public key. Gated behind the same step-up challenge as download:
+// it's irreversible and destroys a credential, so a stolen session cookie alone
+// must not be able to do it.
+func (h *LocalHandler) DeletePrivateKey(w http.ResponseWriter, r *http.Request) {
+	var req service.SensitiveOpChallenge
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.BadRequest(w, "invalid request body")
+		return
+	}
+	ip := service.ClientIP(r)
+	if err := h.auth.VerifySensitiveOp(req, ip); err != nil {
+		response.Error(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id := chi.URLParam(r, "id")
+	// Resolve the ref before mutating so the event carries the name even if
+	// the record's lifecycle changes underneath us.
+	keyRef := sshKeyAuditRef(id)
+	if err := h.svc.DeletePrivateKey(id); err != nil {
+		response.BadRequest(w, err.Error())
+		return
+	}
+	h.auth.LogAuditEvent("SSH_KEY_PRIVATE_DELETED", ip+" "+keyRef)
+	response.Success(w, map[string]string{"message": "private key deleted; public key kept"})
+}
+
+// sshKeyAuditRef renders `key=<id> name="<name>"` for audit-event details.
+// The name is resolved at emission time, not display time — audit events
+// outlive key records, and a bare ID is unreadable once the row is deleted.
+func sshKeyAuditRef(id string) string {
+	if k, err := db.GetSSHKey(id); err == nil && k != nil {
+		return fmt.Sprintf("key=%s name=%q", id, k.Name)
+	}
+	return "key=" + id
 }
 
 // GET /api/local/ssh-keys/challenge-info — tells the dashboard which credential
@@ -311,43 +391,41 @@ func (h *LocalHandler) ResolveIP(w http.ResponseWriter, r *http.Request) {
 	response.Success(w, map[string]string{"ip": ips[0]})
 }
 
-// GET /api/local/check-dns?domain=example.com
+// GET /api/local/check-dns?domain=example.com&expected_ip=1.2.3.4
 // Public endpoint — called during setup wizard before auth is established.
-// Resolves router.DOMAIN to verify the wildcard DNS record is in place.
+// Runs a structured DNS preflight (wildcard, router, propagation, ip_match,
+// CAA) and returns per-check results so the wizard can show the operator
+// *why* DNS isn't ready, not just a generic "not found." The expected_ip
+// query param is optional — when provided (the wizard passes the result of
+// detect-ip), the ip_match check compares resolved IPs against it; when
+// absent, ip_match is skipped.
 func (h *LocalHandler) CheckDNS(w http.ResponseWriter, r *http.Request) {
 	domain := strings.TrimSpace(r.URL.Query().Get("domain"))
 	if domain == "" {
 		response.BadRequest(w, "domain is required")
 		return
 	}
-
-	// Validate domain: only allow valid hostname characters and reasonable length.
 	if len(domain) > 253 || !validDomain.MatchString(domain) {
 		response.BadRequest(w, "invalid domain")
 		return
 	}
 
-	host := fmt.Sprintf("router.%s", domain)
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	ips, err := net.DefaultResolver.LookupHost(ctx, host)
-	if err != nil || len(ips) == 0 {
-		msg := fmt.Sprintf("DNS lookup for %s returned no results", host)
-		if err != nil {
-			msg = err.Error()
-		}
-		response.Success(w, map[string]interface{}{
-			"ok":      false,
-			"message": msg,
-		})
-		return
+	expectedIP := strings.TrimSpace(r.URL.Query().Get("expected_ip"))
+	if expectedIP != "" && net.ParseIP(expectedIP) == nil {
+		// An invalid expected_ip shouldn't fail the whole request — just
+		// drop it and skip the ip_match check.
+		expectedIP = ""
 	}
 
-	response.Success(w, map[string]interface{}{
-		"ok":          true,
-		"resolved_to": ips[0],
-		"host":        host,
-	})
+	// Hard ceiling on the full preflight (random subdomain + router +
+	// 3-resolver fan-out + CAA, all in parallel) so a hung resolver can't
+	// stall the wizard. Each sub-check has its own ~3s timeout; the
+	// wrapper just guarantees we return.
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+
+	result := service.RunDNSPreflight(ctx, domain, expectedIP)
+	response.Success(w, result)
 }
 
 // GET /api/local/detect-ip
@@ -429,6 +507,10 @@ func (h *LocalHandler) SetServerPorts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.SetDashboardPrivate(body.DashboardPrivate); err != nil {
+		if errors.Is(err, service.ErrFirewallNotManaged) {
+			response.Conflict(w, "dashboard visibility requires the gopher-managed firewall — it is enforced by iptables")
+			return
+		}
 		response.InternalError(w, err.Error())
 		return
 	}
@@ -559,5 +641,6 @@ func (h *LocalHandler) Activity(w http.ResponseWriter, r *http.Request) {
 	}
 	response.Success(w, merged)
 }
+
 // validDomain matches a reasonable FQDN: labels of alphanumeric + hyphens separated by dots.
 var validDomain = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)

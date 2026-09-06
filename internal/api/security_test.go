@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +27,7 @@ func newTestRouter(t *testing.T) (http.Handler, *service.AuthService) {
 
 	authSvc := service.NewAuthService()
 	deploySvc := service.NewDeployService()
-	vpsSvc := service.NewVPSService(deploySvc)
+	vpsSvc := service.NewVPSService()
 	machineSvc := service.NewMachineService(deploySvc, nil)
 	tunnelSvc := service.NewTunnelService(nil)
 	localSvc := service.NewLocalSetupService(deploySvc.Hub)
@@ -37,7 +38,7 @@ func newTestRouter(t *testing.T) (http.Handler, *service.AuthService) {
 	agentInstaller := service.NewAgentInstaller(localSvc)
 	healthSvc := service.NewHealthService(false)
 
-	router := NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc, backupSvc, agentInstaller, healthSvc)
+	router := NewRouter(vpsSvc, machineSvc, tunnelSvc, deploySvc, bootstrapSvc, authSvc, localSvc, updateSvc, secSvc, backupSvc, agentInstaller, healthSvc, service.NewStatusHub())
 	return router, authSvc
 }
 
@@ -138,13 +139,39 @@ func TestPublic_StatusReachable(t *testing.T) {
 	}
 }
 
-func TestPublic_LocalStatusReachable(t *testing.T) {
+// The full local status (host IPs, OS users, ports, SSH pubkey) is a recon
+// payload and must NOT be public; the wizard-gating subset moved to the
+// public /api/local/setup-state, which must expose booleans only.
+func TestLocalStatus_RequiresAuth(t *testing.T) {
 	router, _ := newTestRouter(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/local/status", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("GET /api/local/status unauthenticated = %d, want 401", w.Code)
+	}
+}
+
+func TestPublic_SetupStateReachableAndMinimal(t *testing.T) {
+	router, _ := newTestRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/local/setup-state", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
 	if w.Code == http.StatusUnauthorized {
-		t.Error("GET /api/local/status should be public")
+		t.Fatal("GET /api/local/setup-state should be public")
+	}
+	var body struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode setup-state: %v", err)
+	}
+	// Guard against the payload regrowing: every field must be a bool. A new
+	// string/array field here is presumptively a leak — put it behind auth.
+	for k, v := range body.Data {
+		if _, ok := v.(bool); !ok {
+			t.Errorf("setup-state field %q is %T; public payload must be booleans only", k, v)
+		}
 	}
 }
 

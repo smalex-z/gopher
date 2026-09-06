@@ -2,6 +2,7 @@ package service
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/smalex-z/gopher/internal/db"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 const (
@@ -43,13 +45,23 @@ func authEventSeverity(event string) string {
 }
 
 // ─── Sessions ─────────────────────────────────────────────────────────────────
-
-type session struct {
-	expiresAt time.Time
-}
+//
+// Sessions are persisted (hashed) in the DB, NOT in memory: gopher restarts
+// itself during normal operation — the post-install supervisor kick and
+// self-updates — and in-memory sessions logged the operator out mid-setup
+// (step 3 of the wizard 401'd because step 2's install restarted the service).
+// Only the short-lived pending-TOTP tokens stay in memory; losing one across
+// a restart just means re-entering the password.
 
 type pendingTOTPEntry struct {
 	expiresAt time.Time
+}
+
+// hashSessionToken derives the DB key from a bearer token. Sessions are
+// stored hashed so a leaked/backed-up DB doesn't yield usable tokens.
+func hashSessionToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 // LoginResult is returned by Login.
@@ -61,14 +73,12 @@ type LoginResult struct {
 
 type AuthService struct {
 	mu          sync.RWMutex
-	sessions    map[string]session
 	pendingTOTP map[string]pendingTOTPEntry
 	rl          *loginRateLimiter
 }
 
 func NewAuthService() *AuthService {
 	return &AuthService{
-		sessions:    make(map[string]session),
 		pendingTOTP: make(map[string]pendingTOTPEntry),
 		rl:          newLoginRateLimiter(),
 	}
@@ -160,27 +170,46 @@ func (s *AuthService) Login(password, ip string) (LoginResult, error) {
 
 // LoginTOTP completes the 2FA step after a successful password check.
 //
-// Rate-limited per-IP for defense in depth. The pendingToken is already
-// single-use (deleted on first lookup), so the practical brute-force ceiling
-// is bounded by the Login rate limiter alone — but stacking the limiter
-// here too means a TOTP attempt directly debits the IP's bucket instead of
-// only via the upstream Login that minted the pending token.
+// Rate-limited per-IP for defense in depth. The pendingToken is consumed only
+// on a SUCCESSFUL code (or once it expires) — a wrong guess leaves it usable so
+// the operator can retry within its 5-minute window. Brute force is bounded by
+// this per-IP rate limiter plus the expiry, not by burning the challenge on the
+// first wrong code (which used to make a single typo cascade into "2FA expired"
+// on every subsequent attempt).
 func (s *AuthService) LoginTOTP(pendingToken, code, ip string) (string, error) {
 	if !s.rl.record(ip) {
 		s.logEvent("LOGIN_TOTP_RATE_LIMITED", ip)
 		return "", fmt.Errorf("too many attempts")
 	}
 
+	// Look up the pending-2FA challenge but DO NOT consume it on a failed
+	// attempt — only on success (see consume() below). Deleting it on every
+	// attempt meant a single mistyped code burned the whole challenge, and
+	// every subsequent code the operator entered (correct or not) then failed
+	// as "2FA expired" until they went back and re-entered their password.
+	// Backup codes especially read as "they all came up expired" after one
+	// fat-finger. Brute force is already bounded by the per-IP rate limiter
+	// above and the 5-minute expiry — single-use-on-failure adds no security,
+	// only a footgun.
 	s.mu.Lock()
 	entry, ok := s.pendingTOTP[pendingToken]
-	if ok {
-		delete(s.pendingTOTP, pendingToken)
+	if ok && time.Now().After(entry.expiresAt) {
+		delete(s.pendingTOTP, pendingToken) // genuinely expired — clean it up
+		ok = false
 	}
 	s.mu.Unlock()
 
-	if !ok || time.Now().After(entry.expiresAt) {
+	if !ok {
 		s.logEvent("LOGIN_FAILED_2FA_EXPIRED", ip)
 		return "", fmt.Errorf("invalid or expired token")
+	}
+
+	// consume invalidates the challenge; call it only on a successful login so
+	// a wrong guess leaves the challenge usable for a retry within its window.
+	consume := func() {
+		s.mu.Lock()
+		delete(s.pendingTOTP, pendingToken)
+		s.mu.Unlock()
 	}
 
 	settings, err := db.GetSettings()
@@ -193,6 +222,7 @@ func (s *AuthService) LoginTOTP(pendingToken, code, ip string) (string, error) {
 		if err := db.TouchTOTPDevice(deviceID); err != nil {
 			log.Printf("WARN: failed to update last_used_at for device %s: %v", deviceID, err)
 		}
+		consume()
 		token, err := s.createSession()
 		if err != nil {
 			return "", err
@@ -213,6 +243,7 @@ func (s *AuthService) LoginTOTP(pendingToken, code, ip string) (string, error) {
 		}); saveErr != nil {
 			log.Printf("WARN: failed to save consumed backup code: %v", saveErr)
 		}
+		consume()
 		token, err := s.createSession()
 		if err != nil {
 			return "", err
@@ -222,6 +253,8 @@ func (s *AuthService) LoginTOTP(pendingToken, code, ip string) (string, error) {
 		return token, nil
 	}
 
+	// Wrong code: leave the challenge intact so the operator can retry within
+	// the window (rate-limited). No consume() here — that was the bug.
 	s.logEvent("LOGIN_FAILED_TOTP", ip)
 	return "", fmt.Errorf("invalid code")
 }
@@ -304,23 +337,27 @@ func (s *AuthService) SensitiveOpRequirement() (string, error) {
 }
 
 func (s *AuthService) Logout(token string) {
-	s.mu.Lock()
-	delete(s.sessions, token)
-	s.mu.Unlock()
+	_ = db.DeleteDashboardSession(hashSessionToken(token))
 }
 
 func (s *AuthService) ValidateSession(token string) bool {
 	if token == "" {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, ok := s.sessions[token]
-	if !ok || time.Now().After(sess.expiresAt) {
-		delete(s.sessions, token)
+	hash := hashSessionToken(token)
+	sess, err := db.GetDashboardSession(hash)
+	if err != nil || sess == nil {
 		return false
 	}
-	s.sessions[token] = session{expiresAt: time.Now().Add(sessionDuration)}
+	if time.Now().After(sess.ExpiresAt) {
+		_ = db.DeleteDashboardSession(hash)
+		return false
+	}
+	// Sliding expiry, but only write when at least an hour has been consumed —
+	// the dashboard polls every 15s and a DB write per request is pointless.
+	if remaining := time.Until(sess.ExpiresAt); remaining < sessionDuration-time.Hour {
+		_ = db.TouchDashboardSession(hash, time.Now().Add(sessionDuration))
+	}
 	return true
 }
 
@@ -334,13 +371,12 @@ type TOTPDeviceInfo struct {
 	LastUsedAt *time.Time `json:"last_used_at"`
 }
 
-// verifyTOTPAcrossDevices walks every enrolled device and returns the matching
-// device ID on the first hit. Caller is responsible for updating last_used_at.
-func verifyTOTPAcrossDevices(code string) (string, bool) {
-	devices, err := db.GetTOTPDevices()
-	if err != nil {
-		return "", false
-	}
+// verifyTOTPAgainstDevices is the pure core: walk a device slice, return the
+// matching device ID on the first hit. Takes the devices explicitly so it can
+// be called with rows already read via a transaction (inside MutateSettingsTx)
+// OR via the global pool — the caller decides where the read happens, which
+// matters because a global-pool read inside a settings transaction deadlocks.
+func verifyTOTPAgainstDevices(devices []db.TOTPDevice, code string) (string, bool) {
 	for _, d := range devices {
 		if verifyTOTP(d.Secret, code) {
 			return d.ID, true
@@ -349,11 +385,11 @@ func verifyTOTPAcrossDevices(code string) (string, bool) {
 	return "", false
 }
 
-// verifyTOTPOrBackup matches a code against any device first, then backup codes.
-// Returns (deviceID, backupConsumedJSON, ok). If a backup code matched, the caller
-// must persist the updated AppSettings.TOTPBackupCodes JSON.
-func verifyTOTPOrBackup(code, backupCodesJSON string) (deviceID, updatedBackupJSON string, ok bool) {
-	if id, hit := verifyTOTPAcrossDevices(code); hit {
+// verifyCodeOrBackup matches against the supplied devices first, then backup
+// codes. Returns (deviceID, backupConsumedJSON, ok); a matched backup code
+// yields updated JSON the caller must persist.
+func verifyCodeOrBackup(devices []db.TOTPDevice, code, backupCodesJSON string) (deviceID, updatedBackupJSON string, ok bool) {
+	if id, hit := verifyTOTPAgainstDevices(devices, code); hit {
 		return id, backupCodesJSON, true
 	}
 	matched, updated, err := verifyAndConsumeBackupCode(backupCodesJSON, code)
@@ -361,6 +397,26 @@ func verifyTOTPOrBackup(code, backupCodesJSON string) (deviceID, updatedBackupJS
 		return "", backupCodesJSON, false
 	}
 	return "", updated, true
+}
+
+// verifyTOTPAcrossDevices / verifyTOTPOrBackup are the global-pool convenience
+// wrappers, safe to call OUTSIDE any transaction (e.g. LoginTOTP). They MUST
+// NOT be used inside a MutateSettingsTx closure — read devices via
+// db.GetTOTPDevicesTx(tx) there and call the pure helpers above instead.
+func verifyTOTPAcrossDevices(code string) (string, bool) {
+	devices, err := db.GetTOTPDevices()
+	if err != nil {
+		return "", false
+	}
+	return verifyTOTPAgainstDevices(devices, code)
+}
+
+func verifyTOTPOrBackup(code, backupCodesJSON string) (deviceID, updatedBackupJSON string, ok bool) {
+	devices, err := db.GetTOTPDevices()
+	if err != nil {
+		return "", backupCodesJSON, false
+	}
+	return verifyCodeOrBackup(devices, code, backupCodesJSON)
 }
 
 func (s *AuthService) TOTPStatus() (enabled bool, devices []TOTPDeviceInfo, backupCodesRemaining int, err error) {
@@ -416,7 +472,15 @@ func (s *AuthService) TOTPEnroll() (secret, qrDataURL string, err error) {
 // secret, persists a new TOTPDevice with the given name, clears the pending
 // slot, and (only if this is the first device) generates backup codes.
 // Returns plaintext backup codes only on first enrollment; nil otherwise.
-func (s *AuthService) TOTPConfirm(code, name string) ([]string, error) {
+//
+// Rate-limited per-IP (shared login bucket): every 2FA-management endpoint
+// that verifies a 6-digit code is a brute-force target for an attacker
+// holding a stolen session cookie — unthrottled, ~1M guesses walks it.
+func (s *AuthService) TOTPConfirm(code, name, ip string) ([]string, error) {
+	if !s.rl.record(ip) {
+		s.logEvent("TOTP_RATE_LIMITED", ip)
+		return nil, fmt.Errorf("too many attempts")
+	}
 	deviceName := strings.TrimSpace(name)
 	if deviceName == "" {
 		deviceName = "Authenticator"
@@ -426,7 +490,7 @@ func (s *AuthService) TOTPConfirm(code, name string) ([]string, error) {
 	}
 
 	var plain []string
-	if err := db.MutateSettings(func(settings *db.AppSettings) error {
+	if err := db.MutateSettingsTx(func(tx *gorm.DB, settings *db.AppSettings) error {
 		if settings.TOTPSecret == "" {
 			return fmt.Errorf("no enrollment in progress; call enroll first")
 		}
@@ -439,7 +503,9 @@ func (s *AuthService) TOTPConfirm(code, name string) ([]string, error) {
 			Secret:    settings.TOTPSecret,
 			CreatedAt: time.Now(),
 		}
-		if err := db.CreateTOTPDevice(device); err != nil {
+		// Tx-scoped write: db.CreateTOTPDevice (global pool) here was the exact
+		// call that self-deadlocked the server — see MutateSettingsTx.
+		if err := db.CreateTOTPDeviceTx(tx, device); err != nil {
 			return fmt.Errorf("failed to save device: %w", err)
 		}
 
@@ -448,7 +514,7 @@ func (s *AuthService) TOTPConfirm(code, name string) ([]string, error) {
 
 		// Generate backup codes only if this is the first device. Otherwise keep
 		// the existing set; backup codes are shared across devices.
-		count, err := db.CountTOTPDevices()
+		count, err := db.CountTOTPDevicesTx(tx)
 		if err != nil {
 			return err
 		}
@@ -475,17 +541,26 @@ func (s *AuthService) TOTPConfirm(code, name string) ([]string, error) {
 }
 
 // TOTPDisable removes ALL devices and clears backup codes. Requires a valid
-// code from any device or a backup code.
-func (s *AuthService) TOTPDisable(code string) error {
-	return db.MutateSettings(func(settings *db.AppSettings) error {
+// code from any device or a backup code. Rate-limited per-IP — see
+// TOTPConfirm.
+func (s *AuthService) TOTPDisable(code, ip string) error {
+	if !s.rl.record(ip) {
+		s.logEvent("TOTP_RATE_LIMITED", ip)
+		return fmt.Errorf("too many attempts")
+	}
+	return db.MutateSettingsTx(func(tx *gorm.DB, settings *db.AppSettings) error {
 		if !settings.TOTPEnabled {
 			return fmt.Errorf("2FA is not enabled")
 		}
-		_, _, ok := verifyTOTPOrBackup(code, settings.TOTPBackupCodes)
+		devices, err := db.GetTOTPDevicesTx(tx)
+		if err != nil {
+			return err
+		}
+		_, _, ok := verifyCodeOrBackup(devices, code, settings.TOTPBackupCodes)
 		if !ok {
 			return fmt.Errorf("invalid code")
 		}
-		if err := db.DeleteAllTOTPDevices(); err != nil {
+		if err := db.DeleteAllTOTPDevicesTx(tx); err != nil {
 			return fmt.Errorf("failed to delete devices: %w", err)
 		}
 		settings.TOTPEnabled = false
@@ -498,24 +573,33 @@ func (s *AuthService) TOTPDisable(code string) error {
 // TOTPRemoveDevice removes a single device. Requires a valid code from any
 // enrolled device (including the one being removed — the code authenticates
 // the action, not the device) or a backup code. If this leaves zero devices,
-// 2FA is disabled and backup codes are cleared.
-func (s *AuthService) TOTPRemoveDevice(deviceID, code string) error {
-	return db.MutateSettings(func(settings *db.AppSettings) error {
+// 2FA is disabled and backup codes are cleared. Rate-limited per-IP — see
+// TOTPConfirm.
+func (s *AuthService) TOTPRemoveDevice(deviceID, code, ip string) error {
+	if !s.rl.record(ip) {
+		s.logEvent("TOTP_RATE_LIMITED", ip)
+		return fmt.Errorf("too many attempts")
+	}
+	return db.MutateSettingsTx(func(tx *gorm.DB, settings *db.AppSettings) error {
 		if !settings.TOTPEnabled {
 			return fmt.Errorf("2FA is not enabled")
 		}
-		if _, err := db.GetTOTPDevice(deviceID); err != nil {
+		if _, err := db.GetTOTPDeviceTx(tx, deviceID); err != nil {
 			return err
 		}
-		_, updatedBackup, ok := verifyTOTPOrBackup(code, settings.TOTPBackupCodes)
+		devices, err := db.GetTOTPDevicesTx(tx)
+		if err != nil {
+			return err
+		}
+		_, updatedBackup, ok := verifyCodeOrBackup(devices, code, settings.TOTPBackupCodes)
 		if !ok {
 			return fmt.Errorf("invalid code")
 		}
 		settings.TOTPBackupCodes = updatedBackup
-		if err := db.DeleteTOTPDevice(deviceID); err != nil {
+		if err := db.DeleteTOTPDeviceTx(tx, deviceID); err != nil {
 			return fmt.Errorf("failed to delete device: %w", err)
 		}
-		count, err := db.CountTOTPDevices()
+		count, err := db.CountTOTPDevicesTx(tx)
 		if err != nil {
 			return err
 		}
@@ -529,7 +613,13 @@ func (s *AuthService) TOTPRemoveDevice(deviceID, code string) error {
 	})
 }
 
-func (s *AuthService) TOTPRegenerateBackupCodes(code string) ([]string, error) {
+// TOTPRegenerateBackupCodes mints a fresh backup-code set after verifying a
+// code. Rate-limited per-IP — see TOTPConfirm.
+func (s *AuthService) TOTPRegenerateBackupCodes(code, ip string) ([]string, error) {
+	if !s.rl.record(ip) {
+		s.logEvent("TOTP_RATE_LIMITED", ip)
+		return nil, fmt.Errorf("too many attempts")
+	}
 	plain, hashed, err := generateBackupCodes()
 	if err != nil {
 		return nil, err
@@ -538,11 +628,15 @@ func (s *AuthService) TOTPRegenerateBackupCodes(code string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := db.MutateSettings(func(settings *db.AppSettings) error {
+	if err := db.MutateSettingsTx(func(tx *gorm.DB, settings *db.AppSettings) error {
 		if !settings.TOTPEnabled {
 			return fmt.Errorf("2FA is not enabled")
 		}
-		if _, ok := verifyTOTPAcrossDevices(code); !ok {
+		devices, err := db.GetTOTPDevicesTx(tx)
+		if err != nil {
+			return err
+		}
+		if _, ok := verifyTOTPAgainstDevices(devices, code); !ok {
 			return fmt.Errorf("invalid code")
 		}
 		settings.TOTPBackupCodes = codesJSON
@@ -574,9 +668,9 @@ func (s *AuthService) createSession() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to generate session: %w", err)
 	}
-	s.mu.Lock()
-	s.sessions[token] = session{expiresAt: time.Now().Add(sessionDuration)}
-	s.mu.Unlock()
+	if err := db.CreateDashboardSession(hashSessionToken(token), time.Now().Add(sessionDuration)); err != nil {
+		return "", fmt.Errorf("failed to persist session: %w", err)
+	}
 	return token, nil
 }
 
@@ -605,4 +699,3 @@ func generateToken() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
-

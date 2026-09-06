@@ -7,5 +7,6 @@ type localOps interface {
 	RemoveServiceTunnelClient(tunnel *db.Tunnel, machine *db.Machine) error
 	ReconcileServerConfig() error
 	RemoveServiceTunnelCaddy(tunnel *db.Tunnel) error
+	WriteServiceTunnelCaddy(tunnel *db.Tunnel) error
 	RemoveMachineClient(machine *db.Machine) error
 }

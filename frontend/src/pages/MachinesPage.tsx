@@ -3,11 +3,13 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Server, Copy, Check, ChevronDown, ChevronRight, Plus, Key, Lock, Terminal, ClipboardCopy, Globe, CheckCircle, Loader2 } from 'lucide-react'
 import { machinesApi } from '../api/machines'
+import { tunnelsApi } from '../api/tunnels'
 import { localApi } from '../api/local'
 import { vpsApi } from '../api/vps'
+import ServerPortInput from '../components/ServerPortInput'
 import StatusBadge from '../components/StatusBadge'
 import MachineHealthPanel from '../components/MachineHealthPanel'
-import { relativeTime } from '../lib/time'
+import { relativeTime, formatDuration } from '../lib/time'
 import { toast } from '../lib/toast'
 import type { Machine, Tunnel, SSHKey } from '../types'
 
@@ -55,14 +57,27 @@ export default function MachinesPage() {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const [bootstrapModal, setBootstrapModal] = useState<BootstrapModal>({ isOpen: false, command: '', token: '', expiresAt: '', phase: 'waiting' })
-  const knownMachineIds = useRef<Set<string>>(new Set())
+  // Fleet baseline captured when a bootstrap starts — machines present *before*
+  // this bootstrap. null = not captured yet (machines query still loading); the
+  // phase detector waits for it so a slow first-load query doesn't make
+  // pre-existing machines look "newly registered" and false-trigger success.
+  const knownMachineIds = useRef<Set<string> | null>(null)
   const bootstrapTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [configModal, setConfigModal] = useState(false)
-  const [tunnelPortInput, setTunnelPortInput] = useState('')
+  const bootstrapGenPrimed = useRef(false)           // false = next gen is the initial (instant) one
+  // Signature of the config the current command was generated for — identical
+  // config never regenerates, so wandering through bad port values and back
+  // doesn't reset a command the operator may already have copied.
+  const lastGenConfigRef = useRef<string | null>(null)
+  const [tunnelPortInput, setTunnelPortInput] = useState<number | null>(null)
+  const [bootstrapPortLoading, setBootstrapPortLoading] = useState(false)
+  // Port handed out by nextPort() on open — the backend's own allocator —
+  // so ServerPortInput skips re-asking about it (same pattern as TunnelsPage).
+  const bootstrapVerifiedPortRef = useRef<number | null>(null)
   const [sshKeyInput, setSSHKeyInput] = useState('')
-  const [publicSSHInput, setPublicSSHInput] = useState(false)
+  const [publicSSHInput, setPublicSSHInput] = useState(true)   // public by default; unchecked "jumpbox" flips it
+  const [sshEnabledInput, setSSHEnabledInput] = useState(true) // SSH on by default; off = agent-only
+  const [sshSectionOpen, setSSHSectionOpen] = useState(false)  // collapsed by default (defaults are fine)
   const [copied, setCopied] = useState(false)
-  const [tokenLoading, setTokenLoading] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [reassigning, setReassigning] = useState<string | null>(null) // machine ID being reassigned
   const [reassignKeyID, setReassignKeyID] = useState('')
@@ -102,6 +117,15 @@ export default function MachinesPage() {
   const { data: vpsRes } = useQuery({ queryKey: ['vps'], queryFn: () => vpsApi.get() })
   const { data: firewallRes } = useQuery({ queryKey: ['firewall-overview'], queryFn: () => localApi.firewallOverview() })
   const machines: Machine[] = useMemo(() => data?.data ?? [], [data])
+  // Capture the fleet baseline once machines has loaded after the modal opens.
+  // Guarding on !isLoading (not just "modal open") is what fixes the first-load
+  // race: without it, an empty in-flight list becomes the baseline and every
+  // real machine then reads as new → instant false success + auto-close.
+  useEffect(() => {
+    if (bootstrapModal.isOpen && knownMachineIds.current === null && !isLoading) {
+      knownMachineIds.current = new Set(machines.map(m => m.id))
+    }
+  }, [bootstrapModal.isOpen, isLoading, machines])
   const sshKeys: SSHKey[] = keysRes?.data ?? []
   const vps = vpsRes?.data
   const domain = localStatus?.domain ?? ''
@@ -133,23 +157,11 @@ export default function MachinesPage() {
     return { cmd: `ssh -J ${vpsUser}@${vpsHost}${keyFlag} -p ${m.tunnel_port} ${m.username}@localhost`, label: 'Jumpbox:', keyMissing: !key, isJumpbox: true }
   }
 
-  const { data: domainIPData } = useQuery({
-    queryKey: ['resolve-ip', domain],
-    queryFn: () => localApi.resolveIP(domain),
-    enabled: !!domain,
-    staleTime: 10 * 60 * 1000,
-  })
-  const { data: routerIPData } = useQuery({
-    queryKey: ['resolve-ip', `router.${domain}`],
-    queryFn: () => localApi.resolveIP(`router.${domain}`),
-    enabled: !!domain,
-    staleTime: 10 * 60 * 1000,
-  })
-  const domainIP = domainIPData?.ip ?? ''
-  const routerIP = routerIPData?.ip ?? ''
-  const displayHost = domain
-    ? (domainIP && routerIP && domainIP === routerIP ? domain : `router.${domain}`)
-    : ''
+  // The edge's stable transport host (jumpbox SSH + raw-TCP tunnel display).
+  // Source of truth is the backend's ServerHost (defaults to router.<domain>),
+  // which is exactly what's baked into each client.toml's remote_addr — so the
+  // displayed commands match reality instead of guessing apex-vs-router by IP.
+  const displayHost = localStatus?.server_host || (domain ? `router.${domain}` : '')
 
   // Drive the bootstrap modal through its phases off the live machine list:
   //
@@ -161,7 +173,9 @@ export default function MachinesPage() {
   useEffect(() => {
     if (!bootstrapModal.isOpen) return
     if (bootstrapModal.phase === 'success' || bootstrapModal.phase === 'timeout') return
-    const newMachine = machines.find(m => !knownMachineIds.current.has(m.id))
+    const baseline = knownMachineIds.current
+    if (!baseline) return // fleet baseline not captured yet (machines still loading)
+    const newMachine = machines.find(m => !baseline.has(m.id))
     if (bootstrapModal.phase === 'waiting') {
       if (!newMachine) return
       setBootstrapModal(prev => ({ ...prev, phase: 'verifying' }))
@@ -245,45 +259,102 @@ export default function MachinesPage() {
     onError: (e: Error) => toast.error(`Agent install failed: ${e.message}`),
   })
 
-  const openConfigModal = () => {
-    setTunnelPortInput('')
+  // Open the combined bootstrap modal with defaults (SSH on, public). The
+  // command is generated by the effect below — on open once the port prefill
+  // lands, then debounced as SSH config changes — so it stays in sync with no
+  // manual "regenerate". The SSH port defaults to the backend's first free
+  // port (same allocator as tunnel create); auto-assign at registration
+  // remains the fallback if the prefill can't be fetched.
+  const openBootstrapModal = () => {
+    setTunnelPortInput(null)
     setSSHKeyInput('')
-    setPublicSSHInput(false)
-    setConfigModal(true)
+    setPublicSSHInput(true)
+    setSSHEnabledInput(true)
+    setSSHSectionOpen(false)
+    knownMachineIds.current = null // re-baseline on the next machines load
+    bootstrapVerifiedPortRef.current = null
+    lastGenConfigRef.current = null
+    setBootstrapPortLoading(true)
+    tunnelsApi.nextPort()
+      .then(port => {
+        bootstrapVerifiedPortRef.current = port
+        setTunnelPortInput(port)
+      })
+      .catch(() => {})
+      .finally(() => setBootstrapPortLoading(false))
+    setBootstrapModal({ isOpen: true, command: '', token: '', expiresAt: '', phase: 'waiting' })
   }
 
-  const generateToken = async () => {
-    const port = tunnelPortInput ? parseInt(tunnelPortInput, 10) : undefined
-    const keyID = sshKeyInput || undefined
-    setTokenLoading(true)
-    try {
-      const result = await vpsApi.generateToken(port, keyID, publicSSHInput)
-      if (result?.data) {
-        // Snapshot current machine IDs so we can detect the new registration
-        knownMachineIds.current = new Set(machines.map(m => m.id))
-        setConfigModal(false)
-        setBootstrapModal({
-          isOpen: true,
-          command: result.data.bootstrap_command,
-          token: result.data.token,
-          expiresAt: result.data.expires_at,
-          phase: 'waiting',
-        })
-        // 10-minute timeout — fires from either pre-success phase.
-        bootstrapTimeoutRef.current = setTimeout(() => {
-          setBootstrapModal(prev =>
-            prev.phase === 'waiting' || prev.phase === 'verifying'
-              ? { ...prev, phase: 'timeout' }
-              : prev,
-          )
-        }, 10 * 60 * 1000)
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to generate token')
-    } finally {
-      setTokenLoading(false)
+  // Auto-(re)generate the bootstrap token + command whenever the modal is open
+  // and the SSH config changes. Debounced (400ms) on edits so typing doesn't
+  // spray one-time tokens; a config identical to the one the current command
+  // was generated for is left alone entirely (lastGenConfigRef), so wandering
+  // through bad port values and back never resets an already-good command.
+  // Each actual regenerate supersedes the prior token (which expires unused).
+  //
+  // A pinned port is gated before generating: out-of-range skips immediately,
+  // and any port other than the prefilled one gets an availability probe
+  // first. Both failure modes leave the previous command in place —
+  // ServerPortInput shows the inline error for the bad value (the port is
+  // only editable while its Advanced section is open), and minting a token
+  // for it would just bounce off the backend's identical validation as an
+  // error toast on every edit. The probe runs here, independent of
+  // ServerPortInput's own display-only check, because that input is unmounted
+  // whenever Advanced is collapsed — generation must never wait on it.
+  useEffect(() => {
+    if (!bootstrapModal.isOpen) {
+      bootstrapGenPrimed.current = false
+      return
     }
-  }
+    const sshEnabled = sshEnabledInput
+    const publicSSH = publicSSHInput
+    const keyRaw = sshKeyInput
+    const port = sshEnabled ? tunnelPortInput ?? undefined : undefined
+    if (sshEnabled && bootstrapPortLoading) return // first free port is being prefetched
+    if (port !== undefined && (port < 1024 || port > 65535)) return
+    const cfg = sshEnabled ? `ssh:${publicSSH}:${keyRaw}:${port ?? 'auto'}` : 'no-ssh'
+    if (cfg === lastGenConfigRef.current) return
+    const delay = bootstrapGenPrimed.current ? 400 : 0
+    bootstrapGenPrimed.current = true
+    let cancelled = false // a newer config superseded this run mid-await
+    const timer = setTimeout(async () => {
+      if (port !== undefined && port !== bootstrapVerifiedPortRef.current) {
+        try {
+          const res = await tunnelsApi.checkPort(port)
+          if (!res.available) return
+        } catch { /* probe is advisory — generateToken revalidates authoritatively */ }
+        if (cancelled) return
+      }
+      try {
+        const result = await vpsApi.generateToken({
+          tunnelPort: port,
+          sshKeyID: sshEnabled ? (keyRaw || undefined) : undefined,
+          publicSSH: sshEnabled ? publicSSH : undefined,
+          sshEnabled,
+        })
+        if (result?.data && !cancelled) {
+          const data = result.data
+          lastGenConfigRef.current = cfg
+          if (bootstrapTimeoutRef.current) clearTimeout(bootstrapTimeoutRef.current)
+          setBootstrapModal(prev => ({
+            ...prev,
+            command: data.bootstrap_command,
+            token: data.token,
+            expiresAt: data.expires_at,
+            phase: 'waiting',
+          }))
+          bootstrapTimeoutRef.current = setTimeout(() => {
+            setBootstrapModal(prev =>
+              prev.phase === 'waiting' || prev.phase === 'verifying' ? { ...prev, phase: 'timeout' } : prev,
+            )
+          }, 10 * 60 * 1000)
+        }
+      } catch (err) {
+        if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to generate token')
+      }
+    }, delay)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [bootstrapModal.isOpen, sshEnabledInput, publicSSHInput, sshKeyInput, tunnelPortInput, bootstrapPortLoading])
 
   const copyCommand = () => {
     navigator.clipboard.writeText(bootstrapModal.command).then(() => {
@@ -320,7 +391,7 @@ export default function MachinesPage() {
           <p className="text-gray-500 mt-1">Servers registered via bootstrap tunnel</p>
         </div>
         <button
-          onClick={openConfigModal}
+          onClick={openBootstrapModal}
           className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
         >
           + Bootstrap New Machine
@@ -332,10 +403,10 @@ export default function MachinesPage() {
           <Server className="w-12 h-12 text-gray-300 mx-auto mb-4" />
           <h2 className="text-lg font-semibold text-gray-700 mb-2">No machines registered yet</h2>
           <p className="text-gray-400 text-sm mb-6 max-w-sm mx-auto">
-            Generate a bootstrap token and run the script on any machine to register it automatically via reverse SSH tunnel.
+            Generate a bootstrap token and run the script on any machine to register it automatically via a reverse tunnel.
           </p>
           <button
-            onClick={openConfigModal}
+            onClick={openBootstrapModal}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
           >
             Generate Bootstrap Token
@@ -346,7 +417,7 @@ export default function MachinesPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
               <tr>
-                {['', 'Name', 'Username', 'Status', 'Agent', 'Last Seen', 'Actions'].map(h => (
+                {['', 'Name', 'Username', 'Status', 'Agent', 'Uptime', 'Actions'].map(h => (
                   <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
@@ -368,31 +439,91 @@ export default function MachinesPage() {
                       <td className="px-4 py-3 text-gray-600">{m.username}</td>
                       <td className="px-4 py-3"><StatusBadge status={m.status} /></td>
                       <td className="px-4 py-3">
-                        {m.agent_installed ? (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium text-green-700 bg-green-50 border border-green-200">
-                            <CheckCircle size={11} /> v{m.agent_version || '–'}
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() => installAgentMutation.mutate(m.id)}
-                            disabled={installAgentMutation.isPending && installAgentMutation.variables === m.id}
-                            title={m.agent_install_error ? `Last error: ${m.agent_install_error}` : 'Install gopher-agent on this machine'}
-                            className={`px-2 py-1 text-xs rounded border flex items-center gap-1 transition-colors ${
-                              m.agent_install_error
-                                ? 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
-                                : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
-                            }`}
-                          >
-                            {installAgentMutation.isPending && installAgentMutation.variables === m.id
-                              ? <><Loader2 size={11} className="animate-spin" /> Installing…</>
-                              : m.agent_install_error
-                                ? <>Retry install</>
-                                : <>Install agent</>}
-                          </button>
-                        )}
+                        {(() => {
+                          // There is no manual "upgrade" anymore: from v0.2.0 the agent
+                          // self-updates with full privileges, and the server auto-rolls any
+                          // reachable agent reporting outdated. So a reachable+outdated agent
+                          // is shown as "Updating…" (status, not a button). The only manual
+                          // action left is a first-time INSTALL on an agentless machine —
+                          // there's no agent there yet to update itself. Offline machines
+                          // report their last-known version (the outdated flag may be stale).
+                          // Was `m.status === 'connected' || m.status === 'degraded'` — the
+                          // backend never actually writes "degraded" to Machine.Status
+                          // (SetMachineAgentDegraded sets "offline"), so that branch was dead
+                          // code and this silently collapsed to "agent info is live only when
+                          // the WHOLE machine is connected." agent_tunnel_status answers the
+                          // narrower, correct question (is the agent channel itself reachable,
+                          // via AgentLastSeen freshness) independently of general connectivity —
+                          // exactly the degraded case (agent up, rathole/SSH down) this was
+                          // originally meant to cover.
+                          const reachable = m.agent_tunnel_status === 'active'
+                          const showInstall = !m.agent_installed
+                          const updating = m.agent_installed && m.agent_outdated && reachable
+                          if (showInstall) {
+                            return (
+                              <button
+                                onClick={() => installAgentMutation.mutate(m.id)}
+                                disabled={installAgentMutation.isPending && installAgentMutation.variables === m.id}
+                                title={
+                                  m.agent_install_error
+                                    ? `Last error: ${m.agent_install_error}`
+                                    : 'Install gopher-agent on this machine'
+                                }
+                                className={`px-2 py-1 text-xs rounded border flex items-center gap-1 transition-colors ${
+                                  m.agent_install_error
+                                    ? 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
+                                    : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
+                                }`}
+                              >
+                                {installAgentMutation.isPending && installAgentMutation.variables === m.id
+                                  ? <><Loader2 size={11} className="animate-spin" /> Installing…</>
+                                  : m.agent_install_error
+                                    ? <>Retry install</>
+                                    : <>Install agent</>}
+                              </button>
+                            )
+                          }
+                          if (updating) {
+                            return (
+                              <span
+                                title={`Agent self-updating${m.agent_version ? ` from v${m.agent_version}` : ''} to the current version…`}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium border text-blue-700 bg-blue-50 border-blue-200"
+                              >
+                                <Loader2 size={11} className="animate-spin" /> Updating…
+                              </span>
+                            )
+                          }
+                          // Installed and either current, or offline — report the last-known version.
+                          const healthy = reachable && !m.agent_outdated
+                          return (
+                            <span
+                              title={reachable ? 'Agent version' : 'Last known agent version (machine offline)'}
+                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium border ${
+                                healthy
+                                  ? 'text-green-700 bg-green-50 border-green-200'
+                                  : 'text-gray-600 bg-gray-50 border-gray-200'
+                              }`}
+                            >
+                              {healthy ? <CheckCircle size={11} /> : null} v{m.agent_version || '–'}
+                            </span>
+                          )
+                        })()}
                       </td>
-                      <td className="px-4 py-3 text-gray-500" title={m.last_seen ? new Date(m.last_seen).toLocaleString() : ''}>
-                        {m.last_seen ? relativeTime(m.last_seen) : 'Never'}
+                      <td
+                        className="px-4 py-3 text-gray-500"
+                        title={
+                          m.status === 'connected' && m.connected_since
+                            ? `Connected since ${new Date(m.connected_since).toLocaleString()}`
+                            : m.last_seen
+                              ? `Last seen ${new Date(m.last_seen).toLocaleString()}`
+                              : ''
+                        }
+                      >
+                        {m.status === 'connected' && m.connected_since
+                          ? `up ${formatDuration(Math.max(0, Math.floor((Date.now() - new Date(m.connected_since).getTime()) / 1000)))}`
+                          : m.last_seen
+                            ? `last seen ${relativeTime(m.last_seen)}`
+                            : 'Never'}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex gap-2">
@@ -420,7 +551,11 @@ export default function MachinesPage() {
                           {/* SSH key row */}
                           <div className="flex items-center gap-2 mb-2">
                             <Key size={11} className="text-gray-400 shrink-0" />
-                            {reassigning === m.id ? (
+                            {m.tunnel_port === 0 ? (
+                              <span className="text-xs text-gray-500">
+                                SSH access: <span className="font-medium text-gray-700">Disabled (agent-only)</span>
+                              </span>
+                            ) : reassigning === m.id ? (
                               <>
                                 <select
                                   value={reassignKeyID}
@@ -532,11 +667,28 @@ export default function MachinesPage() {
                                         <Lock size={9} /> Private
                                       </span>
                                     )}
-                                    <StatusBadge status={m.status} />
+                                    <StatusBadge status={m.ssh_tunnel_status ?? m.status} />
                                   </div>
                                 </div>
                               )
                             })()}
+                            {/* Agent back-channel — the agent reaches the VPS through a
+                                rathole tunnel too (always private, 127.0.0.1 both ends). */}
+                            {m.agent_remote_port && m.agent_remote_port > 0 ? (
+                              <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+                                <div className="flex items-center gap-3 px-3 py-2">
+                                  <span className="font-mono text-xs text-gray-400 italic">VPS-local</span>
+                                  <span className="text-gray-300">:{m.agent_remote_port}</span>
+                                  <span className="text-gray-400 text-xs">→</span>
+                                  <span className="font-mono text-xs text-gray-700">localhost:{m.agent_local_port ?? 4322}</span>
+                                  <span className="text-xs bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded flex items-center gap-0.5">Agent</span>
+                                  <span className="text-xs bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded flex items-center gap-0.5">
+                                    <Lock size={9} /> Private
+                                  </span>
+                                  <StatusBadge status={m.agent_tunnel_status ?? (m.agent_installed ? m.status : 'pending')} />
+                                </div>
+                              </div>
+                            ) : null}
                             {/* Service tunnels */}
                             {tunnels.map(t => (
                               <div key={t.id} className="flex items-center gap-3 bg-white border border-gray-200 rounded-lg px-3 py-2">
@@ -553,7 +705,7 @@ export default function MachinesPage() {
                                 <StatusBadge status={t.status} />
                               </div>
                             ))}
-                            {tunnels.length === 0 && m.tunnel_port === 0 && (
+                            {tunnels.length === 0 && m.tunnel_port === 0 && !m.agent_remote_port && (
                               <p className="text-xs text-gray-400 italic">No tunnels yet</p>
                             )}
                           </div>
@@ -581,89 +733,9 @@ export default function MachinesPage() {
       )}
 
       {/* Bootstrap Config Modal */}
-      {configModal && (
-        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm">
-            <div className="flex items-center justify-between p-4 border-b">
-              <h2 className="text-lg font-semibold">Bootstrap New Machine</h2>
-              <button
-                onClick={() => setConfigModal(false)}
-                className="text-gray-400 hover:text-gray-600 text-xl"
-              >
-                ×
-              </button>
-            </div>
-            <div className="p-4 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  SSH Key <span className="text-gray-400 font-normal">(optional)</span>
-                </label>
-                <select
-                  value={sshKeyInput}
-                  onChange={e => setSSHKeyInput(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-                >
-                  <option value="">Use default key</option>
-                  {sshKeys.map(k => (
-                    <option key={k.id} value={k.id}>
-                      {k.name}{k.is_default ? ' (default)' : ''}
-                    </option>
-                  ))}
-                </select>
-                <p className="text-xs text-gray-400 mt-1">The selected key's public key will be installed on the machine.</p>
-              </div>
-              <div>
-                <label className="flex items-center gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={publicSSHInput}
-                    onChange={e => setPublicSSHInput(e.target.checked)}
-                    className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                  />
-                  <div>
-                    <span className="text-sm font-medium text-gray-700">Public SSH access</span>
-                    <p className="text-xs text-gray-400">Expose the SSH port publicly on the VPS (0.0.0.0). Default is private (127.0.0.1, jumpbox only).</p>
-                  </div>
-                </label>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  SSH Tunnel Port <span className="text-gray-400 font-normal">(optional)</span>
-                </label>
-                <input
-                  type="number"
-                  value={tunnelPortInput}
-                  onChange={e => setTunnelPortInput(e.target.value)}
-                  placeholder="Auto-assign"
-                  min={1}
-                  max={65535}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                <p className="text-xs text-gray-400 mt-1">Leave blank to auto-assign the next available port.</p>
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 p-4 border-t">
-              <button
-                onClick={() => setConfigModal(false)}
-                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={generateToken}
-                disabled={tokenLoading}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-50"
-              >
-                {tokenLoading ? 'Generating...' : 'Generate Token'}
-              </button>
-            </div>
-          </div>
-        </div></div>
-      )}
-
-      {/* Bootstrap Token Modal */}
+      {/* Bootstrap New Machine — combined config + command modal */}
       {bootstrapModal.isOpen && (
-        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
+        <div className="fixed inset-0 !mt-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl">
             <div className="flex items-center justify-between p-4 border-b">
               <h2 className="text-lg font-semibold">Bootstrap New Machine</h2>
@@ -686,33 +758,120 @@ export default function MachinesPage() {
               </div>
             ) : (
               <div className="p-4 space-y-4">
-                <p className="text-sm text-gray-600">
-                  Run this command on the machine you want to register. The machine will self-configure and establish a reverse SSH tunnel to the VPS.
-                </p>
+                <p className="text-sm text-gray-600">Run this on the machine you want to register — it self-configures and connects back to the VPS.</p>
+
                 <div className="relative">
-                  <pre className="bg-gray-900 text-green-400 text-xs rounded-lg p-4 pr-12 overflow-x-auto whitespace-pre-wrap break-all">
-                    {bootstrapModal.command}
+                  <pre className="bg-gray-900 text-green-400 text-xs rounded-lg p-4 pr-12 overflow-x-auto whitespace-pre-wrap break-all min-h-[3rem]">
+                    {bootstrapModal.command || 'Generating…'}
                   </pre>
                   <button
                     onClick={copyCommand}
-                    className="absolute top-2 right-2 p-1.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
+                    disabled={!bootstrapModal.command}
+                    className="absolute top-2 right-2 p-1.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300 disabled:opacity-40"
                     title="Copy command"
                   >
                     {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
                   </button>
                 </div>
-                <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                  ⏱ Token expires at: {new Date(bootstrapModal.expiresAt).toLocaleString()} (1 hour)
+
+                {bootstrapModal.expiresAt && (
+                  <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                    ⏱ Token expires at: {new Date(bootstrapModal.expiresAt).toLocaleString()} (1 hour)
+                  </div>
+                )}
+
+                {/* SSH access — one toggle row; options live in a nested Advanced sub-panel */}
+                <div className="border border-gray-200 rounded-lg">
+                  <label className="flex items-center gap-2.5 px-3 py-2.5 cursor-pointer" title={sshEnabledInput ? 'SSH enabled — uncheck for agent-only' : 'Agent-only (SSH off)'}>
+                    <input
+                      type="checkbox"
+                      checked={sshEnabledInput}
+                      onChange={e => setSSHEnabledInput(e.target.checked)}
+                      className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 shrink-0"
+                    />
+                    <span className="text-sm font-medium text-gray-700">SSH access</span>
+                    <span className={`ml-auto text-[11px] font-medium px-2 py-0.5 rounded-full shrink-0 ${
+                      !sshEnabledInput
+                        ? 'bg-gray-100 text-gray-500'
+                        : publicSSHInput
+                          ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                          : 'bg-blue-50 text-blue-600 border border-blue-100'
+                    }`}>
+                      {sshEnabledInput ? (publicSSHInput ? 'Public' : 'Jumpbox-gated') : 'Agent-only'}
+                    </span>
+                  </label>
+                  {!sshEnabledInput && (
+                    <p className="px-3 pb-3 text-xs text-gray-400">Agent-only machine: no SSH tunnel or <code className="bg-gray-100 px-1 rounded">authorized_keys</code> entry — control runs entirely over the agent.</p>
+                  )}
+                  {sshEnabledInput && (
+                    <div className="mx-3 mb-3 rounded-md border border-gray-100 bg-gray-50/80">
+                      <button
+                        onClick={() => setSSHSectionOpen(o => !o)}
+                        className="w-full flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-gray-500 hover:text-gray-700 text-left"
+                      >
+                        {sshSectionOpen ? <ChevronDown size={13} className="shrink-0" /> : <ChevronRight size={13} className="shrink-0" />}
+                        Advanced
+                        {!sshSectionOpen && (
+                          <span className="font-normal text-gray-400 truncate">· key, privacy, port</span>
+                        )}
+                      </button>
+                      {sshSectionOpen && (
+                        <div className="px-2.5 pb-3 pt-1 space-y-3">
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              SSH Key <span className="text-gray-400 font-normal">(optional)</span>
+                            </label>
+                            <select
+                              value={sshKeyInput}
+                              onChange={e => setSSHKeyInput(e.target.value)}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                            >
+                              <option value="">Use default key</option>
+                              {sshKeys.map(k => (
+                                <option key={k.id} value={k.id}>
+                                  {k.name}{k.is_default ? ' (default)' : ''}
+                                </option>
+                              ))}
+                            </select>
+                            <p className="text-xs text-gray-400 mt-1">The selected key's public key is installed on the machine.</p>
+                          </div>
+                          <label className="flex items-center gap-3 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={!publicSSHInput}
+                              onChange={e => setPublicSSHInput(!e.target.checked)}
+                              className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                            />
+                            <div>
+                              <span className="text-sm font-medium text-gray-700">Jumpbox-gated (private)</span>
+                              <p className="text-xs text-gray-400">Reach the box only via <code className="bg-gray-100 px-1 rounded">ssh -J</code> through the VPS. Default is public: sshd is reachable on the VPS public IP (rate-limited at the edge).</p>
+                            </div>
+                          </label>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              SSH Tunnel Port
+                              <span className="ml-1 font-normal text-gray-400 text-xs">(port on your VPS — 1024–65535)</span>
+                            </label>
+                            <ServerPortInput
+                              value={tunnelPortInput}
+                              onChange={setTunnelPortInput}
+                              optional
+                              placeholder={bootstrapPortLoading ? 'Finding a free port…' : 'Auto-assign'}
+                              skipCheckFor={bootstrapVerifiedPortRef.current}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-                <div className="text-xs text-gray-400 space-y-1">
-                  <p>The script will:</p>
-                  <ol className="list-decimal ml-4 space-y-0.5">
-                    <li>Register the machine with this Gopher instance</li>
-                    <li>Install the VPS SSH public key in <code className="bg-gray-100 px-1 rounded">~/.ssh/authorized_keys</code></li>
-                    <li>Install and configure rathole as a reverse tunnel client</li>
-                    <li>Enable a systemd service to keep the tunnel running</li>
-                  </ol>
-                </div>
+
+                {sshEnabledInput && publicSSHInput && (
+                  <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                    This machine's SSH will be reachable on the internet (rate-limited at the edge). Choose Jumpbox-gated above for private access, or disable SSH for an agent-only machine.
+                  </div>
+                )}
+
                 {/* Phase indicator — waiting → verifying → success/timeout */}
                 <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 ${
                   bootstrapModal.phase === 'timeout'
@@ -749,7 +908,7 @@ export default function MachinesPage() {
           Closes automatically once HealthService detects the agent is up
           (Machine.agent_installed flips true via the health poll loop). */}
       {agentInstallModal.open && (
-        <div className="fixed inset-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
+        <div className="fixed inset-0 !mt-0 bg-black/60 z-50 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl">
             <div className="flex items-center justify-between p-4 border-b">
               <h2 className="text-lg font-semibold">Install agent on {agentInstallModal.machineName}</h2>

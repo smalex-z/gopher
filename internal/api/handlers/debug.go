@@ -21,7 +21,7 @@ func NewDebugHandler() *DebugHandler {
 func (h *DebugHandler) GetCaddyfile(w http.ResponseWriter, r *http.Request) {
 	vps, err := db.GetVPS()
 	if err != nil {
-		// Fall back to the domain stored in app settings (set via POST /api/local/skip or /install).
+		// Fall back to the domain stored in app settings (set via POST /api/local/install).
 		settings, sErr := db.GetSettings()
 		if sErr != nil || settings.Domain == "" {
 			response.NotFound(w, "no VPS or domain configured")
@@ -61,10 +61,12 @@ func (h *DebugHandler) GetRatholeServerConfig(w http.ResponseWriter, r *http.Req
 	}
 
 	bindIP := ""
+	noisePriv := ""
 	if settings, sErr := db.GetSettings(); sErr == nil && settings != nil {
 		bindIP = settings.BindIP
+		noisePriv = settings.RatholeNoisePrivKey
 	}
-	cfg := config.GenerateRatholeServerConfig(machines, tunnels, bindIP)
+	cfg := config.GenerateRatholeServerConfig(machines, tunnels, bindIP, noisePriv)
 	cfg = strings.TrimRight(cfg, "\n") + "\n\n# ===== BEGIN CUSTOM CONFIGURATION =====\n# ===== END CUSTOM CONFIGURATION =====\n"
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

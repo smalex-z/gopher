@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/smalex-z/gopher/internal/api/dto"
 	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
@@ -64,6 +66,14 @@ func agentTunnelStatus(m *db.Machine) string {
 	return "pending"
 }
 
+// machineTunnelStatus translates a machine's binary reachability into the
+// tunnel status vocabulary. Machine "connected" already requires a real SSH
+// banner byte-read (see probeMachineSSH), not just a successful TCP
+// handshake — that's a confirmed response, which is what "active" means at
+// the tunnel-status layer. It does NOT map to tunnel-status "connected",
+// which means "reachable but silent" — a middle state probeMachineSSH never
+// produces (it's binary: banner arrives, or the machine is offline). Same
+// word, two different confidence levels depending on layer.
 func machineTunnelStatus(status string) string {
 	if status == "connected" {
 		return "active"
@@ -76,29 +86,36 @@ func (s *TunnelService) List() ([]db.Tunnel, error) {
 	if err != nil {
 		return nil, err
 	}
+	for i := range tunnels {
+		presentTunnelStatus(&tunnels[i])
+	}
 	machines, err := db.GetMachines()
 	if err != nil {
 		return nil, err
 	}
 	for _, machine := range machines {
-		if machine.TunnelPort == 0 {
-			continue
+		// SSH tunnel — only for SSH-enabled machines. The agent back-channel
+		// below is synthesized INDEPENDENTLY so agent-only machines (SSH disabled
+		// → TunnelPort 0) still surface their control-plane tunnel. A `continue`
+		// here previously skipped both, hiding agent-only machines everywhere the
+		// tunnel list is consumed (tunnels page, network map).
+		if machine.TunnelPort != 0 {
+			tunnels = append(tunnels, db.Tunnel{
+				ID:          machineSSHTunnelID(machine.ID),
+				MachineID:   machine.ID,
+				Name:        machine.Name + " SSH",
+				Subdomain:   "",
+				LocalPort:   22,
+				RatholePort: machine.TunnelPort,
+				Protocol:    "tcp",
+				Private:     !machine.PublicSSH,
+				Status:      machineTunnelStatus(machine.Status),
+				Managed:     true,
+				Kind:        "machine-ssh",
+				CreatedAt:   machine.CreatedAt,
+				UpdatedAt:   machine.UpdatedAt,
+			})
 		}
-		tunnels = append(tunnels, db.Tunnel{
-			ID:          machineSSHTunnelID(machine.ID),
-			MachineID:   machine.ID,
-			Name:        machine.Name + " SSH",
-			Subdomain:   "",
-			LocalPort:   22,
-			RatholePort: machine.TunnelPort,
-			Protocol:    "tcp",
-			Private:     !machine.PublicSSH,
-			Status:      machineTunnelStatus(machine.Status),
-			Managed:     true,
-			Kind:        "machine-ssh",
-			CreatedAt:   machine.CreatedAt,
-			UpdatedAt:   machine.UpdatedAt,
-		})
 
 		// gopher-agent back-channel — only when the machine has agent
 		// fields allocated (always for new bootstraps; populated on
@@ -131,18 +148,45 @@ func (s *TunnelService) ListByMachine(machineID string) ([]db.Tunnel, error) {
 }
 
 func (s *TunnelService) Get(id string) (*db.Tunnel, error) {
-	return db.GetTunnel(id)
+	t, err := db.GetTunnel(id)
+	if err != nil {
+		return nil, err
+	}
+	presentTunnelStatus(t)
+	return t, nil
 }
 
 // Probe runs a live connectivity check on the tunnel and returns one of
 // "active", "idle", or "offline". It uses the same logic as the background
 // monitor so the result is consistent with what the dashboard shows.
 func (s *TunnelService) Probe(t *db.Tunnel) string {
-	return probeTunnel(*t)
+	return tunnelStatus(*t)
 }
 
 func (s *TunnelService) NextPort() (int, error) {
 	return db.NextRatholePort()
+}
+
+// CheckServerPort reports whether an explicit rathole (server) port would be
+// accepted by Create: it must be non-privileged, unassigned in the DB, and
+// actually free on the box. Lets the UI warn (and block submit) before the user
+// hits Create, catching process-occupied ports (rathole's 2333, Caddy, the
+// dashboard) that the client-side DB check can't see. Mirrors the checks in
+// Create so the two never disagree.
+func (s *TunnelService) CheckServerPort(port int) (available bool, reason string) {
+	if port == 0 {
+		return true, ""
+	}
+	if err := config.ValidatePort(port); err != nil {
+		return false, err.Error()
+	}
+	if exists, err := db.CheckRatholePortExists(port); err == nil && exists {
+		return false, fmt.Sprintf("port %d is already assigned to another tunnel or machine", port)
+	}
+	if !db.PortAvailable(port) {
+		return false, fmt.Sprintf("port %d is already in use by a process on the server", port)
+	}
+	return true, ""
 }
 
 func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) {
@@ -184,6 +228,8 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 
 	var ratholePort int
 	if req.RatholePort != 0 {
+		// ValidatePort also rejects privileged ports (<1024): the rathole port is
+		// a listener on the edge, so it must be non-privileged.
 		if err := config.ValidatePort(req.RatholePort); err != nil {
 			return nil, &apperrors.ValidationError{Field: "rathole_port", Message: err.Error()}
 		}
@@ -193,6 +239,17 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 		}
 		if exists {
 			return nil, &apperrors.ConflictError{Message: fmt.Sprintf("server port %d is already in use by another tunnel", req.RatholePort)}
+		}
+		// Free in the DB isn't enough — the port must also be free on the box.
+		// The auto-allocator OS-probes every candidate; the explicit path must
+		// too, or a user-supplied port that's held by a core listener (rathole's
+		// own 2333 control channel, Caddy on 80/443, the dashboard, sshd) or any
+		// other process passes validation and then silently fails at rathole
+		// bind time — colliding with 2333 drops the whole tunnel server. Probing
+		// (rather than a hardcoded reserved list) means gopher enforces "nothing
+		// is listening here" without needing to know what owns the port.
+		if !db.PortAvailable(req.RatholePort) {
+			return nil, &apperrors.ConflictError{Message: fmt.Sprintf("server port %d is already in use by a process on the server", req.RatholePort)}
 		}
 		ratholePort = req.RatholePort
 	} else {
@@ -205,6 +262,32 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 
 	// Bot protection requires a subdomain (needs Host-header routing through proxy).
 	botProtection := req.BotProtectionEnabled && req.Subdomain != "" && transport != "udp"
+	// Password auth has the same requirement (routes through the proxy on a
+	// subdomain) and is a separate, distinct gate from the dashboard login.
+	authProtection := req.AuthEnabled && req.Subdomain != "" && transport != "udp"
+	// Bot protection and auth are only enforceable if the raw port is closed —
+	// otherwise they're trivially bypassed by hitting the rathole port directly.
+	// Both imply (and enforce) private.
+	private := req.Private || botProtection || authProtection
+	// UDP is always Direct: "private" means the rathole port binds 127.0.0.1
+	// and the tunnel is served through Caddy — which routes HTTP/HTTPS only,
+	// so a private UDP tunnel would be reachable from nowhere but the VPS.
+	if transport == "udp" {
+		private = false
+	}
+
+	// A newly-enabled password gate must be given a password.
+	authHash := ""
+	if authProtection {
+		if req.AuthPassword == "" {
+			return nil, &apperrors.ValidationError{Field: "auth_password", Message: "a password is required to enable password protection"}
+		}
+		h, herr := bcrypt.GenerateFromPassword([]byte(req.AuthPassword), bcrypt.DefaultCost)
+		if herr != nil {
+			return nil, herr
+		}
+		authHash = string(h)
+	}
 
 	tunnel := &db.Tunnel{
 		ID:                   shortToken(),
@@ -213,14 +296,18 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 		Subdomain:            req.Subdomain,
 		LocalPort:            req.LocalPort,
 		RatholePort:          ratholePort,
-		RatholeToken:         shortToken(),
+		RatholeToken:         secretToken(),
 		Protocol:             "tcp",
 		Transport:            transport,
 		NoTLS:                req.NoTLS,
-		Private:              req.Private,
+		Private:              private,
 		BotProtectionEnabled: botProtection,
 		BotProtectionTTL:     req.BotProtectionTTL,
 		BotProtectionAllowIP: req.BotProtectionAllowIP,
+		AuthEnabled:          authProtection,
+		AuthPasswordHash:     authHash,
+		AuthTTL:              req.AuthTTL,
+		AuthAllowIP:          req.AuthAllowIP,
 		TLSSkipVerify:        req.TLSSkipVerify && req.Subdomain != "" && !req.NoTLS && transport != "udp",
 		Status:               "inactive",
 		CreatedAt:            time.Now(),
@@ -241,17 +328,74 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 		log.Printf("tunnel create: pushing config for tunnel %s to machine %s (port %d)", tunnel.ID, machine.ID, machine.TunnelPort)
 		if cfgErr := s.local.AddServiceTunnel(tunnel, machine); cfgErr != nil {
 			log.Printf("tunnel create: config push failed for tunnel %s: %v", tunnel.ID, cfgErr)
-			// Annotate the tunnel with the error but don't fail the creation
+			// Annotate status (transient — the 30s monitor overwrites it) AND
+			// record a persistent event, so the operator can still tell "config
+			// push failed" from a plain "offline" after the status is clobbered.
 			tunnel.Status = fmt.Sprintf("config-error: %v", cfgErr)
 			_ = db.UpdateTunnel(tunnel)
+			db.RecordEvent(&db.Event{
+				Severity:     "error",
+				Source:       "tunnel",
+				Kind:         "tunnel_config_error",
+				ResourceType: "tunnel",
+				ResourceID:   tunnel.ID,
+				ResourceName: tunnel.Name,
+				Message:      fmt.Sprintf("Tunnel %q config push failed — it won't serve until fixed: %v", tunnel.Name, cfgErr),
+			})
 		} else {
 			log.Printf("tunnel create: config push succeeded for tunnel %s", tunnel.ID)
+			// Rathole binds before Caddy serves the URL (reload applied +
+			// cert issued) — present "provisioning" until verified (#93).
+			beginCaddyVerification(tunnel, settings.Domain)
+			// The "inactive" placeholder set above otherwise sits untouched
+			// until MonitorService's own 30s ticker happens to fall due, plus
+			// the dashboard's own poll interval on top — up to ~45s showing
+			// "inactive" with nothing actually wrong. Poll tightly right after
+			// creation so the real status lands as soon as the client's
+			// rathole-client has had a moment to bring the new service up.
+			go goSafe("awaitTunnelReady", func() { awaitTunnelReady(tunnel.ID) })
 		}
 	} else if machErr != nil {
 		log.Printf("tunnel create: could not load machine %s: %v — skipping config push", req.MachineID, machErr)
 	}
 
 	return tunnel, nil
+}
+
+const (
+	tunnelReadyPoll    = 2 * time.Second
+	tunnelReadyTimeout = 20 * time.Second
+)
+
+// awaitTunnelReady polls a freshly created tunnel's real status shortly after
+// creation, rather than leaving the "inactive" placeholder set in Create()
+// to sit until MonitorService's own 30s ticker happens to fall due — see the
+// call site in Create() for why that gap matters (up to ~45s of a stale
+// "inactive" badge with nothing wrong). Stops as soon as a definitive status
+// is observed; MonitorService's normal 30s cycle (with its own
+// offline-debounce) takes over from there regardless of whether this ever
+// fires — this is purely a latency improvement, not a new source of truth.
+func awaitTunnelReady(tunnelID string) {
+	deadline := time.Now().Add(tunnelReadyTimeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(tunnelReadyPoll)
+		t, err := db.GetTunnel(tunnelID)
+		if err != nil {
+			return // deleted before it ever came up
+		}
+		status := tunnelStatus(*t)
+		if status == "inactive" || status == "offline" {
+			// Not up yet, or still ambiguous this early — a lone "offline"
+			// read moments after creation is expected (the client hasn't
+			// necessarily finished bringing the new service channel up yet)
+			// and shouldn't be persisted here; MonitorService's own
+			// 2-consecutive-reads debounce is the right place for a real
+			// offline determination.
+			continue
+		}
+		_ = db.SetTunnelStatus(tunnelID, status)
+		return
+	}
 }
 
 func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunnel, error) {
@@ -273,6 +417,13 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 		return nil, err
 	}
 
+	// Capture the original subdomain BEFORE mutating it below. The Caddy
+	// reconcile near the end compares oldSubdomain against the final value to
+	// decide whether to rewrite conf.d/<id>.caddy. Capturing it after the
+	// mutation made that compare a no-op, so subdomain edits updated the DB
+	// (and the UI) but never touched Caddy — it kept serving the old block.
+	oldSubdomain := tunnel.Subdomain
+
 	if req.Subdomain != tunnel.Subdomain {
 		if req.Subdomain != "" && settings.Domain == "" {
 			return nil, &apperrors.ValidationError{Field: "subdomain", Message: "URL routing is disabled; leave subdomain empty"}
@@ -292,20 +443,48 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 
 	oldPrivate := tunnel.Private
 	oldBotProtection := tunnel.BotProtectionEnabled
+	oldAuthEnabled := tunnel.AuthEnabled
 	oldTLSSkipVerify := tunnel.TLSSkipVerify
 	oldLocalPort := tunnel.LocalPort
-	oldSubdomain := tunnel.Subdomain
 	tunnel.Name = req.Name
 	tunnel.LocalPort = req.LocalPort
 	tunnel.Private = req.Private
-	// Private tunnels cannot have a public subdomain URL
-	if req.Private {
-		tunnel.Subdomain = ""
+	// UDP is always Direct — same coercion as Create: Caddy can't serve a
+	// loopback-bound UDP port, so private would mean unreachable.
+	if tunnel.Transport == "udp" {
+		tunnel.Private = false
 	}
+	// Private tunnels KEEP their subdomain — "private" means the rathole port
+	// binds to 127.0.0.1 (no raw public port), but the tunnel is still served
+	// via its Caddy subdomain (reverse-proxy-only). Clearing the subdomain here
+	// was the bug that made the URL hint vanish on toggle-to-private.
 	// Bot protection requires a subdomain and TCP transport.
 	tunnel.BotProtectionEnabled = req.BotProtectionEnabled && tunnel.Subdomain != "" && tunnel.Transport != "udp"
+	// Bot protection is only enforceable if the raw port is closed (otherwise it's
+	// bypassed by hitting the rathole port directly), so it implies private.
+	if tunnel.BotProtectionEnabled {
+		tunnel.Private = true
+	}
 	tunnel.BotProtectionTTL = req.BotProtectionTTL
 	tunnel.BotProtectionAllowIP = req.BotProtectionAllowIP
+	// Password auth — same subdomain/TCP guards + private coercion as bot
+	// protection. An empty AuthPassword keeps the existing hash; enabling with no
+	// password ever set is rejected.
+	tunnel.AuthEnabled = req.AuthEnabled && tunnel.Subdomain != "" && tunnel.Transport != "udp"
+	if tunnel.AuthEnabled {
+		tunnel.Private = true
+		if req.AuthPassword != "" {
+			h, herr := bcrypt.GenerateFromPassword([]byte(req.AuthPassword), bcrypt.DefaultCost)
+			if herr != nil {
+				return nil, herr
+			}
+			tunnel.AuthPasswordHash = string(h)
+		} else if tunnel.AuthPasswordHash == "" {
+			return nil, &apperrors.ValidationError{Field: "auth_password", Message: "a password is required to enable password protection"}
+		}
+	}
+	tunnel.AuthTTL = req.AuthTTL
+	tunnel.AuthAllowIP = req.AuthAllowIP
 	tunnel.TLSSkipVerify = req.TLSSkipVerify && tunnel.Subdomain != "" && !tunnel.NoTLS && tunnel.Transport != "udp"
 	tunnel.UpdatedAt = time.Now()
 
@@ -313,13 +492,31 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 		return nil, err
 	}
 
-	// If privacy setting changed, update rathole bind_addr and firewall.
-	if oldPrivate != req.Private && s.local != nil {
-		log.Printf("tunnel update: privacy changed for %s (private=%v), reconciling server config", tunnel.ID, req.Private)
+	// If privacy setting changed, update rathole bind_addr and firewall. Compare
+	// against the final tunnel.Private (not req.Private) — bot protection can
+	// force private even when the request didn't ask for it.
+	if oldPrivate != tunnel.Private && s.local != nil {
+		log.Printf("tunnel update: privacy changed for %s (private=%v), reconciling server config", tunnel.ID, tunnel.Private)
 		if err := s.local.ReconcileServerConfig(); err != nil {
 			log.Printf("tunnel update: reconcile failed: %v", err)
 		}
-		ApplyTunnelPort(tunnel.RatholePort, tunnel.Transport, tunnel.Private)
+		// Firewall failures used to be silently swallowed (ApplyTunnelPort was
+		// void) — this is specifically the "make this private" security-tightening
+		// action, so a failure here means the port may still be reachable despite
+		// the badge already saying Private. Surface it the same way a config-push
+		// failure is surfaced on create: a visible config-error status, not just
+		// a server log line nobody's watching.
+		if ferr := ApplyTunnelPort(tunnel.RatholePort, tunnel.Transport, tunnel.Private); ferr != nil {
+			tunnel.Status = fmt.Sprintf("config-error: firewall: %v", ferr)
+			_ = db.UpdateTunnel(tunnel)
+		}
+		// The Caddy upstream depends on privacy (private → localhost, public →
+		// bind_ip), and on a bind_ip host the existing block is now stale. The
+		// subdomain itself didn't change, so rewrite it here. No-ops without a
+		// subdomain or configured domain.
+		if err := s.local.WriteServiceTunnelCaddy(tunnel); err != nil {
+			log.Printf("tunnel update: rewrite caddy block after privacy change for %s: %v", tunnel.ID, err)
+		}
 	}
 
 	// If LocalPort changed, the client.toml's `local_addr = "localhost:<port>"`
@@ -342,37 +539,32 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 	//   "x" → "y"       : overwrite block, reload
 	//   "x" → ""        : remove block (privacy flipped to private), reload
 	if oldSubdomain != tunnel.Subdomain && s.local != nil {
-		settings, sErr := db.GetSettings()
 		switch {
-		case sErr != nil:
-			log.Printf("tunnel update: load settings for caddy: %v", sErr)
 		case tunnel.Subdomain == "":
-			// Subdomain cleared → drop the Caddy file.
+			// Subdomain cleared (or flipped private) → drop the Caddy file.
 			if err := s.local.RemoveServiceTunnelCaddy(tunnel); err != nil {
 				log.Printf("tunnel update: remove caddy block for %s: %v", tunnel.ID, err)
 			}
-		case settings.Domain != "" && tunnel.Transport != "udp" && !tunnel.Private:
-			managedPath := managedTunnelCaddyPath(tunnel.ID)
-			block := buildTunnelCaddyBlock(tunnel.Subdomain, settings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, settings.BindIP, tunnel.TLSSkipVerify)
-			if writeErr := writeLocalFile(managedPath, block); writeErr != nil {
-				log.Printf("tunnel update: rewrite caddy block for %s: %v", tunnel.ID, writeErr)
-			} else if reloadErr := systemctlReload("caddy"); reloadErr != nil {
-				log.Printf("tunnel update: caddy reload after subdomain change for %s: %v", tunnel.ID, reloadErr)
+		case tunnel.Transport != "udp":
+			// Subdomain set/changed → (re)write the block (private tunnels
+			// included — they're reverse-proxy-only). No-ops if no domain is
+			// configured. The managed file is keyed by tunnel ID, so the
+			// rewrite replaces the old subdomain's block in place.
+			if err := s.local.WriteServiceTunnelCaddy(tunnel); err != nil {
+				log.Printf("tunnel update: rewrite caddy block for %s: %v", tunnel.ID, err)
+			} else if settings, sErr := db.GetSettings(); sErr == nil {
+				// A new fqdn needs its own certificate — same provisioning
+				// window as create (#93).
+				beginCaddyVerification(tunnel, settings.Domain)
 			}
 		}
 	}
 
 	// If bot protection or TLS skip verify toggled (and the subdomain branch
 	// above didn't already rewrite), refresh the Caddy block.
-	if oldSubdomain == tunnel.Subdomain && (oldBotProtection != tunnel.BotProtectionEnabled || oldTLSSkipVerify != tunnel.TLSSkipVerify) && tunnel.Subdomain != "" && s.local != nil {
-		if svcSettings, svcErr := db.GetSettings(); svcErr == nil && svcSettings.Domain != "" {
-			managedPath := managedTunnelCaddyPath(tunnel.ID)
-			block := buildTunnelCaddyBlock(tunnel.Subdomain, svcSettings.Domain, tunnel.RatholePort, tunnel.NoTLS, tunnel.BotProtectionEnabled, svcSettings.BindIP, tunnel.TLSSkipVerify)
-			if writeErr := writeLocalFile(managedPath, block); writeErr != nil {
-				log.Printf("tunnel update: failed to rewrite Caddy block for %s: %v", tunnel.ID, writeErr)
-			} else if reloadErr := systemctlReload("caddy"); reloadErr != nil {
-				log.Printf("tunnel update: caddy reload failed for %s: %v", tunnel.ID, reloadErr)
-			}
+	if oldSubdomain == tunnel.Subdomain && (oldBotProtection != tunnel.BotProtectionEnabled || oldAuthEnabled != tunnel.AuthEnabled || oldTLSSkipVerify != tunnel.TLSSkipVerify) && tunnel.Subdomain != "" && s.local != nil {
+		if err := s.local.WriteServiceTunnelCaddy(tunnel); err != nil {
+			log.Printf("tunnel update: refresh caddy block for %s: %v", tunnel.ID, err)
 		}
 	}
 
@@ -398,7 +590,7 @@ func (s *TunnelService) updateMachineSSHPrivacy(machineID string, private bool) 
 			log.Printf("tunnel update: reconcile failed: %v", err)
 		}
 		if machine.PublicSSH {
-			ApplyTunnelPort(machine.TunnelPort, "tcp", false)
+			ApplyPublicSSHPort(machine.TunnelPort) // public SSH → edge rate-limited
 		} else {
 			ApplyTunnelPort(machine.TunnelPort, "tcp", true)
 		}
@@ -447,11 +639,19 @@ func (s *TunnelService) Delete(id string) error {
 	RevokeTunnelPort(tunnel.RatholePort, tunnel.Transport)
 
 	if s.local != nil {
+		// Best-effort: the DB row is already gone (the source of truth for the
+		// next reconcile), so run BOTH cleanup steps even if one fails — a
+		// reconcile error must not skip the Caddy-block removal, or the
+		// subdomain keeps 502-serving a tunnel that no longer exists.
+		var cleanupErrs []string
 		if err := s.local.ReconcileServerConfig(); err != nil {
-			return err
+			cleanupErrs = append(cleanupErrs, fmt.Sprintf("server reconcile: %v", err))
 		}
 		if err := s.local.RemoveServiceTunnelCaddy(tunnel); err != nil {
-			return err
+			cleanupErrs = append(cleanupErrs, fmt.Sprintf("caddy cleanup: %v", err))
+		}
+		if len(cleanupErrs) > 0 {
+			return fmt.Errorf("tunnel deleted, but edge cleanup was incomplete (will self-heal on next reconcile): %s", strings.Join(cleanupErrs, "; "))
 		}
 	}
 	return nil

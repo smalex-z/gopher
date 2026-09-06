@@ -209,7 +209,7 @@ func TestBrowserFetchWithCookieIsForwarded(t *testing.T) {
 	rec1 := httptest.NewRecorder()
 	h.ServeHTTP(rec1, req1)
 	nonce := extractNonce(t, rec1.Body.String())
-	solution := solvePoW(nonce, 5)
+	solution := solvePoW(nonce, 4)
 
 	form := url.Values{"nonce": {nonce}, "solution": {solution}, "redirect": {"/"}}
 	req2 := httptest.NewRequest("POST", "/bot-verify", strings.NewReader(form.Encode()))
@@ -287,6 +287,10 @@ func TestIPAllowlist_BypassesChallenge(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Host = "allowlisted.example.com"
+	// Real path: request arrives from local Caddy (loopback), which appends the
+	// real client IP to X-Forwarded-For. clientIP trusts XFF only from a
+	// loopback peer.
+	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("X-Forwarded-For", "10.0.0.1")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -294,6 +298,19 @@ func TestIPAllowlist_BypassesChallenge(t *testing.T) {
 	// Should not get a 403 challenge.
 	if rec.Code == http.StatusForbidden && strings.Contains(rec.Body.String(), "crypto.subtle") {
 		t.Error("allowlisted IP should not receive challenge page")
+	}
+
+	// SECURITY: a direct (non-loopback) request that SPOOFS the allowlisted IP
+	// in X-Forwarded-For must NOT bypass the challenge — XFF from an untrusted
+	// peer is ignored.
+	spoof := httptest.NewRequest("GET", "/", nil)
+	spoof.Host = "allowlisted.example.com"
+	spoof.RemoteAddr = "203.0.113.99:5555" // attacker, not behind our Caddy
+	spoof.Header.Set("X-Forwarded-For", "10.0.0.1")
+	srec := httptest.NewRecorder()
+	h.ServeHTTP(srec, spoof)
+	if srec.Code != http.StatusForbidden || !strings.Contains(srec.Body.String(), "crypto.subtle") {
+		t.Errorf("spoofed XFF from a non-loopback peer must still get the challenge; got code=%d", srec.Code)
 	}
 }
 
@@ -332,14 +349,14 @@ func TestFullPoWFlow(t *testing.T) {
 	nonce := extractNonce(t, body1)
 	t.Logf("nonce from challenge page: %s", nonce)
 
-	// --- Step 2: solve PoW (difficulty 5 = ~1M iterations, fast in Go) ---
-	solution := solvePoW(nonce, 5)
+	// --- Step 2: solve PoW at the production difficulty (4 hex zeros) ---
+	solution := solvePoW(nonce, 4)
 	t.Logf("solved: nonce=%s solution=%s", nonce, solution)
 
 	// Verify our solution is actually correct.
 	sum := sha256.Sum256([]byte(nonce + ":" + solution))
 	hash := hex.EncodeToString(sum[:])
-	if !strings.HasPrefix(hash, "00000") {
+	if !strings.HasPrefix(hash, "0000") {
 		t.Fatalf("solvePoW produced wrong answer: hash=%s", hash)
 	}
 
