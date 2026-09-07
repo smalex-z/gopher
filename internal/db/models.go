@@ -264,10 +264,18 @@ type AppSettings struct {
 	// the noise pubkey or they silently break the moment the server flips to
 	// noise. Empty when nothing was detected. Set once during migration;
 	// cleared only when the operator dismisses the dashboard banner.
-	RatholeCustomServicesWarning          string    `json:"-"`
-	RatholeCustomServicesWarningDismissed bool      `json:"-"`
-	CreatedAt                             time.Time `json:"created_at"`
-	UpdatedAt                             time.Time `json:"updated_at"`
+	RatholeCustomServicesWarning          string `json:"-"`
+	RatholeCustomServicesWarningDismissed bool   `json:"-"`
+	// RatholeNoiseBlockedMachines is a JSON array of machine names that were
+	// unreachable when the noise migration last tried to run. Non-empty means
+	// the migration DEFERRED itself: nothing was changed, the install is still
+	// on plaintext transport with every tunnel working, and it will retry on
+	// the next restart. The dashboard surfaces this so the operator knows
+	// which origins to bring back rather than discovering a silent
+	// half-upgrade later. Cleared on a successful migration.
+	RatholeNoiseBlockedMachines string    `json:"-"`
+	CreatedAt                   time.Time `json:"created_at"`
+	UpdatedAt                   time.Time `json:"updated_at"`
 }
 
 // FirewallRule is a user-defined rule applied to GOPHER_CUSTOM.
