@@ -139,6 +139,12 @@ func (h *BootstrapHandler) Register(w http.ResponseWriter, r *http.Request) {
 // Nimbus (and similar) can run: curl <bootstrap_url> | sh
 // The returned script is a thin wrapper that invokes the main bootstrap with the token pre-filled.
 func (h *BootstrapHandler) ServeTokenizedScript(w http.ResponseWriter, r *http.Request) {
+	// Same per-IP throttle as the other public bootstrap endpoints: without it
+	// this is an unthrottled valid/invalid oracle for token guessing.
+	if !h.svc.AllowAttempt(service.ClientIP(r)) {
+		response.Error(w, http.StatusTooManyRequests, "too many attempts; try again later")
+		return
+	}
 	token := chi.URLParam(r, "token")
 	bt, err := db.GetBootstrapToken(token)
 	if err != nil || bt.UsedAt != nil || time.Now().After(bt.ExpiresAt) {
