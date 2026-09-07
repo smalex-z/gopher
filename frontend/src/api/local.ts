@@ -37,6 +37,11 @@ export interface LocalServiceStatus {
    *  need a manual noise pubkey update on their client side. Set during
    *  noise migration. Empty when nothing needs attention or after dismissal. */
   rathole_custom_services_warning: string[]
+  /** Machines that were unreachable when the encrypted-transport (noise)
+   *  migration last tried to run. Non-empty means the migration deferred
+   *  itself and changed nothing: still on plaintext, all tunnels up. It
+   *  retries on the next restart. Empty when nothing is blocking. */
+  rathole_noise_blocked_machines: string[]
 }
 
 export interface FirewallStatus {

@@ -188,22 +188,14 @@ func runServer(args []string) {
 				log.Printf("startup: failed to reconcile firewall: %v", err)
 			}
 		}
-		// One-shot upgrade from plaintext rathole transport → encrypted noise.
-		// Runs in a goroutine so a slow SSH push to one offline machine doesn't
-		// hold up the dashboard coming online. No-op on installs that have
-		// already migrated or haven't completed the wizard yet.
-		go func() {
-			if err := localSvc.MigrateRatholeNoise(); err != nil {
-				log.Printf("startup: rathole noise migration: %v", err)
-			}
-			// Move the rathole transport host off the bare apex onto
-			// router.<domain> so the apex can be repointed without dropping
-			// tunnels. No-op once migrated / on fresh installs. Runs after the
-			// noise migration so a single reconnect cycle carries both changes.
-			if err := localSvc.MigrateServerHostToRouter(); err != nil {
-				log.Printf("startup: server-host migration: %v", err)
-			}
-		}()
+		// NOTE: the rathole noise migration deliberately does NOT run here.
+		// It pushes a new client.toml to every machine over the live tunnel
+		// before flipping the server, so it can only run once the supervisor
+		// has actually started rathole — which happens much further down.
+		// Running it here meant every push failed in milliseconds against a
+		// rathole that did not exist yet, and the flip then stranded the whole
+		// fleet on plaintext configs. See the call site after
+		// startBundledChildren().
 	} else {
 		log.Printf("dev mode: skipping rathole/Caddy/sudoers/authorized_keys reconciles")
 	}
@@ -293,6 +285,33 @@ func runServer(args []string) {
 	sup, supErr := startBundledChildren()
 	if supErr != nil {
 		log.Printf("Warning: bundled child startup failed: %v", supErr)
+	}
+
+	// One-shot upgrade from plaintext rathole transport → encrypted noise.
+	//
+	// MUST come after startBundledChildren: the migration's whole safety
+	// property is that it pushes each machine a noise-ready client.toml over
+	// the still-working plaintext tunnel BEFORE flipping the server. That
+	// requires a running rathole. Previously this ran during the startup
+	// reconcile, ~200ms before the supervisor started rathole, so every push
+	// failed instantly and the subsequent flip dropped every machine on the
+	// install. The migration additionally waits for the fleet to reconnect and
+	// refuses to flip unless every machine confirmed its new config.
+	//
+	// Still a goroutine: waiting for the fleet must not hold up the dashboard.
+	if !*devMode {
+		go func() {
+			if err := localSvc.MigrateRatholeNoise(); err != nil {
+				log.Printf("startup: rathole noise migration: %v", err)
+			}
+			// Move the rathole transport host off the bare apex onto
+			// router.<domain> so the apex can be repointed without dropping
+			// tunnels. No-op once migrated / on fresh installs. Runs after the
+			// noise migration so a single reconnect cycle carries both changes.
+			if err := localSvc.MigrateServerHostToRouter(); err != nil {
+				log.Printf("startup: server-host migration: %v", err)
+			}
+		}()
 	}
 
 	// Run the server in a goroutine so the main thread can wait on signals
