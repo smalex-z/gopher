@@ -5,6 +5,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import ToastContainer from './components/ToastContainer'
 import AgentMigrationBanner from './components/AgentMigrationBanner'
 import CustomServicesWarningBanner from './components/CustomServicesWarningBanner'
+import NoiseMigrationBlockedBanner from './components/NoiseMigrationBlockedBanner'
 import DashboardPage from './pages/DashboardPage'
 import VPSPage from './pages/VPSPage' // repurposed as Server Info page
 import MachinesPage from './pages/MachinesPage'
@@ -189,6 +190,7 @@ function AppShell() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <AgentMigrationBanner />
         <CustomServicesWarningBanner />
+        <NoiseMigrationBlockedBanner />
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/vps" element={<VPSPage />} />

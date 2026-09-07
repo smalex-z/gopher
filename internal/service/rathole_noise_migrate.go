@@ -1,16 +1,44 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/smalex-z/gopher/internal/config"
 	"github.com/smalex-z/gopher/internal/db"
 	"github.com/smalex-z/gopher/internal/paths"
+	sshpkg "github.com/smalex-z/gopher/internal/ssh"
+)
+
+// Overridable in tests so the fleet-wait path can be exercised without
+// actually sleeping for minutes.
+var (
+	// noiseMigrationFleetWait bounds how long the migration waits for the
+	// fleet to come back after a restart before giving up FOR THIS BOOT. The
+	// upgrade path restarts gopher, which restarts the supervised rathole,
+	// which drops every machine's control channel; clients reconnect within
+	// seconds, but a loaded or slow origin can take longer. Giving up is not
+	// a failure — the migration simply defers to the next boot, leaving the
+	// install exactly as it was (plaintext, everything working).
+	noiseMigrationFleetWait = 5 * time.Minute
+	// noiseMigrationProbeInterval is how often the fleet is re-probed while
+	// waiting for machines to reconnect.
+	noiseMigrationProbeInterval = 10 * time.Second
+	// noiseMigrationProbeTimeout bounds a single machine's reachability probe.
+	noiseMigrationProbeTimeout = 10 * time.Second
+	// noiseMigrationSettleWait bounds how long the migration waits AFTER the
+	// server flips for the fleet to come back on the encrypted transport. A
+	// client that received the new config reconnects within one rathole retry
+	// cycle, so this only needs to cover a slow origin. Anything still missing
+	// when it expires means the config did not actually take effect out there
+	// and the migration rolls the whole install back to plaintext.
+	noiseMigrationSettleWait = 90 * time.Second
 )
 
 var ratholeServerTomlPath = paths.RatholeConfig
@@ -127,55 +155,202 @@ func EnsureRatholeNoiseKeys() (priv, pub string, err error) {
 	return priv, pub, err
 }
 
-// MigrateRatholeNoise is the one-shot upgrade migration that hot-converts a
+// migratableMachines returns the machines the noise migration must carry
+// across the transport flip: anything actually bootstrapped. A machine with
+// neither an SSH tunnel port nor an agent port has never completed bootstrap,
+// so there is no client.toml out there to break.
+func migratableMachines(machines []db.Machine) []*db.Machine {
+	out := make([]*db.Machine, 0, len(machines))
+	for i := range machines {
+		m := &machines[i]
+		if m.TunnelPort == 0 && m.AgentRemotePort == 0 {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// probeMachineReachable reports whether the server can currently reach the
+// machine's origin through the tunnel — read-only, no config is written.
+//
+// This is the precondition the migration's push step needs, so it must mirror
+// updateClientToml's transport selection EXACTLY: agent gRPC first, then SSH
+// over the tunnel. Probing the agent alone would call a perfectly reachable
+// machine unreachable whenever its agent is down or stale but SSH still works
+// — and since an unreachable machine defers the whole migration, an agent-only
+// probe would block the upgrade forever on a machine the push could have
+// handled fine.
+//
+// It deliberately does not settle for a TCP dial to the forwarded port:
+// rathole binds a service's listener whether or not a client holds the
+// control channel, so a successful dial proves nothing about the origin
+// actually being there.
+func (s *LocalSetupService) probeMachineReachable(m *db.Machine) error {
+	var agentErr error
+	if m.AgentInstalled && m.AgentRemotePort > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), noiseMigrationProbeTimeout)
+		defer cancel()
+		if _, err := NewAgentClient(m).GetRatholeConfig(ctx); err == nil {
+			return nil
+		} else {
+			agentErr = err
+		}
+	}
+
+	// SSH fallback — the same one the push falls back to.
+	sshKey, err := db.GetSSHKeyForMachine(m)
+	if err != nil || sshKey.PrivateKey == "" {
+		if agentErr != nil {
+			return fmt.Errorf("agent unreachable (%v) and no stored SSH private key to fall back on", agentErr)
+		}
+		return fmt.Errorf("no agent and no stored SSH private key — cannot reach this machine to migrate it")
+	}
+	client, err := sshpkg.NewClient(TunnelDialHost(m), m.TunnelPort, m.Username, sshKey.PrivateKey)
+	if err != nil {
+		if agentErr != nil {
+			return fmt.Errorf("agent unreachable (%v) and ssh unreachable: %w", agentErr, err)
+		}
+		return fmt.Errorf("ssh unreachable: %w", err)
+	}
+	_ = client.Close()
+	return nil
+}
+
+// awaitFleetReachable blocks until every machine answers a reachability probe
+// or the deadline passes, and returns the machines still unreachable.
+//
+// Called WITHOUT reconcileMu held: this can wait minutes, and holding the
+// reconcile lock that long would block every dashboard action that touches
+// rathole config (tunnel create, bootstrap, machine delete).
+func (s *LocalSetupService) awaitFleetReachable(fleet []*db.Machine, within time.Duration) []string {
+	deadline := time.Now().Add(within)
+	pending := append([]*db.Machine(nil), fleet...)
+	for {
+		var stillPending []*db.Machine
+		var reasons []string
+		for _, m := range pending {
+			if err := s.probeMachineReachable(m); err != nil {
+				stillPending = append(stillPending, m)
+				reasons = append(reasons, fmt.Sprintf("%s (%v)", m.Name, err))
+			}
+		}
+		if len(stillPending) == 0 {
+			return nil
+		}
+		log.Printf("rathole noise migration: waiting for %d machine(s) to come back: %s", len(stillPending), strings.Join(reasons, "; "))
+		if time.Now().After(deadline) {
+			names := make([]string, 0, len(stillPending))
+			for _, m := range stillPending {
+				names = append(names, m.Name)
+			}
+			log.Printf("rathole noise migration: still unreachable after %s: %s", within, strings.Join(reasons, "; "))
+			return names
+		}
+		pending = stillPending
+		time.Sleep(noiseMigrationProbeInterval)
+	}
+}
+
+// recordNoiseMigrationBlocked persists (or clears) the list of machines that
+// blocked the migration, so the dashboard can tell the operator exactly which
+// origins to bring back — and that nothing has been changed in the meantime.
+func recordNoiseMigrationBlocked(names []string) {
+	payload := ""
+	if len(names) > 0 {
+		if b, err := json.Marshal(names); err == nil {
+			payload = string(b)
+		}
+	}
+	if err := db.MutateSettings(func(a *db.AppSettings) error {
+		a.RatholeNoiseBlockedMachines = payload
+		return nil
+	}); err != nil {
+		log.Printf("rathole noise migration: persist blocked-machine list: %v", err)
+	}
+}
+
+// clearRatholeNoiseKeys removes a keypair minted for a migration that then had
+// to be abandoned. Critical on the abort path: ReconcileServerConfig emits the
+// [server.transport] noise block whenever the private key is non-empty, so
+// leaving a key behind would let the very next unrelated reconcile flip the
+// server to noise with the fleet still on plaintext — the exact mass-outage
+// this migration exists to avoid.
+func clearRatholeNoiseKeys() {
+	if err := db.MutateSettings(func(a *db.AppSettings) error {
+		a.RatholeNoisePrivKey = ""
+		a.RatholeNoisePubKey = ""
+		return nil
+	}); err != nil {
+		log.Printf("rathole noise migration: roll back noise keypair: %v", err)
+	}
+}
+
+// rollbackNoisePushes re-pushes a plaintext client.toml to machines that
+// already received the noise config before the migration aborted. Without
+// this they would sit holding a noise config while the server stays plaintext
+// and fail to reconnect every few seconds — broken by a migration that never
+// even completed. Best-effort: a machine that has gone unreachable in the
+// meantime keeps its ConfigPushPending flag and is repaired by the health
+// loop's retry.
+func (s *LocalSetupService) rollbackNoisePushes(pushed []*db.Machine, ratholeHost string) {
+	for _, m := range pushed {
+		machineTunnels, terr := db.GetTunnelsByMachine(m.ID)
+		if terr != nil {
+			log.Printf("rathole noise migration: rollback %s: load tunnels: %v", m.Name, terr)
+			continue
+		}
+		transformer := func(existing string) (string, error) {
+			return mergeClientManagedConfig(existing, m, machineTunnels, ratholeHost, "")
+		}
+		if err := s.updateClientToml(m, transformer); err != nil {
+			log.Printf("rathole noise migration: rollback %s to plaintext failed: %v", m.Name, err)
+		}
+	}
+}
+
+// MigrateRatholeNoise is the one-shot upgrade migration that converts a
 // running install from rathole's plaintext TCP transport to encrypted noise.
 //
-// The order is load-bearing:
+// The invariant: an upgrade must never leave a machine stranded. A plaintext
+// client cannot talk to a noise server and vice versa, so the fleet can only
+// move as a unit. Therefore the migration is all-or-nothing:
 //
-//  1. Generate the keypair. Any subsequent server-config rebuild (including
-//     one triggered by another goroutine) will start emitting [server.transport].
-//     We do NOT reconcile yet — flipping the server first would sever every
-//     plaintext client and the subsequent client.toml push wouldn't have a
-//     working tunnel to ride on.
+//  1. Wait (unlocked) for every bootstrapped machine to be reachable. The
+//     upgrade just restarted rathole, so the fleet is mid-reconnect; probing
+//     immediately is meaningless.
 //
-//  2. Push a fresh client.toml to every machine over the still-working
-//     plaintext tunnel. mergeClientManagedConfig already re-reads the noise
-//     pubkey from settings and emits [client.transport], so each pushed
-//     config is noise-ready the moment rathole-client's notify watcher fires.
-//     A client that switches to noise before the server does will fail-reconnect
-//     every 5s — acceptable, the next step fixes it within seconds.
+//  2. If any machine is still unreachable, ABORT before minting keys or
+//     touching a single config. The install stays exactly as it was —
+//     plaintext, every tunnel up — and the blocked machines are recorded for
+//     the dashboard so the operator can bring them back (or run migrate.sh on
+//     them). The migration retries on the next boot.
 //
-//  3. Reconcile server.toml so the server starts speaking noise. Clients that
-//     just received their updated config reconnect; the worst-case outage per
-//     machine is one rathole reconnect cycle (~5–10s).
+//  3. Otherwise mint the keypair and push a noise-ready client.toml to every
+//     machine over the still-working plaintext tunnel. If ANY push fails,
+//     roll the already-pushed machines back to plaintext, drop the keypair,
+//     and abort without flipping.
 //
-// Offline machines are logged and skipped — their plaintext client.toml will
-// fail to connect once step 3 completes, and the operator has to re-bootstrap
-// them or trigger any config-touching action (which calls
-// mergeClientManagedConfig) once they're reachable again. We do not retry
-// here because retrying inside startup would block the dashboard from
-// coming up.
+//  4. Only once every machine has confirmed its new config, reconcile
+//     server.toml so the server speaks noise. Worst case per machine is a
+//     single rathole reconnect cycle (~5-10s).
 //
-// Holds reconcileMu for the ENTIRE function, not just step 3. This is called
-// from an un-awaited goroutine at startup while the HTTP server is already
-// live — the doc above only protects this function's OWN internal ordering.
-// Without holding the lock throughout, an unrelated concurrent caller (a
-// tunnel create, a new bootstrap, anything reachable via the dashboard that's
-// already accepting requests) can call ReconcileServerConfig mid-migration:
-// it would see the noise key already committed by step 1 and flip the server
-// to noise transport immediately, before step 2's push loop has reached every
-// machine — a fleet-wide mass-disconnect for every machine not yet reached,
-// not the bounded "one rathole reconnect cycle" the design above assumes.
-// Holding the lock for the whole migration forces every other caller's
-// ReconcileServerConfig to simply wait until this finishes, so no reconcile
-// can ever observe "key set, fleet not yet pushed."
+// Steps 3 and 4 hold reconcileMu for their whole duration. Without that, an
+// unrelated concurrent caller (a tunnel create, a new bootstrap — anything
+// the already-live dashboard can trigger) could call ReconcileServerConfig
+// after the key is committed but before the fleet is pushed, flipping the
+// server early and mass-disconnecting every machine not yet reached.
+//
+// This function MUST be called after the supervisor has started rathole. It
+// used to run during the startup reconcile, roughly 200ms before rathole
+// existed, so every push failed instantly against a dead tunnel and step 4
+// then dropped the entire fleet on every single upgrade.
 func (s *LocalSetupService) MigrateRatholeNoise() error {
 	if devMode {
 		return nil
 	}
-	s.reconcileMu.Lock()
-	defer s.reconcileMu.Unlock()
 
+	// Cheap pre-checks before committing to a possibly multi-minute wait.
 	settings, err := db.GetSettings()
 	if err != nil {
 		return fmt.Errorf("load settings: %w", err)
@@ -190,7 +365,35 @@ func (s *LocalSetupService) MigrateRatholeNoise() error {
 		return nil // already migrated
 	}
 
-	log.Printf("rathole noise migration: starting (this install is on plaintext rathole transport, upgrading to encrypted)")
+	machines, err := db.GetMachines()
+	if err != nil {
+		return fmt.Errorf("load machines: %w", err)
+	}
+	fleet := migratableMachines(machines)
+
+	log.Printf("rathole noise migration: starting (this install is on plaintext rathole transport, upgrading to encrypted; %d machine(s) to carry across)", len(fleet))
+
+	// Step 1+2: wait for the fleet, and defer the whole migration if anyone is
+	// missing. Deliberately outside reconcileMu — see awaitFleetReachable.
+	if blocked := s.awaitFleetReachable(fleet, noiseMigrationFleetWait); len(blocked) > 0 {
+		recordNoiseMigrationBlocked(blocked)
+		log.Printf("rathole noise migration: DEFERRED — %d machine(s) unreachable: %s", len(blocked), strings.Join(blocked, ", "))
+		log.Printf("rathole noise migration: nothing was changed; the install stays on plaintext transport and every tunnel keeps working.")
+		log.Printf("rathole noise migration: bring those machines online (or re-run migrate.sh on them) and the migration runs on the next restart.")
+		return nil
+	}
+
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+
+	// Re-read under the lock: another path may have migrated while we waited.
+	settings, err = db.GetSettings()
+	if err != nil {
+		return fmt.Errorf("reload settings: %w", err)
+	}
+	if settings.RatholeNoisePrivKey != "" {
+		return nil
+	}
 
 	// Detect user-managed services in server.toml's custom block BEFORE the
 	// reconcile. Once the server flips to noise, their plaintext clients
@@ -205,7 +408,7 @@ func (s *LocalSetupService) MigrateRatholeNoise() error {
 	}
 
 	if len(customServices) > 0 {
-		log.Printf("rathole noise migration: detected %d user-managed services in %s custom block — these need a manual client.toml update with the noise pubkey or they'll fail to reconnect after the server flips:", len(customServices), paths.RatholeConfig)
+		log.Printf("rathole noise migration: detected %d user-managed services in the server.toml custom block — these need a manual client.toml update with the noise pubkey or they'll fail to reconnect", len(customServices))
 		for _, name := range customServices {
 			log.Printf("    [server.services.%s]", name)
 		}
@@ -226,57 +429,78 @@ func (s *LocalSetupService) MigrateRatholeNoise() error {
 		}
 	}
 
-	machines, err := db.GetMachines()
-	if err != nil {
-		return fmt.Errorf("load machines: %w", err)
-	}
+	ratholeHost := ratholeHostFromSettings(settings)
 
-	// Push to every machine BEFORE reconciling the server, so each client
-	// is already holding the noise pubkey when the server flips.
-	pushed, failed := 0, 0
-	for i := range machines {
-		m := &machines[i]
-		if m.TunnelPort == 0 && m.AgentRemotePort == 0 {
-			continue // genuinely unbootstrapped; agent-only machines (no SSH token/tunnel) still get pushed via the agent
-		}
+	// Step 3: push to every machine BEFORE reconciling the server, so each
+	// client is already holding the noise pubkey when the server flips.
+	pushed := make([]*db.Machine, 0, len(fleet))
+	for _, m := range fleet {
 		machineTunnels, terr := db.GetTunnelsByMachine(m.ID)
 		if terr != nil {
-			log.Printf("rathole noise migration: skip %s (%s): load tunnels: %v", m.ID, m.Name, terr)
-			failed++
-			continue
+			s.rollbackNoisePushes(pushed, ratholeHost)
+			clearRatholeNoiseKeys()
+			return fmt.Errorf("abort before flip: load tunnels for %s: %w", m.Name, terr)
 		}
-		ratholeHost := ratholeHostFromSettings(settings)
 		transformer := func(existing string) (string, error) {
 			return mergeClientManagedConfig(existing, m, machineTunnels, ratholeHost, noisePub)
 		}
 		if perr := s.updateClientToml(m, transformer); perr != nil {
-			log.Printf("rathole noise migration: push to %s (%s) failed: %v — flagged for retry on next health-check reconnect", m.ID, m.Name, perr)
-			// Mark for the health-loop retry path. When the machine next
-			// becomes reachable (operator frees disk / brings it back online),
-			// HealthService re-attempts the push and clears the flag on
-			// success. Without this flag, the only recovery is operator-
-			// triggered (re-bootstrap, manual edit, or the new /rathole-config
-			// recovery script).
-			if cerr := db.SetMachineConfigPushPending(m.ID, true); cerr != nil {
-				log.Printf("rathole noise migration: set config_push_pending for %s: %v", m.ID, cerr)
-			}
-			failed++
-			continue
+			log.Printf("rathole noise migration: push to %s (%s) failed after it probed reachable: %v", m.ID, m.Name, perr)
+			log.Printf("rathole noise migration: ABORTING before the server flip and rolling %d already-updated machine(s) back to plaintext — no tunnel is dropped", len(pushed))
+			s.rollbackNoisePushes(pushed, ratholeHost)
+			clearRatholeNoiseKeys()
+			recordNoiseMigrationBlocked([]string{m.Name})
+			return fmt.Errorf("abort before flip: push to %s: %w", m.Name, perr)
 		}
-		pushed++
+		pushed = append(pushed, m)
 	}
 
-	// Step 3: flip the server. Any client that received step-2 config
-	// reconnects within one rathole retry cycle; any client that didn't
-	// drops offline (and was already failing the push above, so it's
-	// already broken from the operator's perspective).
+	// Step 4: every machine is holding a noise-ready config — flip the server.
 	// reconcileServerConfigLocked, not ReconcileServerConfig: this function
-	// already holds reconcileMu for its whole body (see doc comment above) —
-	// calling the locking wrapper here would deadlock on itself.
+	// already holds reconcileMu (see doc comment above) — calling the locking
+	// wrapper here would deadlock on itself.
 	if err := s.reconcileServerConfigLocked(); err != nil {
 		return fmt.Errorf("reconcile server after noise migration: %w", err)
 	}
 
-	log.Printf("rathole noise migration: complete (%d machines updated, %d offline/failed)", pushed, failed)
+	// Step 5: prove it actually worked.
+	//
+	// A push that returned success only means the file was written on the
+	// origin — NOT that the running rathole-client adopted it. Clients rely on
+	// an inotify hot-reload, and an origin whose rathole predates that (or
+	// whose watcher is wedged) keeps talking plaintext to a server that now
+	// speaks only noise. Without this check the migration cheerfully logged
+	// "complete" while the entire fleet sat there failing handshakes — the
+	// exact silent outage this whole function exists to prevent.
+	//
+	// So: watch for the fleet to come back, and if it doesn't, put the install
+	// back the way it was. Reverting the server to plaintext is what actually
+	// rescues a client that never adopted the new config, so it goes first.
+	if stranded := s.awaitFleetReachable(fleet, noiseMigrationSettleWait); len(stranded) > 0 {
+		log.Printf("rathole noise migration: ROLLING BACK — %d machine(s) did not come back on the encrypted transport: %s",
+			len(stranded), strings.Join(stranded, ", "))
+		log.Printf("rathole noise migration: their client.toml was written but the running rathole-client never picked it up (commonly an origin with an old agent/rathole that cannot hot-reload).")
+
+		clearRatholeNoiseKeys()
+		if rerr := s.reconcileServerConfigLocked(); rerr != nil {
+			// Worst case in the whole function: the server is on noise, the
+			// keys are gone, and we could not rewrite the config. Say so
+			// loudly and precisely — this one needs hands.
+			log.Printf("rathole noise migration: CRITICAL — could not revert server.toml to plaintext: %v", rerr)
+			log.Printf("rathole noise migration: restart gopher to force a clean reconcile; the noise keypair has already been dropped so the rebuild will emit plaintext.")
+			return fmt.Errorf("rollback failed: %w", rerr)
+		}
+		// Any machine that DID adopt noise is now the odd one out against a
+		// plaintext server — hand it back a plaintext config. Best-effort:
+		// unreachable ones keep ConfigPushPending and the health loop retries.
+		s.rollbackNoisePushes(pushed, ratholeHost)
+
+		recordNoiseMigrationBlocked(stranded)
+		log.Printf("rathole noise migration: rolled back to plaintext transport — tunnels should recover on the next client reconnect. Re-run the agent install (migrate.sh) on the listed machines, then restart gopher to retry.")
+		return fmt.Errorf("rolled back: %d machine(s) did not adopt the encrypted transport", len(stranded))
+	}
+
+	recordNoiseMigrationBlocked(nil)
+	log.Printf("rathole noise migration: complete (%d machines migrated to encrypted transport)", len(pushed))
 	return nil
 }

@@ -106,6 +106,12 @@ type LocalServiceStatus struct {
 	// renders a banner instructing the operator to update those clients.
 	// Empty slice (not absent) when nothing needs attention.
 	RatholeCustomServicesWarning []string `json:"rathole_custom_services_warning"`
+	// RatholeNoiseBlockedMachines carries the machines that blocked the
+	// encrypted-transport migration by being unreachable. Non-empty means the
+	// migration deferred itself and changed nothing — the install is still on
+	// plaintext and every tunnel is up. Empty slice (not absent) when nothing
+	// is blocking.
+	RatholeNoiseBlockedMachines []string `json:"rathole_noise_blocked_machines"`
 }
 
 type LocalSetupService struct {
@@ -220,7 +226,23 @@ func (s *LocalSetupService) fetchStatus() (*LocalServiceStatus, error) {
 	}
 	status.RatholeNoisePubKey = settings.RatholeNoisePubKey
 	status.RatholeCustomServicesWarning = decodeCustomServicesWarning(settings)
+	status.RatholeNoiseBlockedMachines = decodeNoiseBlockedMachines(settings)
 	return status, nil
+}
+
+// decodeNoiseBlockedMachines returns the machines that blocked the last noise
+// migration attempt, or an empty slice when none. Like the custom-services
+// warning, a corrupted JSON cell degrades silently rather than breaking the
+// dashboard.
+func decodeNoiseBlockedMachines(s *db.AppSettings) []string {
+	if s == nil || s.RatholeNoiseBlockedMachines == "" {
+		return []string{}
+	}
+	var list []string
+	if err := json.Unmarshal([]byte(s.RatholeNoiseBlockedMachines), &list); err != nil {
+		return []string{}
+	}
+	return list
 }
 
 // decodeCustomServicesWarning returns the list of detected custom services
