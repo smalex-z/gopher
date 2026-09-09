@@ -35,6 +35,7 @@ export interface Machine {
   // agent reachable but older than the server target, or pre-gRPC skew — the
   // dashboard shows the same Install one-liner, relabeled "Upgrade".
   agent_outdated?: boolean
+  agent_manual_upgrade_required?: boolean
   // config_push_pending — set when an earlier config push (typically the
   // noise migration) couldn't land. The health loop retries on reconnect;
   // the dashboard surfaces a Recover button until cleared.

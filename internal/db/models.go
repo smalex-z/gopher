@@ -86,6 +86,13 @@ type Machine struct {
 	// (protocol skew). The dashboard surfaces the same Install/Upgrade one-liner
 	// for it. Cleared once a current agent is seen.
 	AgentOutdated bool `json:"agent_outdated"`
+	// AgentManualUpgradeRequired is true when an auto-upgrade determined the
+	// agent is too old to self-update (predates the /self-update endpoint) and
+	// needs a one-time manual reinstall. Distinguishes "self-update in flight"
+	// (dashboard shows "Updating…") from "reinstall required" (dashboard shows a
+	// "Reinstall agent" action). Cleared once the server can gRPC-poll the agent
+	// again — proof it's a modern agent.
+	AgentManualUpgradeRequired bool `json:"agent_manual_upgrade_required"`
 	// ConfigPushPending marks machines whose last attempted client.toml push
 	// failed (offline, full disk, agent down). The health service retries the
 	// push the next time the machine becomes reachable, then clears the flag.
