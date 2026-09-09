@@ -8,6 +8,44 @@ import (
 	"time"
 )
 
+// A machine flagged for manual agent reinstall must keep the flag across the
+// frequent status polls of a still-outdated legacy agent, and lose it only when
+// the agent actually reaches the target version. Guards the regression where
+// SetMachineAgentSeen wiped the flag every poll (perpetual "Updating…" in UI).
+func TestAgentManualUpgradeFlag_ClearedOnlyOnTarget(t *testing.T) {
+	initTestDB(t)
+	m := &Machine{ID: "mm1", Name: "old-agent", AgentInstalled: true}
+	if err := CreateMachine(m); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := SetMachineAgentManualUpgradeRequired("mm1", true); err != nil {
+		t.Fatalf("set flag: %v", err)
+	}
+
+	// Legacy agent's JSON /status succeeds every cycle → SetMachineAgentSeen.
+	// The flag must survive it.
+	if err := SetMachineAgentSeen("mm1", "0.1.0", time.Now()); err != nil {
+		t.Fatalf("agent-seen: %v", err)
+	}
+	if got, _ := GetMachine("mm1"); !got.AgentManualUpgradeRequired {
+		t.Fatal("flag wrongly cleared by SetMachineAgentSeen")
+	}
+	// Still outdated → flag stays.
+	if err := SetMachineAgentOutdated("mm1", true); err != nil {
+		t.Fatalf("outdated true: %v", err)
+	}
+	if got, _ := GetMachine("mm1"); !got.AgentManualUpgradeRequired {
+		t.Fatal("flag wrongly cleared by SetMachineAgentOutdated(true)")
+	}
+	// Reached target → flag clears.
+	if err := SetMachineAgentOutdated("mm1", false); err != nil {
+		t.Fatalf("outdated false: %v", err)
+	}
+	if got, _ := GetMachine("mm1"); got.AgentManualUpgradeRequired {
+		t.Fatal("flag not cleared when agent reached target")
+	}
+}
+
 func initTestDB(t *testing.T) {
 	t.Helper()
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))

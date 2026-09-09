@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,12 @@ import (
 	"github.com/smalex-z/gopher/internal/agentdist"
 	"github.com/smalex-z/gopher/internal/db"
 )
+
+// ErrAgentPredatesSelfUpdate is returned by UpgradeAgent when the target agent
+// is too old to have the /self-update endpoint (pre-gRPC v0.1.0). It can't be
+// auto-upgraded; the operator must run the one-time manual reinstall. Callers
+// match it with errors.Is to stop retrying and surface the manual action.
+var ErrAgentPredatesSelfUpdate = errors.New("agent predates self-update endpoint")
 
 // AgentInstaller produces the operator-paste command that installs the
 // gopher-agent on an existing (already-bootstrapped) machine. The actual
@@ -145,7 +152,7 @@ func (i *AgentInstaller) UpgradeAgent(machine *db.Machine) error {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("agent on %s predates self-update — one-time manual upgrade required", machine.Name)
+		return fmt.Errorf("agent on %s predates self-update — one-time manual upgrade required: %w", machine.Name, ErrAgentPredatesSelfUpdate)
 	}
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("self-update on %s: status %d: %s", machine.Name, resp.StatusCode, strings.TrimSpace(string(body)))
