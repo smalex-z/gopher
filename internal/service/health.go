@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -20,6 +21,11 @@ import (
 type agentUpgradeAttempt struct {
 	last     time.Time
 	attempts int
+	// blocked is set once an upgrade attempt returned ErrAgentPredatesSelfUpdate
+	// — the agent can't self-update, so stop re-firing and let the dashboard
+	// drive a manual reinstall. Cleared when the machine reaches the target
+	// version (clearAgentUpgradeState drops the whole attempt entry).
+	blocked bool
 }
 
 // agentUpgradeJitterFn returns the random pre-trigger delay for a first upgrade
@@ -254,6 +260,13 @@ func (s *HealthService) maybeAutoUpgradeAgent(m *db.Machine, reason string) {
 	}
 	s.mu.Lock()
 	st := s.agentUpgrades[m.ID]
+	if st != nil && st.blocked {
+		// A prior attempt found this agent can't self-update (predates the
+		// /self-update endpoint). Stop re-firing; the dashboard now shows a
+		// "Reinstall agent" action via agent_manual_upgrade_required.
+		s.mu.Unlock()
+		return
+	}
 	if st != nil && time.Since(st.last) < agentUpgradeRetryInterval(st.attempts) {
 		s.mu.Unlock()
 		return
@@ -282,6 +295,21 @@ func (s *HealthService) maybeAutoUpgradeAgent(m *db.Machine, reason string) {
 		}
 		log.Printf("health: auto-upgrading agent on %s (attempt %d, %s)", machine.Name, attempt, reason)
 		if err := s.agentUpgrader.UpgradeAgent(&machine); err != nil {
+			if errors.Is(err, ErrAgentPredatesSelfUpdate) {
+				// Too old to self-update. Stop retrying and flag the machine so
+				// the dashboard offers a manual reinstall instead of a
+				// perpetual "Updating…" spinner.
+				s.mu.Lock()
+				if st != nil {
+					st.blocked = true
+				}
+				s.mu.Unlock()
+				if dberr := db.SetMachineAgentManualUpgradeRequired(machine.ID, true); dberr != nil {
+					log.Printf("health: persist manual-upgrade-required for %s: %v", machine.Name, dberr)
+				}
+				log.Printf("health: agent on %s predates self-update — manual reinstall required (surfaced in dashboard)", machine.Name)
+				return
+			}
 			log.Printf("health: auto-upgrade agent on %s failed: %v", machine.Name, err)
 			return
 		}

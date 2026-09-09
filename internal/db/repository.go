@@ -189,9 +189,28 @@ func SetMachineAgentSeen(id, version string, when time.Time) error {
 // upgrade — reachable-but-older or pre-gRPC skew. Partial update so it doesn't
 // clobber concurrent status writes.
 func SetMachineAgentOutdated(id string, outdated bool) error {
-	return DB.Model(&Machine{}).Where("id = ?", id).Updates(map[string]any{
+	updates := map[string]any{
 		"agent_outdated": outdated,
 		"updated_at":     time.Now(),
+	}
+	if !outdated {
+		// A current agent can't need a manual reinstall. Clearing outdated is
+		// the single authoritative "agent reached target" signal, so resolve the
+		// manual-upgrade requirement here — not on every status poll, where a
+		// legacy agent's JSON /status succeeds each cycle and would otherwise
+		// wipe the flag the auto-upgrade just set.
+		updates["agent_manual_upgrade_required"] = false
+	}
+	return DB.Model(&Machine{}).Where("id = ?", id).Updates(updates).Error
+}
+
+// SetMachineAgentManualUpgradeRequired flags (or clears) a machine whose agent
+// is too old to self-update and needs a one-time manual reinstall. Partial
+// update so it doesn't clobber concurrent status writes.
+func SetMachineAgentManualUpgradeRequired(id string, required bool) error {
+	return DB.Model(&Machine{}).Where("id = ?", id).Updates(map[string]any{
+		"agent_manual_upgrade_required": required,
+		"updated_at":                    time.Now(),
 	}).Error
 }
 

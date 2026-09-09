@@ -458,28 +458,38 @@ export default function MachinesPage() {
                           // originally meant to cover.
                           const reachable = m.agent_tunnel_status === 'active'
                           const showInstall = !m.agent_installed
-                          const updating = m.agent_installed && m.agent_outdated && reachable
-                          if (showInstall) {
+                          // An agent too old to self-update (predates /self-update)
+                          // can't be auto-rolled; the server flags it and we offer
+                          // the same one-time manual reinstall as a fresh install,
+                          // instead of a "Updating…" spinner that never resolves.
+                          const needsReinstall = m.agent_installed && !!m.agent_manual_upgrade_required
+                          const updating = m.agent_installed && m.agent_outdated && reachable && !needsReinstall
+                          const pending = installAgentMutation.isPending && installAgentMutation.variables === m.id
+                          if (showInstall || needsReinstall) {
                             return (
                               <button
                                 onClick={() => installAgentMutation.mutate(m.id)}
-                                disabled={installAgentMutation.isPending && installAgentMutation.variables === m.id}
+                                disabled={pending}
                                 title={
-                                  m.agent_install_error
-                                    ? `Last error: ${m.agent_install_error}`
-                                    : 'Install gopher-agent on this machine'
+                                  needsReinstall
+                                    ? `Agent v${m.agent_version || '?'} is too old to update itself — reinstall it once to move to the current version`
+                                    : m.agent_install_error
+                                      ? `Last error: ${m.agent_install_error}`
+                                      : 'Install gopher-agent on this machine'
                                 }
                                 className={`px-2 py-1 text-xs rounded border flex items-center gap-1 transition-colors ${
-                                  m.agent_install_error
+                                  m.agent_install_error && !needsReinstall
                                     ? 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
                                     : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
                                 }`}
                               >
-                                {installAgentMutation.isPending && installAgentMutation.variables === m.id
-                                  ? <><Loader2 size={11} className="animate-spin" /> Installing…</>
-                                  : m.agent_install_error
-                                    ? <>Retry install</>
-                                    : <>Install agent</>}
+                                {pending
+                                  ? <><Loader2 size={11} className="animate-spin" /> {needsReinstall ? 'Preparing…' : 'Installing…'}</>
+                                  : needsReinstall
+                                    ? <>Reinstall agent</>
+                                    : m.agent_install_error
+                                      ? <>Retry install</>
+                                      : <>Install agent</>}
                               </button>
                             )
                           }
