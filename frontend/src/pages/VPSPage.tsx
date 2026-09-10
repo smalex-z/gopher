@@ -307,6 +307,12 @@ export default function ServerPage() {
                   <span className="text-xs text-gray-400">Installed</span>
                   <span className="text-sm font-mono text-gray-700">{updateInfo.current_version}</span>
                 </div>
+                {updateInfo.agent_version && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-gray-400" title="gopher-agent build the edge distributes to machines">Agent</span>
+                    <span className="text-sm font-mono text-gray-700">{updateInfo.agent_version}</span>
+                  </div>
+                )}
                 {updateInfo.update_available ? (
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-gray-400">Available</span>
