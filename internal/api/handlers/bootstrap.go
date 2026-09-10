@@ -141,13 +141,16 @@ func (h *BootstrapHandler) Register(w http.ResponseWriter, r *http.Request) {
 // who asked.
 func (h *BootstrapHandler) RecoverConfig(w http.ResponseWriter, r *http.Request) {
 	ip := service.ClientIP(r)
-	if !h.svc.AllowAttempt(ip) {
-		response.Error(w, http.StatusTooManyRequests, "too many attempts; try again later")
-		return
-	}
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if token == "" || token == r.Header.Get("Authorization") {
 		response.Error(w, http.StatusUnauthorized, "bearer token required")
+		return
+	}
+	// Throttle per machine token, not per IP: this is the agent's automatic
+	// dial-home recovery, so IP-keying let one noisy agent behind a NAT 429
+	// every sibling machine's migrate/bootstrap (they share the source IP).
+	if !h.svc.AllowRecoverAttempt(token) {
+		response.Error(w, http.StatusTooManyRequests, "too many attempts; try again later")
 		return
 	}
 	// Optional body: the agent's current (suspect) config, so custom sections

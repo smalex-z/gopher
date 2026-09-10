@@ -23,10 +23,16 @@ type BootstrapService struct {
 	// already impractical, but this caps the rate at which an attacker
 	// can trigger DB-touching codepaths from an unauthenticated endpoint.
 	rl *loginRateLimiter
+	// recoverRL throttles the agent dial-home recovery endpoint, keyed by the
+	// per-machine bearer token rather than source IP (see RecoverConfig). A
+	// separate bucket namespace so automatic recovery traffic can't starve the
+	// operator-driven Register / Migrate endpoints, and per-token so one noisy
+	// agent behind a shared NAT can't lock its sibling machines out of migrate.
+	recoverRL *loginRateLimiter
 }
 
 func NewBootstrapService(local *LocalSetupService) *BootstrapService {
-	return &BootstrapService{local: local, rl: newLoginRateLimiter()}
+	return &BootstrapService{local: local, rl: newLoginRateLimiter(), recoverRL: newLoginRateLimiter()}
 }
 
 // AllowAttempt records a hit from ip and returns false when the rate
@@ -34,6 +40,15 @@ func NewBootstrapService(local *LocalSetupService) *BootstrapService {
 // work — short-circuits at the cost of one map lookup.
 func (s *BootstrapService) AllowAttempt(ip string) bool {
 	return s.rl.record(ip)
+}
+
+// AllowRecoverAttempt throttles the agent dial-home recovery endpoint, keyed by
+// the caller's per-machine bearer token instead of its source IP. Recovery is
+// automatic and bearer-authed and can retry every few seconds, so IP-keying let
+// one agent behind a NAT exhaust the shared limiter and 429 every sibling's
+// migrate/bootstrap. Per-token means a misbehaving agent only throttles itself.
+func (s *BootstrapService) AllowRecoverAttempt(token string) bool {
+	return s.recoverRL.record(token)
 }
 
 // GenerateToken creates a one-time bootstrap token valid for 1 hour.
