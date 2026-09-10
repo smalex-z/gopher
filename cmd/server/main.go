@@ -136,6 +136,7 @@ func runServer(args []string) {
 	// manual upgrade. The server has no root on the origin, so this is the only
 	// correct actuator.
 	healthSvc.SetAgentUpgrader(agentInstaller)
+	healthSvc.SetNoiseMigrator(localSvc.MigrateRatholeNoise)
 	healthSvc.Start()
 	go secSvc.SyncFail2banConfig()
 	monitorSvc := service.NewMonitorService()
