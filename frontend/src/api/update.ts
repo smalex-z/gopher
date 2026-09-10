@@ -7,6 +7,8 @@ export interface UpdateInfo {
   latest_version: string
   update_available: boolean
   channel: UpdateChannel
+  // gopher-agent build the edge distributes; independent of the server version.
+  agent_version: string
   // Set when the release lookup couldn't complete (e.g. the channel has no
   // published release yet) — the check itself still returns 200.
   check_error?: string

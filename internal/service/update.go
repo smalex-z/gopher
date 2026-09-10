@@ -35,6 +35,10 @@ type UpdateInfo struct {
 	LatestVersion   string `json:"latest_version"`
 	UpdateAvailable bool   `json:"update_available"`
 	Channel         string `json:"channel"`
+	// AgentVersion is the gopher-agent build the edge distributes and expects
+	// (build.AgentVersion). Independent of the server release version — shown on
+	// the VPS page so the operator can see both at a glance.
+	AgentVersion string `json:"agent_version"`
 	// CheckError is a human-readable note when the release lookup couldn't
 	// complete (channel has nothing published, GitHub unreachable/rate-limited).
 	// The check is advisory, so these are reported in-band rather than as an
@@ -106,6 +110,7 @@ func (s *UpdateService) Check() (*UpdateInfo, error) {
 		LatestVersion:   build.Version,
 		UpdateAvailable: false,
 		Channel:         channel,
+		AgentVersion:    build.AgentVersion,
 	}
 
 	if build.Version == "dev" {
