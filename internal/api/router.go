@@ -67,8 +67,9 @@ func NewRouter(
 
 	// External REST API — secured with API key (Authorization: Bearer <key>)
 	r.Route("/api/v1", func(r chi.Router) {
-		// OpenAPI spec is public (no auth) so callers can discover the API first.
+		// OpenAPI spec + version are public (no auth) so callers can discover the API first.
 		r.Get("/openapi.json", handlers.ServeOpenAPISpec)
+		r.Get("/version", handlers.ServeAPIVersion)
 
 		// All other /api/v1 routes require a valid API key.
 		r.Group(func(r chi.Router) {

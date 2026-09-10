@@ -2,14 +2,22 @@ package handlers
 
 import (
 	"net/http"
+
+	"github.com/smalex-z/gopher/internal/api/response"
+	"github.com/smalex-z/gopher/internal/build"
 )
+
+// apiVersion is the external REST API contract version. Keep it in sync with
+// the "version" field in openAPISpec below (semver: minor = additive fields,
+// major = a new /api/vN path). Reported by GET /api/v1/version.
+const apiVersion = "1.1.0"
 
 const openAPISpec = `{
   "openapi": "3.0.3",
   "info": {
     "title": "Gopher External API",
     "description": "REST API for programmatic tunnel management. Machines and tunnels are separate resources — bootstrap the machine first, wait for it to connect, then create tunnels on it.",
-    "version": "1.0.0"
+    "version": "1.1.0"
   },
   "servers": [
     { "url": "/api/v1", "description": "Current server" }
@@ -63,6 +71,10 @@ const openAPISpec = `{
           "bot_protection_ttl":      { "type": "integer", "description": "Challenge-cookie TTL in seconds (0 = default 86400)." },
           "bot_protection_allow_ip": { "type": "string",  "description": "JSON array of CIDR/IP strings whitelisted from the challenge." },
           "tls_skip_verify":         { "type": "boolean", "description": "Caddy ignores upstream TLS errors (for self-signed backends)." },
+          "auth_enabled":      { "type": "boolean", "description": "Password gate in front of the service (separate from the dashboard login). Requires subdomain + TCP." },
+          "auth_password_set": { "type": "boolean", "description": "Whether a password is stored. The password itself is never returned." },
+          "auth_ttl":          { "type": "integer", "description": "Password-session TTL in seconds (0 = default 86400)." },
+          "auth_allow_ip":     { "type": "string",  "description": "JSON array of CIDR/IP strings that bypass the password gate." },
           "tunnel_url":     { "type": "string",  "example": "https://my-server-a1b2c3.example.com", "description": "Public URL. For port-only and UDP tunnels: <gateway>:<server_port>." },
           "error":          { "type": "string",  "description": "Failure reason (present when failed)." },
           "created_at":     { "type": "string",  "format": "date-time" }
@@ -109,6 +121,23 @@ const openAPISpec = `{
     }
   },
   "paths": {
+    "/version": {
+      "get": {
+        "summary": "Version info (public)",
+        "description": "Reports the server, agent, wire-protocol, and API versions together. No auth required.",
+        "responses": {
+          "200": {
+            "description": "Version numbers",
+            "content": { "application/json": { "schema": { "properties": { "success": { "type": "boolean" }, "data": { "type": "object", "properties": {
+              "server_version":   { "type": "string",  "example": "0.2.0-alpha.6" },
+              "agent_version":    { "type": "string",  "example": "0.2.10" },
+              "protocol_version": { "type": "integer", "example": 1, "description": "agent<->server gRPC wire contract; the server gates compatibility on this." },
+              "api_version":      { "type": "string",  "example": "1.1.0", "description": "this REST API contract (semver; major = a new /api/vN path)." }
+            } } } } } }
+          }
+        }
+      }
+    },
     "/ssh-keys": {
       "post": {
         "summary": "Upload an SSH keypair",
@@ -248,10 +277,14 @@ const openAPISpec = `{
                   "target_ip":   { "type": "string",  "default": "127.0.0.1" },
                   "private":     { "type": "boolean", "default": false, "description": "Bind to 127.0.0.1 on the VPS (not publicly reachable)" },
                   "no_tls":      { "type": "boolean", "default": false, "description": "Skip Caddy TLS; serve plain http://. Ignored for UDP / port-only." },
-                  "bot_protection_enabled":  { "type": "boolean", "default": false, "description": "Alpha: PoW JS-challenge gating HTTP traffic. Server silently disables this when subdomain is empty or transport=udp." },
+                  "bot_protection_enabled":  { "type": "boolean", "default": false, "description": "Alpha: PoW JS-challenge gating HTTP traffic. Requires a subdomain + TCP; the request is rejected if combined with udp. Enabling it forces the tunnel private." },
                   "bot_protection_ttl":      { "type": "integer", "default": 0, "description": "Alpha: challenge cookie TTL in seconds. 0 = default (86400 / 24h)." },
                   "bot_protection_allow_ip": { "type": "string",  "description": "Alpha: JSON array of CIDR/IP strings whitelisted from the challenge." },
-                  "tls_skip_verify":         { "type": "boolean", "default": false, "description": "Alpha: Caddy ignores upstream TLS errors. Required for backends with self-signed certs (Proxmox, some NAS devices)." }
+                  "auth_enabled":            { "type": "boolean", "default": false, "description": "Password gate in front of the service (separate from the dashboard login). Requires a subdomain + TCP; rejected otherwise. Enabling it forces the tunnel private." },
+                  "auth_password":           { "type": "string",  "description": "Required when auth_enabled is true. Plaintext on the wire, bcrypt-hashed at rest, never returned." },
+                  "auth_ttl":                { "type": "integer", "default": 0, "description": "Password-session TTL in seconds. 0 = default (86400 / 24h)." },
+                  "auth_allow_ip":           { "type": "string",  "description": "JSON array of CIDR/IP strings that bypass the password gate." },
+                  "tls_skip_verify":         { "type": "boolean", "default": false, "description": "Alpha: Caddy ignores upstream TLS errors. Required for backends with self-signed certs (Proxmox, some NAS devices). https subdomain tunnels only." }
                 }
               }
             }
@@ -320,4 +353,17 @@ func ServeOpenAPISpec(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(openAPISpec))
+}
+
+// ServeAPIVersion reports the four independent version numbers together, so a
+// caller (or an operator) can see them at a glance without conflating them:
+// the server release, the gopher-agent build the edge ships, the agent<->server
+// wire-protocol contract, and this REST API's contract version.
+func ServeAPIVersion(w http.ResponseWriter, _ *http.Request) {
+	response.Success(w, map[string]any{
+		"server_version":   build.Version,
+		"agent_version":    build.AgentVersion,
+		"protocol_version": build.AgentProtocolVersion,
+		"api_version":      apiVersion,
+	})
 }

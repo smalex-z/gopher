@@ -343,6 +343,14 @@ export default function DocsPage() {
             { name: 'target_ip', type: 'string', description: 'IP of the service on the remote machine. Defaults to 127.0.0.1.' },
             { name: 'private', type: 'boolean', description: 'Bind tunnel to 127.0.0.1 on the VPS (not publicly reachable). Default false.' },
             { name: 'no_tls', type: 'boolean', description: 'Skip Caddy TLS — serve plain http:// instead of https://. Default false.' },
+            { name: 'bot_protection_enabled', type: 'boolean', description: 'PoW JS-challenge in front of HTTP traffic. Requires a subdomain + TCP (rejected otherwise). Forces the tunnel private.' },
+            { name: 'bot_protection_ttl', type: 'integer', description: 'Challenge-cookie TTL in seconds (0 = default 86400).' },
+            { name: 'bot_protection_allow_ip', type: 'string', description: 'JSON array of CIDR/IP strings whitelisted from the challenge.' },
+            { name: 'auth_enabled', type: 'boolean', description: 'Password gate in front of the service (separate from the dashboard login). Requires a subdomain + TCP (rejected otherwise). Forces the tunnel private.' },
+            { name: 'auth_password', type: 'string', description: 'Required when auth_enabled is true. Bcrypt-hashed at rest, never returned.' },
+            { name: 'auth_ttl', type: 'integer', description: 'Password-session TTL in seconds (0 = default 86400).' },
+            { name: 'auth_allow_ip', type: 'string', description: 'JSON array of CIDR/IP strings that bypass the password gate.' },
+            { name: 'tls_skip_verify', type: 'boolean', description: 'Caddy ignores upstream TLS errors (self-signed backends). https subdomain tunnels only.' },
           ]}
           responseFields={[
             { name: 'id', type: 'string', description: 'Tunnel record ID.' },
@@ -352,6 +360,8 @@ export default function DocsPage() {
             { name: 'target_ip', type: 'string', description: 'Target IP.' },
             { name: 'target_port', type: 'integer', description: 'Target port.' },
             { name: 'tunnel_url', type: 'string', description: 'Public URL (present when active).' },
+            { name: 'auth_enabled', type: 'boolean', description: 'Whether the password gate is active.' },
+            { name: 'auth_password_set', type: 'boolean', description: 'Whether a password is stored (the password itself is never returned).' },
             { name: 'error', type: 'string', description: 'Failure reason (present when failed).' },
             { name: 'created_at', type: 'string', description: 'ISO 8601 timestamp.' },
           ]}

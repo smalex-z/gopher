@@ -277,13 +277,19 @@ type externalTunnelResponse struct {
 	// Alpha features — bot protection (PoW JS challenge gating HTTP traffic)
 	// requires a subdomain and TCP. Acknowledged-and-coerced server-side, so
 	// these reflect the actual stored state, not just what the caller asked.
-	BotProtectionEnabled bool      `json:"bot_protection_enabled,omitempty"`
-	BotProtectionTTL     int       `json:"bot_protection_ttl,omitempty"`
-	BotProtectionAllowIP string    `json:"bot_protection_allow_ip,omitempty"`
-	TLSSkipVerify        bool      `json:"tls_skip_verify,omitempty"`
-	TunnelURL            string    `json:"tunnel_url,omitempty"`
-	Error                string    `json:"error,omitempty"`
-	CreatedAt            time.Time `json:"created_at"`
+	BotProtectionEnabled bool   `json:"bot_protection_enabled,omitempty"`
+	BotProtectionTTL     int    `json:"bot_protection_ttl,omitempty"`
+	BotProtectionAllowIP string `json:"bot_protection_allow_ip,omitempty"`
+	// Password gate. The password itself is never returned; auth_password_set
+	// tells the caller whether one is stored.
+	AuthEnabled     bool      `json:"auth_enabled,omitempty"`
+	AuthPasswordSet bool      `json:"auth_password_set,omitempty"`
+	AuthTTL         int       `json:"auth_ttl,omitempty"`
+	AuthAllowIP     string    `json:"auth_allow_ip,omitempty"`
+	TLSSkipVerify   bool      `json:"tls_skip_verify,omitempty"`
+	TunnelURL       string    `json:"tunnel_url,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 // externalTunnelToResponse derives the wire-shape from the canonical
@@ -313,6 +319,10 @@ func externalTunnelToResponse(et *db.ExternalTunnel) externalTunnelResponse {
 			resp.BotProtectionEnabled = t.BotProtectionEnabled
 			resp.BotProtectionTTL = t.BotProtectionTTL
 			resp.BotProtectionAllowIP = t.BotProtectionAllowIP
+			resp.AuthEnabled = t.AuthEnabled
+			resp.AuthPasswordSet = t.AuthPasswordHash != ""
+			resp.AuthTTL = t.AuthTTL
+			resp.AuthAllowIP = t.AuthAllowIP
 			resp.TLSSkipVerify = t.TLSSkipVerify
 		}
 	}
@@ -360,7 +370,13 @@ func (h *ExternalAPIHandler) CreateTunnel(w http.ResponseWriter, r *http.Request
 		BotProtectionEnabled bool   `json:"bot_protection_enabled"`
 		BotProtectionTTL     int    `json:"bot_protection_ttl"`
 		BotProtectionAllowIP string `json:"bot_protection_allow_ip"`
-		TLSSkipVerify        bool   `json:"tls_skip_verify"`
+		// Password gate (separate from the dashboard login). auth_password is
+		// plaintext on the wire and bcrypt-hashed before storage.
+		AuthEnabled   bool   `json:"auth_enabled"`
+		AuthPassword  string `json:"auth_password"`
+		AuthTTL       int    `json:"auth_ttl"`
+		AuthAllowIP   string `json:"auth_allow_ip"`
+		TLSSkipVerify bool   `json:"tls_skip_verify"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.BadRequest(w, "invalid request body")
@@ -424,6 +440,30 @@ func (h *ExternalAPIHandler) CreateTunnel(w http.ResponseWriter, r *http.Request
 		targetIP = "127.0.0.1"
 	}
 
+	// Explicit compatibility validation. The internal service silently coerces
+	// incompatible options (drops bot protection / auth on a non-HTTP tunnel),
+	// which is fine for the dashboard but wrong for a programmatic caller — they
+	// should be told, not left to diff the response. HTTP protections need a
+	// proxied tunnel (tcp + subdomain); udp is raw L4.
+	isHTTP := transport == "tcp" && subdomain != ""
+	switch {
+	case transport == "udp" && (req.NoTLS || req.BotProtectionEnabled || req.AuthEnabled || req.TLSSkipVerify || strings.TrimSpace(req.Subdomain) != ""):
+		response.BadRequest(w, "udp tunnels are raw L4 — subdomain, no_tls, bot_protection, auth, and tls_skip_verify do not apply")
+		return
+	case req.BotProtectionEnabled && !isHTTP:
+		response.BadRequest(w, "bot_protection_enabled requires an http tunnel (tcp transport with a subdomain)")
+		return
+	case req.AuthEnabled && !isHTTP:
+		response.BadRequest(w, "auth_enabled requires an http tunnel (tcp transport with a subdomain)")
+		return
+	case req.AuthEnabled && strings.TrimSpace(req.AuthPassword) == "":
+		response.BadRequest(w, "auth_password is required when auth_enabled is true")
+		return
+	case req.TLSSkipVerify && (!isHTTP || req.NoTLS):
+		response.BadRequest(w, "tls_skip_verify only applies to https subdomain tunnels (tcp + subdomain, no_tls off)")
+		return
+	}
+
 	// Delegate to the canonical service: handles UDP-incompatibility rules
 	// (clears subdomain + no_tls), bot-protection coercion (requires
 	// subdomain + TCP), port validation, rathole assignment, Caddy/firewall
@@ -439,6 +479,10 @@ func (h *ExternalAPIHandler) CreateTunnel(w http.ResponseWriter, r *http.Request
 		BotProtectionEnabled: req.BotProtectionEnabled,
 		BotProtectionTTL:     req.BotProtectionTTL,
 		BotProtectionAllowIP: req.BotProtectionAllowIP,
+		AuthEnabled:          req.AuthEnabled,
+		AuthPassword:         req.AuthPassword,
+		AuthTTL:              req.AuthTTL,
+		AuthAllowIP:          req.AuthAllowIP,
 		TLSSkipVerify:        req.TLSSkipVerify,
 	})
 	if err != nil {

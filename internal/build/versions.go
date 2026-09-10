@@ -51,6 +51,12 @@ const (
 	// Bump this whenever cmd/agent's behavior changes in a way the edge should
 	// know about (see cmd/agent/main.go's per-version changelog comment).
 	AgentVersion = "0.2.10"
+
+	// AgentProtocolVersion is the gRPC wire-compatibility contract between the
+	// server and the agent. The server gates compatibility on this integer, NOT
+	// on AgentVersion's semver string. Bump only on a breaking change to the
+	// AgentControl gRPC contract. v1 = initial gRPC service.
+	AgentProtocolVersion = 1
 )
 
 // InjectVersions substitutes the pinned-version placeholder tokens in an install
