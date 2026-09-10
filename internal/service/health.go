@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -87,6 +88,16 @@ type HealthService struct {
 	// broken upgrade doesn't re-fire every health tick. Cleared once the agent
 	// reports current, so a future version bump starts fresh.
 	agentUpgrades map[string]*agentUpgradeAttempt
+
+	// noiseMigrator re-runs the plaintext→noise transport migration on demand,
+	// without a server restart. Set by the cmd/server wiring to
+	// LocalSetupService.MigrateRatholeNoise; nil disables auto-retry. Fired when
+	// a previously-blocking machine returns on a current (noise-capable) agent
+	// and the whole deferred fleet is ready. Guarded by noiseRetryInFlight +
+	// noiseRetryLast (both under mu).
+	noiseMigrator      func() error
+	noiseRetryInFlight bool
+	noiseRetryLast     time.Time
 
 	// streams holds the cancel func for each agent machine's live WatchStatus
 	// consumer. Agent machines are watched via a persistent stream (push), not
@@ -179,6 +190,11 @@ const (
 	// JSON /status, since it can't stream. The worker keeps re-attempting the
 	// stream each interval, so it switches to push automatically once upgraded.
 	legacyPollInterval = 30 * time.Second
+	// noiseRetryCooldown throttles the automatic (no-restart) retry of the
+	// plaintext→noise transport migration after a previously-blocked machine
+	// returns on a current agent, so a burst of health events can't stack
+	// migration attempts.
+	noiseRetryCooldown = 90 * time.Second
 )
 
 // SetConfigPusher wires the deferred-push retry hook. Called once from
@@ -192,6 +208,14 @@ func (s *HealthService) SetConfigPusher(p ConfigPusher) {
 
 // SetAgentUpgrader wires the auto-upgrade hook. Called once from
 // cmd/server/main.go, same post-construction pattern as SetConfigPusher.
+// SetNoiseMigrator wires the on-demand encrypted-transport migration hook,
+// enabling automatic completion of a deferred noise cutover once the machines
+// that blocked it return on a current agent — no server restart required.
+// Called once from cmd/server/main.go; nil (tests) disables auto-retry.
+func (s *HealthService) SetNoiseMigrator(fn func() error) {
+	s.noiseMigrator = fn
+}
+
 func (s *HealthService) SetAgentUpgrader(u AgentUpgrader) {
 	s.agentUpgrader = u
 }
@@ -342,6 +366,104 @@ func (s *HealthService) clearAgentUpgradeState(machineID string) {
 	s.mu.Lock()
 	delete(s.agentUpgrades, machineID)
 	s.mu.Unlock()
+}
+
+// maybeRetryNoiseMigration completes a deferred plaintext→noise transport
+// migration without a server restart. The migration is otherwise startup-only,
+// so an operator who reinstalled a blocking machine's agent used to have to
+// restart Gopher. Instead, when a machine that was on the blocked list returns
+// connected on a current (noise-capable) agent AND every other blocked machine
+// is likewise ready, re-run the migration in the background. MigrateRatholeNoise
+// is idempotent (no-op once migrated) and re-defers safely if a machine slips
+// offline in the interim, so a spurious trigger is harmless.
+func (s *HealthService) maybeRetryNoiseMigration(m *db.Machine) {
+	if s.noiseMigrator == nil {
+		return
+	}
+	settings, err := db.GetSettings()
+	if err != nil || !settings.IsSetup || settings.RatholeNoisePrivKey != "" {
+		return // no pending migration (fresh install, or already on noise)
+	}
+	blocked := parseNoiseBlocked(settings.RatholeNoiseBlockedMachines)
+	if len(blocked) == 0 {
+		return // nothing was deferred
+	}
+	// Only react when the machine that just went healthy was itself a blocker,
+	// so an unrelated machine's poll doesn't run the readiness scan every tick.
+	wasBlocking := false
+	for _, name := range blocked {
+		if name == m.Name {
+			wasBlocking = true
+			break
+		}
+	}
+	if !wasBlocking {
+		return
+	}
+	// Fire only when EVERY blocked machine is back and current, so the migration
+	// finds the fleet ready and completes in one pass instead of waiting out the
+	// multi-minute fleet timeout and deferring again.
+	if !s.allBlockedMachinesReady(blocked) {
+		return
+	}
+
+	s.mu.Lock()
+	if s.noiseRetryInFlight || time.Since(s.noiseRetryLast) < noiseRetryCooldown {
+		s.mu.Unlock()
+		return
+	}
+	s.noiseRetryInFlight = true
+	s.noiseRetryLast = time.Now()
+	s.mu.Unlock()
+
+	go goSafe("health.retryNoiseMigration", func() {
+		defer func() {
+			s.mu.Lock()
+			s.noiseRetryInFlight = false
+			s.mu.Unlock()
+		}()
+		log.Printf("health: blocked machine %s is back on a current agent and the fleet is ready — completing the encrypted-transport migration (no restart needed)", m.Name)
+		if err := s.noiseMigrator(); err != nil {
+			log.Printf("health: encrypted-transport migration retry: %v", err)
+		}
+	})
+}
+
+// allBlockedMachinesReady reports whether every named machine is connected on a
+// current, non-manual-upgrade agent. A name with no machine row (deleted) no
+// longer blocks the migration.
+func (s *HealthService) allBlockedMachinesReady(names []string) bool {
+	machines, err := db.GetMachines()
+	if err != nil {
+		return false
+	}
+	byName := make(map[string]db.Machine, len(machines))
+	for _, mm := range machines {
+		byName[mm.Name] = mm
+	}
+	for _, name := range names {
+		mm, ok := byName[name]
+		if !ok {
+			continue // deleted → no longer a blocker
+		}
+		if mm.Status != "connected" || mm.AgentOutdated || mm.AgentManualUpgradeRequired {
+			return false
+		}
+	}
+	return true
+}
+
+// parseNoiseBlocked decodes the JSON array of machine names stored in
+// AppSettings.RatholeNoiseBlockedMachines. Returns nil on empty/invalid input.
+func parseNoiseBlocked(payload string) []string {
+	if payload == "" {
+		return nil
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(payload), &names); err != nil {
+		return nil
+	}
+	return names
 }
 
 // isAgentProtocolSkew reports whether a failed agent RPC looks like the server
@@ -757,6 +879,11 @@ func (s *HealthService) applyAgentStatus(m *db.Machine, status *AgentStatus, sub
 		s.maybeAutoUpgradeAgent(m, fmt.Sprintf("agent %s older than %s", status.AgentVersion, targetAgentVersion))
 	} else {
 		s.clearAgentUpgradeState(m.ID) // reached target — reset backoff for any future bump
+		// A machine that blocked the noise cutover (old agent) is now current
+		// and reachable — try to finish the deferred migration without a
+		// restart. No-op unless a migration is actually pending and the whole
+		// blocked fleet is ready.
+		s.maybeRetryNoiseMigration(m)
 	}
 }
 
