@@ -114,7 +114,7 @@ const (
 	// agent. The server gates compatibility on this integer, NOT on the semver
 	// string above. Bump it on any breaking change to the gRPC contract.
 	// v1 = initial gRPC AgentControl service.
-	protocolVersion = 1
+	protocolVersion = build.AgentProtocolVersion
 )
 
 type config struct {
