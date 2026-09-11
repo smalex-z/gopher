@@ -564,6 +564,20 @@ func GetBootstrapToken(token string) (*BootstrapToken, error) {
 	return &bt, nil
 }
 
+// GetBootstrapTokenByID looks up a token row by its primary key. Used by the
+// external_api flow which references tokens by ID rather than the random
+// token string.
+func GetBootstrapTokenByID(id string) (*BootstrapToken, error) {
+	var bt BootstrapToken
+	if err := DB.First(&bt, "id = ?", id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "bootstrap_token", ID: id}
+		}
+		return nil, err
+	}
+	return &bt, nil
+}
+
 // ClaimBootstrapToken atomically marks the token used and returns the row
 // for the caller to read TunnelPort / SSHKeyID / PublicSSH from. The single
 // conditional UPDATE collapses the prior read-then-mark sequence so two
@@ -751,6 +765,107 @@ func CreateFirewallRule(rule *FirewallRule) error {
 
 func DeleteFirewallRule(id string) error {
 	return DB.Delete(&FirewallRule{}, "id = ?", id).Error
+}
+
+// External Machine Repository
+
+func GetExternalMachines(limit, offset int) ([]ExternalMachine, int64, error) {
+	var total int64
+	if err := DB.Model(&ExternalMachine{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var machines []ExternalMachine
+	q := DB.Order("created_at DESC").Offset(offset)
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&machines).Error; err != nil {
+		return nil, 0, err
+	}
+	return machines, total, nil
+}
+
+func GetExternalMachine(id string) (*ExternalMachine, error) {
+	var m ExternalMachine
+	if err := DB.First(&m, "id = ?", id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "external_machine", ID: id}
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
+func GetExternalMachineByTokenID(tokenID string) (*ExternalMachine, error) {
+	var m ExternalMachine
+	if err := DB.Where("token_id = ?", tokenID).First(&m).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "external_machine", ID: tokenID}
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
+func CreateExternalMachine(m *ExternalMachine) error {
+	return DB.Create(m).Error
+}
+
+func UpdateExternalMachine(m *ExternalMachine) error {
+	return DB.Save(m).Error
+}
+
+func DeleteExternalMachine(id string) error {
+	return DB.Delete(&ExternalMachine{}, "id = ?", id).Error
+}
+
+// External Tunnel Repository
+
+func GetExternalTunnels(limit, offset int) ([]ExternalTunnel, int64, error) {
+	var total int64
+	if err := DB.Model(&ExternalTunnel{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var tunnels []ExternalTunnel
+	q := DB.Order("created_at DESC").Offset(offset)
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&tunnels).Error; err != nil {
+		return nil, 0, err
+	}
+	return tunnels, total, nil
+}
+
+func GetExternalTunnelsByMachineID(machineID string) ([]ExternalTunnel, error) {
+	var tunnels []ExternalTunnel
+	if err := DB.Where("machine_id = ?", machineID).Find(&tunnels).Error; err != nil {
+		return nil, err
+	}
+	return tunnels, nil
+}
+
+func GetExternalTunnel(id string) (*ExternalTunnel, error) {
+	var t ExternalTunnel
+	if err := DB.First(&t, "id = ?", id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, &apperrors.NotFoundError{Resource: "external_tunnel", ID: id}
+		}
+		return nil, err
+	}
+	return &t, nil
+}
+
+func CreateExternalTunnel(t *ExternalTunnel) error {
+	return DB.Create(t).Error
+}
+
+func DeleteExternalTunnel(id string) error {
+	return DB.Delete(&ExternalTunnel{}, "id = ?", id).Error
+}
+
+func DeleteExternalTunnelsByMachineID(machineID string) error {
+	return DB.Where("machine_id = ?", machineID).Delete(&ExternalTunnel{}).Error
 }
 
 // Bot Session Repository
@@ -991,8 +1106,13 @@ func CountEvents(f EventFilter) (int64, error) {
 }
 
 // PurgeBotSessions deletes all expired bot sessions.
+//
+// We bind a Go time.Time as the comparison anchor instead of SQLite's
+// datetime('now'), because GORM writes time.Time stamps in local time but
+// datetime('now') returns UTC — on any non-UTC host the comparison was
+// off by the local offset and quietly purged active sessions.
 func PurgeBotSessions() error {
-	return DB.Where("expires_at < ?", gorm.Expr("datetime('now')")).Delete(&BotSession{}).Error
+	return DB.Where("expires_at < ?", time.Now()).Delete(&BotSession{}).Error
 }
 
 // ── TOTP Devices ─────────────────────────────────────────────────────────────

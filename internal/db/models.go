@@ -246,6 +246,9 @@ type AppSettings struct {
 	Fail2banIgnoreIPs string `json:"fail2ban_ignore_ips"` // JSON array of whitelisted CIDRs/IPs
 	// UpdateChannel controls which release stream to track: "stable" (default), "beta", or "alpha".
 	UpdateChannel string `json:"update_channel"`
+	// ExternalAPIKey is the bearer token for the /api/v1/* external REST API.
+	// If the GOPHER_API_KEY environment variable is set it takes precedence over this field.
+	ExternalAPIKey string `json:"-"` // never serialised — returned only via dedicated endpoints
 	// Rathole noise-transport keypair. Generated lazily on first reconcile and
 	// then frozen — rotating the private key would invalidate every machine's
 	// client.toml until a fresh push lands. Empty values mean the upgrade
@@ -315,12 +318,47 @@ func (k *SSHKey) AfterFind(*gorm.DB) error {
 	return nil
 }
 
+// ExternalMachine tracks machines bootstrapped via the external REST API.
+// A record is created when POST /api/v1/machines is called. Once the VM runs
+// the bootstrap script, MachineID is set and the underlying Machine record's
+// Status field reflects connectivity.
+type ExternalMachine struct {
+	ID        string    `json:"id" gorm:"primaryKey"`
+	TokenID   string    `json:"token_id"`   // BootstrapToken.ID
+	MachineID *string   `json:"machine_id"` // set once the VM registers
+	PublicSSH bool      `json:"public_ssh"`
+	SSHKeyID  string    `json:"ssh_key_id"`
+	ErrorMsg  string    `json:"error,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ExternalTunnel tracks service tunnels created via the external REST API.
+// A record is created when POST /api/v1/tunnels is called against an already-connected
+// machine. Creation is synchronous — the tunnel is active or failed immediately.
+type ExternalTunnel struct {
+	ID         string    `json:"id" gorm:"primaryKey"`
+	MachineID  string    `json:"machine_id"` // must be a connected ExternalMachine's machine_id
+	TunnelID   string    `json:"tunnel_id"`  // Tunnel.ID created for this record
+	Subdomain  string    `json:"subdomain"`
+	TargetIP   string    `json:"target_ip"`
+	TargetPort int       `json:"target_port"`
+	Status     string    `json:"status"` // active | failed
+	TunnelURL  string    `json:"tunnel_url"`
+	ErrorMsg   string    `json:"error,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
 // Event is the unified record for everything worth surfacing on the dashboard
 // or feeding to the (forthcoming) notifications subsystem: lifecycle changes,
 // auth events, health-check transitions, firewall changes, etc.
 //
 // The dashboard "recent activity" widget and the security audit log both read
 // from this single table — filtered by Source / Severity / time range.
+//
+// Replaces the older single-purpose ActivityEvent struct (kept as an alias
+// below for any external import that hasn't been updated yet).
 type Event struct {
 	ID        string    `json:"id" gorm:"primaryKey"`
 	CreatedAt time.Time `json:"created_at" gorm:"index"`
@@ -369,8 +407,10 @@ type Event struct {
 // rename target explicit.
 func (Event) TableName() string { return "events" }
 
-// ActivityEvent is a back-compat alias kept for any external callers still
-// referring to the old type. New code should use Event.
+// ActivityEvent is a back-compat alias for the old simpler activity-feed
+// struct. New code should use Event directly. The alias keeps existing
+// AutoMigrate / repository call sites compiling during the unified-events
+// rollout.
 //
 // Deprecated: use Event.
 type ActivityEvent = Event

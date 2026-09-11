@@ -46,12 +46,6 @@ if [ -z "$TOKEN" ]; then
   exit 1
 fi
 
-# ── Interactive prompts via /dev/tty (safe when piped via curl | bash) ────────
-if [ ! -c /dev/tty ]; then
-  echo "ERROR: No terminal available. Run the script directly."
-  exit 1
-fi
-
 echo "=== Gopher Machine Bootstrap ==="
 echo ""
 
@@ -84,16 +78,32 @@ if [ -x /usr/local/bin/gopher-uninstall ] || [ -f /etc/systemd/system/rathole-cl
   echo ""
 fi
 
-printf "Machine name (e.g. 'web-server'): " >/dev/tty
-read -r MACHINE_NAME </dev/tty
-while [ -z "$MACHINE_NAME" ]; do
-  printf "Machine name cannot be empty. Try again: " >/dev/tty
+# Prefer the explicit env var. Otherwise prompt only when /dev/tty is actually
+# usable — the device file exists in many non-interactive contexts (piped SSH,
+# containers) but reads/writes fail with "no such device or address". Probe
+# with a real open before relying on it.
+if [ -n "$GOPHER_MACHINE_NAME" ]; then
+  MACHINE_NAME="$GOPHER_MACHINE_NAME"
+  echo "Machine name: $MACHINE_NAME"
+elif (exec </dev/tty) 2>/dev/null; then
+  printf "Machine name (e.g. 'web-server'): " >/dev/tty
   read -r MACHINE_NAME </dev/tty
-done
+  while [ -z "$MACHINE_NAME" ]; do
+    printf "Machine name cannot be empty. Try again: " >/dev/tty
+    read -r MACHINE_NAME </dev/tty
+  done
+else
+  # Non-interactive caller didn't pass GOPHER_MACHINE_NAME — fall back to
+  # the box's own hostname so the bootstrap still completes. Better than
+  # exiting; the operator can rename it from the dashboard later.
+  MACHINE_NAME=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "unnamed-machine")
+  echo "Machine name: $MACHINE_NAME (auto-derived; pass GOPHER_MACHINE_NAME to override)"
+fi
 # $USER isn't guaranteed to be set under `curl | bash` (cron, minimal sudo,
 # bare containers). Fall back to the real user so the rathole-client systemd
 # unit never silently gets User= empty (which runs it as root).
-SSH_USER="${USER:-$(id -un)}"
+# GOPHER_SSH_USER lets headless callers (external API bootstraps) override.
+SSH_USER="${GOPHER_SSH_USER:-${USER:-$(id -un)}}"
 echo "SSH user: $SSH_USER"
 
 handle_sudo_failure() {
@@ -283,18 +293,6 @@ echo "  rathole binary: $RATHOLE_BIN"
 # ── Write rathole client config ───────────────────────────────────────────────
 echo "Writing rathole client config..."
 
-if [ -f "$CLIENT_CFG" ]; then
-  echo "WARNING: existing rathole config detected at $CLIENT_CFG"
-  printf "Continue and overwrite? [y/N]: " >/dev/tty
-  read -r OVERWRITE_CONFIRM </dev/tty
-  case "$OVERWRITE_CONFIRM" in
-    [yY]|[yY][eE][sS]) ;;
-    *)
-      echo "Aborted by user"
-      exit 1
-      ;;
-  esac
-fi
 
 $SUDO mkdir -p "$RATHOLE_DIR" || handle_sudo_failure
 echo "$RATHOLE_CONFIG" | $SUDO tee "$CLIENT_CFG" >/dev/null || handle_sudo_failure

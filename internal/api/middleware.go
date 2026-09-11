@@ -5,11 +5,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"runtime/debug"
 	"time"
 
 	"github.com/go-chi/cors"
 	"github.com/smalex-z/gopher/internal/api/response"
+	"github.com/smalex-z/gopher/internal/db"
 	"github.com/smalex-z/gopher/internal/service"
 )
 
@@ -50,6 +52,32 @@ func AuthMiddleware(authSvc *service.AuthService) func(http.Handler) http.Handle
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			cookie, err := r.Cookie("gopher_session")
 			if err != nil || !authSvc.ValidateSession(cookie.Value) {
+				response.Error(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// APIKeyMiddleware validates Bearer token auth for the external /api/v1/* routes.
+// Key resolution order: GOPHER_API_KEY env var → AppSettings.ExternalAPIKey in DB.
+// Returns 503 when no key is configured at all, 401 when the key is wrong.
+func APIKeyMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			apiKey := os.Getenv("GOPHER_API_KEY")
+			if apiKey == "" {
+				if settings, err := db.GetSettings(); err == nil {
+					apiKey = settings.ExternalAPIKey
+				}
+			}
+			if apiKey == "" {
+				response.Error(w, http.StatusServiceUnavailable, "external API not configured: generate an API key in the Access Control page")
+				return
+			}
+			auth := r.Header.Get("Authorization")
+			if len(auth) < 8 || auth[:7] != "Bearer " || auth[7:] != apiKey {
 				response.Error(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}

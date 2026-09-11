@@ -222,6 +222,14 @@ func (s *BootstrapService) Register(req BootstrapRequest, serverHost string) (*B
 	// for the next health-poll cycle).
 	go goSafe("awaitAgentReady", func() { s.awaitAgentReady(machine) })
 
+	// If this bootstrap was triggered by the external API, record the machine ID.
+	if em, err := db.GetExternalMachineByTokenID(bt.ID); err == nil {
+		machineID := machine.ID
+		em.MachineID = &machineID
+		em.UpdatedAt = time.Now()
+		_ = db.UpdateExternalMachine(em)
+	}
+
 	return &BootstrapResponse{
 		TunnelPort:      machine.TunnelPort,
 		RatholeToken:    ratholeToken,

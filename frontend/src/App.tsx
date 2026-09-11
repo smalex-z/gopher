@@ -13,6 +13,7 @@ import NetworkMapPage from './pages/NetworkMapPage'
 import SSHKeysPage from './pages/SSHKeysPage'
 import FirewallPage from './pages/FirewallPage'
 import SecurityPage from './pages/SecurityPage'
+import DocsPage from './pages/DocsPage'
 import LogsPage from './pages/LogsPage'
 import SetupPage from './pages/SetupPage'
 import LoginPage from './pages/LoginPage'
@@ -197,6 +198,7 @@ function AppShell() {
           <Route path="/keys" element={<SSHKeysPage />} />
           <Route path="/firewall" element={<FirewallPage />} />
           <Route path="/security" element={<SecurityPage />} />
+          <Route path="/docs" element={<DocsPage />} />
           <Route path="/logs" element={<LogsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

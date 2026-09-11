@@ -74,7 +74,9 @@ func Initialize(dsn string) error {
 		return fmt.Errorf("failed to disable foreign_keys for migration: %w", err)
 	}
 
-	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &MigrationToken{}, &AppSettings{}, &SSHKey{}, &FirewallRule{}, &BotSession{}, &DashboardSession{}, &TOTPDevice{}, &HealthCheck{}, &Event{}); err != nil {
+	// ActivityEvent is now an alias for Event; we only need to register the
+	// underlying type once.
+	if err := DB.AutoMigrate(&VPSConfig{}, &Machine{}, &Tunnel{}, &BootstrapToken{}, &MigrationToken{}, &AppSettings{}, &SSHKey{}, &FirewallRule{}, &BotSession{}, &DashboardSession{}, &TOTPDevice{}, &ExternalMachine{}, &ExternalTunnel{}, &HealthCheck{}, &Event{}); err != nil {
 		return fmt.Errorf("failed to auto-migrate: %w", err)
 	}
 
