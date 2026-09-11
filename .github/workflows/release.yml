@@ -223,20 +223,21 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Publish GitHub release
-        # Stable tags are created as DRAFTS: the repo has immutable releases
-        # enabled, so a release freezes (assets locked, undeletable) the moment
-        # it is published — the offline minisign signature must therefore be
-        # attached BEFORE publish. scripts/sign-release.sh signs the draft and
-        # flips it live as its final step. Prereleases (alpha/beta) publish
-        # directly, unsigned — the updater tolerates that on those channels,
-        # and immutability freezes them as-is.
+      - name: Create release draft with assets
+        # ALWAYS create as a draft first. The repo has immutable releases: a
+        # release freezes (assets locked) the moment it is published, and
+        # GitHub only accepts asset uploads while it is still a draft. So the
+        # binaries must be attached to the draft BEFORE it goes live —
+        # publishing directly (draft:false) fails the asset upload for
+        # prereleases and would freeze a stable release unsigned.
+        #   - Stable: scripts/sign-release.sh signs the draft, then publishes it.
+        #   - Prerelease: the next step publishes the draft (assets already on).
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ env.TAG }}
           name: ${{ env.TAG }}
           prerelease: ${{ steps.release_meta.outputs.prerelease }}
-          draft: ${{ steps.release_meta.outputs.prerelease == 'false' }}
+          draft: true
           # Stable drafts carry a one-line banner against publishing from the
           # UI — doing so would freeze the release unsigned (immutable
           # releases), permanently refused by every updater, burning the
@@ -248,3 +249,13 @@ jobs:
             dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
           generate_release_notes: true
+
+      - name: Publish prerelease (flip draft live; assets already attached)
+        # Prereleases (alpha/beta) auto-publish here now that their binaries are
+        # attached to the draft above. Immutability freezes the release WITH its
+        # assets, which is the whole point. Stable releases are intentionally
+        # left as drafts for scripts/sign-release.sh to sign + publish.
+        if: ${{ steps.release_meta.outputs.prerelease == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${TAG}" --draft=false --prerelease
