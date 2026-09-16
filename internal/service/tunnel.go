@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -189,6 +190,49 @@ func (s *TunnelService) CheckServerPort(port int) (available bool, reason string
 	return true, ""
 }
 
+// normalizeAliases validates the extra subdomain labels for a tunnel and returns
+// the JSON to store in Tunnel.Aliases. Aliases are HTTP-subdomain-only: they're
+// dropped when the tunnel has no primary subdomain or is UDP. Rejects invalid
+// labels, the primary itself, and any label already claimed by another tunnel.
+// excludeTunnelID is the tunnel being updated (skipped in the collision scan);
+// pass "" on create.
+func normalizeAliases(primary string, aliases []string, transport, excludeTunnelID string) (string, error) {
+	if primary == "" || transport == "udp" || len(aliases) == 0 {
+		return "", nil
+	}
+	used, err := db.UsedSubdomains(excludeTunnelID)
+	if err != nil {
+		return "", err
+	}
+	seen := map[string]bool{primary: true}
+	out := make([]string, 0, len(aliases))
+	for _, raw := range aliases {
+		a := strings.TrimSpace(raw)
+		if a == "" {
+			continue
+		}
+		if err := config.ValidateSubdomain(a); err != nil {
+			return "", &apperrors.ValidationError{Field: "aliases", Message: fmt.Sprintf("alias %q: %v", a, err)}
+		}
+		if a == primary {
+			return "", &apperrors.ValidationError{Field: "aliases", Message: fmt.Sprintf("alias %q duplicates the primary subdomain", a)}
+		}
+		if seen[a] {
+			continue // dedupe within the request
+		}
+		if _, taken := used[a]; taken {
+			return "", &apperrors.ConflictError{Message: fmt.Sprintf("subdomain %q is already in use", a)}
+		}
+		seen[a] = true
+		out = append(out, a)
+	}
+	if len(out) == 0 {
+		return "", nil
+	}
+	b, _ := json.Marshal(out)
+	return string(b), nil
+}
+
 func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) {
 	settings, err := db.GetSettings()
 	if err != nil {
@@ -214,11 +258,11 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 		if err := config.ValidateSubdomain(req.Subdomain); err != nil {
 			return nil, &apperrors.ValidationError{Field: "subdomain", Message: err.Error()}
 		}
-		exists, err := db.CheckSubdomainExists(req.Subdomain)
+		used, err := db.UsedSubdomains("")
 		if err != nil {
 			return nil, err
 		}
-		if exists {
+		if _, taken := used[req.Subdomain]; taken {
 			return nil, &apperrors.ConflictError{Message: "subdomain already exists"}
 		}
 	}
@@ -289,11 +333,17 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 		authHash = string(h)
 	}
 
+	aliasJSON, err := normalizeAliases(req.Subdomain, req.Aliases, transport, "")
+	if err != nil {
+		return nil, err
+	}
+
 	tunnel := &db.Tunnel{
 		ID:                   shortToken(),
 		MachineID:            req.MachineID,
 		Name:                 req.Name,
 		Subdomain:            req.Subdomain,
+		Aliases:              aliasJSON,
 		LocalPort:            req.LocalPort,
 		RatholePort:          ratholePort,
 		RatholeToken:         secretToken(),
@@ -314,6 +364,7 @@ func (s *TunnelService) Create(req dto.CreateTunnelRequest) (*db.Tunnel, error) 
 		UpdatedAt:            time.Now(),
 	}
 
+	tunnel.AliasList = tunnel.AliasSubdomains()
 	if err := db.CreateTunnel(tunnel); err != nil {
 		return nil, err
 	}
@@ -423,6 +474,7 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 	// mutation made that compare a no-op, so subdomain edits updated the DB
 	// (and the UI) but never touched Caddy — it kept serving the old block.
 	oldSubdomain := tunnel.Subdomain
+	oldAliases := tunnel.Aliases
 
 	if req.Subdomain != tunnel.Subdomain {
 		if req.Subdomain != "" && settings.Domain == "" {
@@ -431,11 +483,11 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 		if err := config.ValidateSubdomain(req.Subdomain); err != nil {
 			return nil, &apperrors.ValidationError{Field: "subdomain", Message: err.Error()}
 		}
-		exists, err := db.CheckSubdomainExists(req.Subdomain)
+		used, err := db.UsedSubdomains(tunnel.ID)
 		if err != nil {
 			return nil, err
 		}
-		if exists {
+		if _, taken := used[req.Subdomain]; taken {
 			return nil, &apperrors.ConflictError{Message: "subdomain already exists"}
 		}
 		tunnel.Subdomain = req.Subdomain
@@ -486,6 +538,12 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 	tunnel.AuthTTL = req.AuthTTL
 	tunnel.AuthAllowIP = req.AuthAllowIP
 	tunnel.TLSSkipVerify = req.TLSSkipVerify && tunnel.Subdomain != "" && !tunnel.NoTLS && tunnel.Transport != "udp"
+	aliasJSON, err := normalizeAliases(tunnel.Subdomain, req.Aliases, tunnel.Transport, tunnel.ID)
+	if err != nil {
+		return nil, err
+	}
+	tunnel.Aliases = aliasJSON
+	tunnel.AliasList = tunnel.AliasSubdomains()
 	tunnel.UpdatedAt = time.Now()
 
 	if err := db.UpdateTunnel(tunnel); err != nil {
@@ -562,7 +620,7 @@ func (s *TunnelService) Update(id string, req dto.UpdateTunnelRequest) (*db.Tunn
 
 	// If bot protection or TLS skip verify toggled (and the subdomain branch
 	// above didn't already rewrite), refresh the Caddy block.
-	if oldSubdomain == tunnel.Subdomain && (oldBotProtection != tunnel.BotProtectionEnabled || oldAuthEnabled != tunnel.AuthEnabled || oldTLSSkipVerify != tunnel.TLSSkipVerify) && tunnel.Subdomain != "" && s.local != nil {
+	if oldSubdomain == tunnel.Subdomain && (oldBotProtection != tunnel.BotProtectionEnabled || oldAuthEnabled != tunnel.AuthEnabled || oldTLSSkipVerify != tunnel.TLSSkipVerify || oldAliases != tunnel.Aliases) && tunnel.Subdomain != "" && s.local != nil {
 		if err := s.local.WriteServiceTunnelCaddy(tunnel); err != nil {
 			log.Printf("tunnel update: refresh caddy block for %s: %v", tunnel.ID, err)
 		}

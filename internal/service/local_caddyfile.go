@@ -66,11 +66,20 @@ func (s *LocalSetupService) ReconcileRouterCaddyBlock() {
 	}
 }
 
-func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool, proxied bool, bindIP string, tlsSkipVerify bool, private bool) string {
+func buildTunnelCaddyBlock(subdomain, domain string, aliases []string, ratholePort int, noTLS bool, proxied bool, bindIP string, tlsSkipVerify bool, private bool) string {
 	scheme := ""
 	if noTLS {
 		scheme = "http://"
 	}
+	// Caddy accepts multiple comma-separated site addresses that share one
+	// block (TLS, reverse_proxy, everything). Build "<primary>.<domain>,
+	// <alias>.<domain>, ..." so several hostnames route to this one tunnel.
+	hosts := make([]string, 0, 1+len(aliases))
+	hosts = append(hosts, fmt.Sprintf("%s%s.%s", scheme, subdomain, domain))
+	for _, a := range aliases {
+		hosts = append(hosts, fmt.Sprintf("%s%s.%s", scheme, a, domain))
+	}
+	addr := strings.Join(hosts, ", ")
 	// Gated tunnels (bot protection and/or password auth) route through the
 	// Gopher server itself (same port as the dashboard) so the gate middleware
 	// can intercept requests before they reach rathole. Host header routing
@@ -93,10 +102,10 @@ func buildTunnelCaddyBlock(subdomain, domain string, ratholePort int, noTLS bool
 	// TLS skip verify: only meaningful when the upstream is itself HTTPS (noTLS=false,
 	// not routed through Gopher) and the backend uses a self-signed cert (e.g. Proxmox).
 	if tlsSkipVerify && !noTLS && !proxied {
-		return fmt.Sprintf("%s%s.%s {\n    reverse_proxy %s:%d {\n        transport http {\n            tls_insecure_skip_verify\n        }\n    }\n}\n",
-			scheme, subdomain, domain, upstream, upstreamPort)
+		return fmt.Sprintf("%s {\n    reverse_proxy %s:%d {\n        transport http {\n            tls_insecure_skip_verify\n        }\n    }\n}\n",
+			addr, upstream, upstreamPort)
 	}
-	return fmt.Sprintf("%s%s.%s {\n    reverse_proxy %s:%d\n}\n", scheme, subdomain, domain, upstream, upstreamPort)
+	return fmt.Sprintf("%s {\n    reverse_proxy %s:%d\n}\n", addr, upstream, upstreamPort)
 }
 
 // caddyCustomHeaderLines are the boilerplate comment lines we emit inside
