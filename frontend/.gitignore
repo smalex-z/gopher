@@ -1,2 +1,5 @@
 node_modules/
 dist/
+
+# also ignore a node_modules symlink/file, not just a directory (a symlink slipped past node_modules/)
+node_modules
