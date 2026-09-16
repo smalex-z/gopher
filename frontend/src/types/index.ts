@@ -105,6 +105,7 @@ export interface Tunnel {
   machine_id: string
   name: string
   subdomain: string
+  aliases?: string[]   // extra subdomain labels routing to this same tunnel
   local_port: number
   rathole_port: number
   protocol: string

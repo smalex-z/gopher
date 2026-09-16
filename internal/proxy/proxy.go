@@ -373,7 +373,7 @@ func resolveTunnel(host string) *db.Tunnel {
 	if len(parts) < 2 {
 		return nil
 	}
-	t, err := db.GetTunnelBySubdomain(parts[0])
+	t, err := db.GetTunnelByAnySubdomain(parts[0])
 	if err != nil {
 		return nil
 	}

@@ -16,6 +16,7 @@ interface FormState {
   machine_id: string
   name: string
   subdomain: string
+  aliases: string        // newline/comma-delimited labels in the input; array on wire
   local_port: number
   rathole_port: number
   transport: string
@@ -33,10 +34,16 @@ interface FormState {
 }
 
 const defaultForm: FormState = {
-  machine_id: '', name: '', subdomain: '', local_port: 3000, rathole_port: 0,
+  machine_id: '', name: '', subdomain: '', aliases: '', local_port: 3000, rathole_port: 0,
   transport: 'tcp', no_tls: false, private: false, tls_skip_verify: false,
   bot_protection_enabled: false, bot_protection_ttl: 0, bot_protection_allow_ip: '',
   auth_enabled: false, auth_password: '', auth_password_set: false, auth_ttl: 0, auth_allow_ip: '',
+}
+
+function aliasesToArray(raw: string, domain?: string): string[] {
+  const parts = raw.split(/[\n,]/).map(s => s.trim().toLowerCase()).filter(Boolean)
+  const labels = parts.map(p => (domain && p.endsWith('.' + domain)) ? p.slice(0, -(domain.length + 1)) : p).filter(Boolean)
+  return Array.from(new Set(labels))
 }
 
 function cidrToJSON(raw: string): string {
@@ -90,6 +97,7 @@ export default function TunnelsPage() {
       machine_id: t.machine_id,
       name: t.name,
       subdomain: t.subdomain ?? '',
+      aliases: (t.aliases ?? []).join('\n'),
       local_port: t.local_port,
       rathole_port: t.rathole_port,
       transport: t.transport ?? 'tcp',
@@ -168,7 +176,7 @@ export default function TunnelsPage() {
   }, [searchParams, setSearchParams])
 
   const createMutation = useMutation({
-    mutationFn: (d: Partial<FormState>) => tunnelsApi.create(d),
+    mutationFn: (d: Partial<Tunnel>) => tunnelsApi.create(d),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['tunnels'] })
       setModal({ isOpen: false })
@@ -203,6 +211,7 @@ export default function TunnelsPage() {
         name: t.name,
         local_port: t.local_port,
         subdomain: t.subdomain,
+        aliases: t.aliases ?? [],
         private: !t.private,
         bot_protection_enabled: t.bot_protection_enabled,
         bot_protection_ttl: t.bot_protection_ttl,
@@ -402,8 +411,13 @@ export default function TunnelsPage() {
                               <div className="flex items-center gap-2 font-mono text-xs text-gray-700">
                                 <div className="flex flex-col gap-0.5">
                                   {t.subdomain && domain && (
-                                    <a href={`https://${t.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
-                                      className="text-blue-600 hover:underline">{t.subdomain}.{domain}</a>
+                                    <>
+                                      <a href={`https://${t.subdomain}.${domain}`} target="_blank" rel="noopener noreferrer"
+                                        className="text-blue-600 hover:underline">{t.subdomain}.{domain}</a>
+                                      {(t.aliases?.length ?? 0) > 0 && (
+                                        <span className="ml-1 text-xs text-gray-400">+ {t.aliases!.map(a => `${a}.${domain}`).join(', ')}</span>
+                                      )}
+                                    </>
                                   )}
                                   {/* edge bind — 127.0.0.1 for private, server host for public */}
                                   <span className={isPrivate ? 'text-gray-400' : 'text-gray-500'}>
@@ -660,6 +674,22 @@ export default function TunnelsPage() {
                   </label>
                   <input type="text" value={form.subdomain} onChange={e => setForm(f => ({ ...f, subdomain: e.target.value }))} placeholder="photos"
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  {form.subdomain && (
+                    <div className="mt-2">
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        Additional hostnames
+                        <span className="ml-1 font-normal text-gray-400">(optional — one per line; all route to this tunnel)</span>
+                      </label>
+                      <textarea value={form.aliases} onChange={e => setForm(f => ({ ...f, aliases: e.target.value }))}
+                        rows={2} placeholder={"member\nwww"}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                      {domain && aliasesToArray(form.aliases, domain).length > 0 && (
+                        <div className="mt-1 text-xs text-gray-400">
+                          Also serves: {aliasesToArray(form.aliases, domain).map(a => `${a}.${domain}`).join(', ')}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {form.subdomain ? (
                     <div className="mt-2 space-y-2">
                       {domain && (
@@ -881,6 +911,7 @@ export default function TunnelsPage() {
                     data: {
                       name: form.name,
                       subdomain: routingEnabled && form.transport !== 'udp' ? form.subdomain : '',
+                      aliases: (routingEnabled && form.transport !== 'udp' && form.subdomain) ? aliasesToArray(form.aliases, domain) : [],
                       local_port: form.local_port,
                       private: form.private,
                       tls_skip_verify: form.tls_skip_verify,
@@ -899,7 +930,7 @@ export default function TunnelsPage() {
                 </button>
               ) : (
                 <button
-                  onClick={() => createMutation.mutate({ ...form, subdomain: routingEnabled && form.transport !== 'udp' ? form.subdomain : '' })}
+                  onClick={() => createMutation.mutate({ ...form, subdomain: routingEnabled && form.transport !== 'udp' ? form.subdomain : '', aliases: (routingEnabled && form.transport !== 'udp' && form.subdomain) ? aliasesToArray(form.aliases, domain) : [] })}
                   disabled={!canCreate}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm disabled:opacity-50 disabled:cursor-not-allowed">
                   {createMutation.isPending ? 'Creating...' : 'Create Tunnel'}

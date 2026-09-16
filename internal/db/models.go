@@ -3,6 +3,8 @@ package db
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -128,17 +130,23 @@ type HealthCheck struct {
 }
 
 type Tunnel struct {
-	ID           string `json:"id" gorm:"primaryKey"`
-	MachineID    string `json:"machine_id"`
-	Name         string `json:"name"`
-	Subdomain    string `json:"subdomain"`
-	LocalPort    int    `json:"local_port"`
-	RatholePort  int    `json:"rathole_port"`
-	RatholeToken string `json:"rathole_token"`
-	Protocol     string `json:"protocol"`
-	Transport    string `json:"transport"` // "tcp" (default) or "udp"
-	NoTLS        bool   `json:"no_tls"`    // skip Caddy HTTPS; use plain http://
-	Private      bool   `json:"private"`   // bind 127.0.0.1 (VPS-local only) instead of 0.0.0.0
+	ID        string `json:"id" gorm:"primaryKey"`
+	MachineID string `json:"machine_id"`
+	Name      string `json:"name"`
+	Subdomain string `json:"subdomain"`
+	// Aliases are additional subdomain labels that route to this same tunnel,
+	// beyond Subdomain — so e.g. both members.<domain> and member.<domain> can
+	// serve one tunnel. Stored as a JSON array of labels; exposed to the API as
+	// AliasList (array). HTTP subdomain tunnels only; empty = single hostname.
+	Aliases      string   `json:"-" gorm:"column:aliases"`
+	AliasList    []string `json:"aliases" gorm:"-"` // computed from Aliases on read
+	LocalPort    int      `json:"local_port"`
+	RatholePort  int      `json:"rathole_port"`
+	RatholeToken string   `json:"rathole_token"`
+	Protocol     string   `json:"protocol"`
+	Transport    string   `json:"transport"` // "tcp" (default) or "udp"
+	NoTLS        bool     `json:"no_tls"`    // skip Caddy HTTPS; use plain http://
+	Private      bool     `json:"private"`   // bind 127.0.0.1 (VPS-local only) instead of 0.0.0.0
 	// Bot protection — opt-in per tunnel, HTTP subdomain tunnels only.
 	BotProtectionEnabled bool   `json:"bot_protection_enabled"`
 	BotProtectionTTL     int    `json:"bot_protection_ttl"`      // session TTL in seconds; 0 = default (86400)
@@ -173,7 +181,37 @@ type Tunnel struct {
 // a password is configured without ever seeing the hash.
 func (t *Tunnel) AfterFind(*gorm.DB) error {
 	t.AuthPasswordSet = t.AuthPasswordHash != ""
+	t.AliasList = t.AliasSubdomains()
 	return nil
+}
+
+// AliasSubdomains parses the Aliases JSON column into a clean slice of non-empty
+// subdomain labels. Returns nil for the common single-hostname case.
+func (t *Tunnel) AliasSubdomains() []string {
+	if strings.TrimSpace(t.Aliases) == "" {
+		return nil
+	}
+	var raw []string
+	if err := json.Unmarshal([]byte(t.Aliases), &raw); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, a := range raw {
+		if s := strings.TrimSpace(a); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// AllSubdomains returns the primary Subdomain followed by any aliases (all
+// non-empty). Used for hostname routing and uniqueness checks.
+func (t *Tunnel) AllSubdomains() []string {
+	var out []string
+	if t.Subdomain != "" {
+		out = append(out, t.Subdomain)
+	}
+	return append(out, t.AliasSubdomains()...)
 }
 
 type BootstrapToken struct {

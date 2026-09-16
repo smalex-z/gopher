@@ -1152,7 +1152,7 @@ func (s *LocalSetupService) reconcileAllTunnelCaddyBlocks(settings *db.AppSettin
 		if t.Subdomain == "" || t.Transport == "udp" {
 			continue
 		}
-		block := buildTunnelCaddyBlock(t.Subdomain, settings.Domain, t.RatholePort, t.NoTLS, t.BotProtectionEnabled || t.AuthEnabled, settings.BindIP, t.TLSSkipVerify, t.Private)
+		block := buildTunnelCaddyBlock(t.Subdomain, settings.Domain, t.AliasSubdomains(), t.RatholePort, t.NoTLS, t.BotProtectionEnabled || t.AuthEnabled, settings.BindIP, t.TLSSkipVerify, t.Private)
 		path := managedTunnelCaddyPath(t.ID)
 		if err := writeLocalFile(path, block); err != nil {
 			return fmt.Errorf("failed to rewrite Caddy block for tunnel %s: %w", t.ID, err)

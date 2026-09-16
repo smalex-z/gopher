@@ -774,6 +774,47 @@ func DeleteFirewallRule(id string) error {
 
 // Bot Session Repository
 
+// GetTunnelByAnySubdomain resolves a subdomain label to a tunnel by its primary
+// Subdomain OR any of its Aliases. Used by the gated-tunnel proxy so alias
+// hostnames route to the same tunnel as the primary.
+func GetTunnelByAnySubdomain(label string) (*Tunnel, error) {
+	if t, err := GetTunnelBySubdomain(label); err == nil {
+		return t, nil
+	}
+	var tunnels []Tunnel
+	if err := DB.Where("aliases <> '' AND aliases IS NOT NULL").Find(&tunnels).Error; err != nil {
+		return nil, err
+	}
+	for i := range tunnels {
+		for _, a := range tunnels[i].AliasSubdomains() {
+			if a == label {
+				return &tunnels[i], nil
+			}
+		}
+	}
+	return nil, &apperrors.NotFoundError{Resource: "tunnel", ID: label}
+}
+
+// UsedSubdomains returns every subdomain label currently claimed (each tunnel's
+// primary + aliases), mapped to the owning tunnel ID, excluding excludeID.
+// Used to reject a new subdomain/alias that collides with an existing one.
+func UsedSubdomains(excludeID string) (map[string]string, error) {
+	var tunnels []Tunnel
+	if err := DB.Find(&tunnels).Error; err != nil {
+		return nil, err
+	}
+	used := make(map[string]string)
+	for i := range tunnels {
+		if tunnels[i].ID == excludeID {
+			continue
+		}
+		for _, s := range tunnels[i].AllSubdomains() {
+			used[s] = tunnels[i].ID
+		}
+	}
+	return used, nil
+}
+
 // GetTunnelBySubdomain returns the tunnel with the given subdomain value.
 func GetTunnelBySubdomain(subdomain string) (*Tunnel, error) {
 	var t Tunnel
